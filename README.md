@@ -35,4 +35,3 @@ service startup, and smoke checks.
 | `main/` | VibeSim simulator and Analyzer | `master` |
 | `user-facing-ui/` | Agent/conversation backend | `agent-http-api` |
 | `viz-ui/` | User-facing Analyzer UI | `main` |
-
