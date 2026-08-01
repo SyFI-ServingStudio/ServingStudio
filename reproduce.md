@@ -117,6 +117,20 @@ or multiple managed workspaces.
 
 ## 4. Credentials and configuration
 
+### Required for source checkout
+
+All four repositories are private. Configure GitHub HTTPS credentials (or use
+equivalent SSH URLs) before cloning. With GitHub CLI:
+
+```bash
+gh auth login
+gh auth setup-git
+git ls-remote https://github.com/serendipity-zk/VibeSimWorkspace.git HEAD
+```
+
+Use the organization's credential helper or secret store; never write a token
+into `.gitmodules`, `.env`, `reproduce.md`, or a shell script.
+
 ### Required for Agent conversations
 
 The backend copies selected entries from the host Codex home into a private
