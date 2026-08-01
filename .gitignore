@@ -1,0 +1,9 @@
+# Deployment/runtime state belongs beside the checked-out products, never in
+# the reproducible workspace commit.
+agent-workspaces/
+runtime-logs/
+tmp/
+.env
+.env.*
+!.env.example
+
