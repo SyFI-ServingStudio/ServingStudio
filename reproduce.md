@@ -10,9 +10,9 @@ The workspace repository records the exact verified commit of every component
 as a Git submodule. Clone it recursively:
 
 ```bash
-git clone --recurse-submodules \
-  https://github.com/serendipity-zk/VibeSimWorkspace.git vibesim-workspace
+git clone https://github.com/serendipity-zk/VibeSimWorkspace.git vibesim-workspace
 cd vibesim-workspace
+git submodule update --init
 ```
 
 For an existing clone, update the workspace first and then materialize the
@@ -20,8 +20,8 @@ commits recorded by that workspace revision:
 
 ```bash
 git pull --ff-only
-git submodule sync --recursive
-git submodule update --init --recursive
+git submodule sync
+git submodule update --init
 ```
 
 The current verified component baseline is:
@@ -35,6 +35,9 @@ The current verified component baseline is:
 The GLM development branch is intentionally not part of this released baseline.
 Do not run `git submodule update --remote` during deployment: that command moves
 to branch tips instead of reproducing the SHAs recorded by the meta-repo.
+The default flow deliberately skips VibeSim's nested TraceLab/vLLM alignment
+submodules because the Analyzer, simulator, and Agent runner build do not need
+them. Run `just init-alignment` only for alignment work.
 
 ## 2. Supported topology
 
