@@ -10,7 +10,8 @@ The workspace repository records the exact verified commit of every component
 as a Git submodule. Clone it recursively:
 
 ```bash
-git clone --recurse-submodules <workspace-repository-url> vibesim-workspace
+git clone --recurse-submodules \
+  https://github.com/serendipity-zk/VibeSimWorkspace.git vibesim-workspace
 cd vibesim-workspace
 ```
 

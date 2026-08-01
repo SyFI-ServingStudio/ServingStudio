@@ -7,7 +7,8 @@ It intentionally contains no product source code.
 ## Clone
 
 ```bash
-git clone --recurse-submodules <workspace-repository-url> vibesim-workspace
+git clone --recurse-submodules \
+  https://github.com/serendipity-zk/VibeSimWorkspace.git vibesim-workspace
 cd vibesim-workspace
 just check-tools
 just build
