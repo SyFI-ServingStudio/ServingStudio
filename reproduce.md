@@ -28,9 +28,9 @@ The current verified component baseline is:
 
 | Directory | Repository | Branch | Verified release commit |
 | --- | --- | --- | --- |
-| `main/` | `https://github.com/serendipity-zk/VibeSim.git` | `master` | `43c090029949579d9827eefea463639412c01d7a` |
-| `user-facing-ui/` | `https://github.com/serendipity-zk/VibeSimAgent.git` | `agent-http-api` | `49ffa6ac3ad64017ab6f1d7cd2aaf309edc8064c` |
-| `viz-ui/` | `https://github.com/serendipity-zk/VibeSimUI.git` | `main` | `d673570d1da338fec72d0d8ba3d56d81d2262a5e` |
+| `main/` | `https://github.com/serendipity-zk/VibeSim.git` | `master` | `98768124cd5732c3ccf04bfa802d44bfa42d263b` |
+| `user-facing-ui/` | `https://github.com/serendipity-zk/VibeSimAgent.git` | `agent-http-api` | `2eb3bd1493374e41caee30afcbc783e3e2f5d9ec` |
+| `viz-ui/` | `https://github.com/serendipity-zk/VibeSimUI.git` | `main` | `55c3f4a3da8fc1ff9a3f90f9243371599ff2ffc5` |
 
 The GLM development branch is intentionally not part of this released baseline.
 Do not run `git submodule update --remote` during deployment: that command moves
@@ -309,6 +309,9 @@ Update this section whenever the procedure changes.
 - 2026-08-01: an older clean meta-repo checkout fast-forwarded with
   `git pull --ff-only`; recursive sync/update retained the pinned component
   SHAs and initialized the nested TraceLab/vLLM submodules.
+- 2026-08-01: all user-facing README files were normalized to English and
+  updated for the Analyzer-owned result boundary; production Agent contracts
+  were updated and the meta-repo advanced to the verified component commits.
 - 2026-08-01: naive Ubuntu 24.04 container installed Git 2.43, uv 0.12.1,
   Node 22.14.0/npm 10.9.2, Rust stable, protoc 3.21.12, and mold 2.30.
 - 2026-08-01: clean VibeSimUI `npm ci && npm run build` passed. npm reported
@@ -319,4 +322,6 @@ Update this section whenever the procedure changes.
 - 2026-08-01: clean container three-service smoke passed through the Vite
   same-origin entry: `/`, workspaces, runs, predictions, kernel profiles, and
   kernel measurements all returned HTTP 200.
-- 2026-08-01: clean Agent Docker round-trip: pending.
+- 2026-08-01: clean Codex runner image build and non-GPU acceptance passed with
+  an isolated image tag. The gate verified non-root execution, mold/protoc,
+  simulator and Analyzer release-seed reuse, and the Launcher cache report.
