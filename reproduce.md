@@ -292,6 +292,9 @@ Update this section whenever the procedure changes.
 - 2026-08-01: clean remote clone reproduced all three release SHAs.
 - 2026-08-01: a dedicated meta-repo was created with all three components as
   branch-annotated submodules pinned to those verified SHAs.
+- 2026-08-01: an older clean meta-repo checkout fast-forwarded with
+  `git pull --ff-only`; recursive sync/update retained the pinned component
+  SHAs and initialized the nested TraceLab/vLLM submodules.
 - 2026-08-01: naive Ubuntu 24.04 container installed Git 2.43, uv 0.12.1,
   Node 22.14.0/npm 10.9.2, Rust stable, protoc 3.21.12, and mold 2.30.
 - 2026-08-01: clean VibeSimUI `npm ci && npm run build` passed. npm reported
