@@ -26,12 +26,8 @@ check-gpu:
 # recorded gitlinks remain the deployment source of truth.
 pull:
     git pull --ff-only
-    git submodule sync
-    git submodule update --init
-
-# Alignment is optional and owns the large nested TraceLab/vLLM checkouts.
-init-alignment:
-    git -C "{{workspace_root}}/main" submodule update --init --recursive
+    git submodule sync --recursive
+    git submodule update --init --recursive
 
 build-analyzer:
     cd "{{workspace_root}}/main" && cargo build -p analyzer --release
