@@ -28,9 +28,9 @@ The current verified component baseline is:
 
 | Directory | Repository | Branch | Verified release commit |
 | --- | --- | --- | --- |
-| `main/` | `https://github.com/serendipity-zk/VibeSim.git` | `master` | `98768124cd5732c3ccf04bfa802d44bfa42d263b` |
-| `user-facing-ui/` | `https://github.com/serendipity-zk/VibeSimAgent.git` | `agent-http-api` | `2eb3bd1493374e41caee30afcbc783e3e2f5d9ec` |
-| `viz-ui/` | `https://github.com/serendipity-zk/VibeSimUI.git` | `main` | `55c3f4a3da8fc1ff9a3f90f9243371599ff2ffc5` |
+| `main/` | `https://github.com/serendipity-zk/VibeSim.git` | `master` | `2e86e2196a026cbb0236d914df607924c37c11ca` |
+| `user-facing-ui/` | `https://github.com/serendipity-zk/VibeSimAgent.git` | `agent-http-api` | `4cf9ee16e0197864441c73c3cd9184f01ca75f78` |
+| `viz-ui/` | `https://github.com/serendipity-zk/VibeSimUI.git` | `main` | `0485291b421da2ccbfc9d04e941698b68b108692` |
 
 The GLM development branch is intentionally not part of this released baseline.
 Do not run `git submodule update --remote` during deployment: that command moves
@@ -331,3 +331,15 @@ Update this section whenever the procedure changes.
 - 2026-08-01: clean Codex runner image build and non-GPU acceptance passed with
   an isolated image tag. The gate verified non-root execution, mold/protoc,
   simulator and Analyzer release-seed reuse, and the Launcher cache report.
+- 2026-08-07: the baseline advanced to the alignment prediction pairing. All
+  three release SHAs were read back from GitHub with `git ls-remote` after push
+  and match the table in section 1.
+- 2026-08-07: `just build` passed on this baseline in 4m25s — Analyzer release
+  build, Agent `uv sync`, and UI `npm ci && npm run build`. Vite still reports
+  the same >500 kB chunk.
+- 2026-08-07: component test suites passed on the pinned SHAs — Analyzer
+  `cargo test -p analyzer` 173 tests, Agent `python -m unittest discover -s
+  tests` 125 tests, UI `npm run test:unit` 936 tests across 120 files.
+- 2026-08-07: the three-service smoke was NOT rerun for this baseline. Ports
+  60033/60034 were serving a development instance on the host, and taking them
+  over to test the release checkout would have disrupted it.
