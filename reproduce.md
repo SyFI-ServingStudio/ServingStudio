@@ -194,8 +194,14 @@ UV_CACHE_DIR="$TMPDIR/uv-cache-user-facing-ui" uv sync
 # This is the expensive first-time step. It builds the CUDA/Codex runner image,
 # prewarms the VibeSim Python environment, compiles the Cargo release seed, and
 # runs the non-GPU runner-image acceptance test.
+export CODEX_DOCKER_IMAGE="vibesim-ui-codex-runner:${USER}"
 CODEX_FORCE_IMAGE_BUILD=1 ./scripts/build-codex-runner-image.sh
 ```
+
+The user-specific image tag is required on a shared Docker daemon because the
+runner records the building account's UID/GID and home path. Preserve this
+environment variable when starting the backend below; do not rely on another
+account's shared `latest` tag.
 
 The workspace `justfile` wraps the already-tested build commands without hiding
 system package or credential setup:
