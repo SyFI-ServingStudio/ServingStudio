@@ -1,12 +1,12 @@
 [submodule "main"]
 	path = main
-	url = https://github.com/serendipity-zk/VibeSim.git
+	url = https://github.com/SyFI-VibeSim/VibeSim.git
 	branch = master
 [submodule "user-facing-ui"]
 	path = user-facing-ui
-	url = https://github.com/serendipity-zk/VibeSimAgent.git
+	url = https://github.com/SyFI-VibeSim/VibeSimAgent.git
 	branch = agent-http-api
 [submodule "viz-ui"]
 	path = viz-ui
-	url = https://github.com/serendipity-zk/VibeSimUI.git
+	url = https://github.com/SyFI-VibeSim/VibeSimUI.git
 	branch = main

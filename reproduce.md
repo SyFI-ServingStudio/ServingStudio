@@ -11,7 +11,7 @@ as a Git submodule. Clone it recursively:
 
 ```bash
 git clone --recurse-submodules \
-  https://github.com/serendipity-zk/VibeSimWorkspace.git vibesim-workspace
+  https://github.com/SyFI-VibeSim/VibeSimWorkspace.git vibesim-workspace
 cd vibesim-workspace
 ```
 
@@ -28,9 +28,9 @@ The current verified component baseline is:
 
 | Directory | Repository | Branch | Verified release commit |
 | --- | --- | --- | --- |
-| `main/` | `https://github.com/serendipity-zk/VibeSim.git` | `master` | `2e86e2196a026cbb0236d914df607924c37c11ca` |
-| `user-facing-ui/` | `https://github.com/serendipity-zk/VibeSimAgent.git` | `agent-http-api` | `4cf9ee16e0197864441c73c3cd9184f01ca75f78` |
-| `viz-ui/` | `https://github.com/serendipity-zk/VibeSimUI.git` | `main` | `0485291b421da2ccbfc9d04e941698b68b108692` |
+| `main/` | `https://github.com/SyFI-VibeSim/VibeSim.git` | `master` | `3866383827abe39a3463973f79c8f8f07fbeb2ab` |
+| `user-facing-ui/` | `https://github.com/SyFI-VibeSim/VibeSimAgent.git` | `agent-http-api` | `2c80deb6eedf4a99f27790e659cc057b7a085854` |
+| `viz-ui/` | `https://github.com/SyFI-VibeSim/VibeSimUI.git` | `main` | `3edaf8d8be290bd9a234ad49099ce9cd5a4039ae` |
 
 The GLM development branch is intentionally not part of this released baseline.
 Do not run `git submodule update --remote` during deployment: that command moves
@@ -125,7 +125,7 @@ equivalent SSH URLs) before cloning. With GitHub CLI:
 ```bash
 gh auth login
 gh auth setup-git
-git ls-remote https://github.com/serendipity-zk/VibeSimWorkspace.git HEAD
+git ls-remote https://github.com/SyFI-VibeSim/VibeSimWorkspace.git HEAD
 ```
 
 Use the organization's credential helper or secret store; never write a token
@@ -343,3 +343,19 @@ Update this section whenever the procedure changes.
 - 2026-08-07: the three-service smoke was NOT rerun for this baseline. Ports
   60033/60034 were serving a development instance on the host, and taking them
   over to test the release checkout would have disrupted it.
+- 2026-08-18: the baseline advanced to the typed request-frontend integration,
+  durable Agent final-handoff recovery, and corrected Analyzer UI selection
+  semantics. The three component branch tips and the new `SyFI-VibeSim` URLs
+  were verified directly against GitHub before recording their SHAs.
+- 2026-08-18: a clean Ubuntu 24.04 container installed Node 22.14.0/npm 10.9.2,
+  uv 0.12.5, Rust 1.97.1, protoc 3.21.12, and mold 2.30.0. The Analyzer cold
+  release build passed in 4m03s, including the local `req-frontend` dependency,
+  and Agent `uv sync` selected CPython 3.12.14 successfully.
+- 2026-08-18: a clean Node 22 container completed UI `npm ci`, all 937 unit
+  tests, and the production build. npm reported 3 moderate and 4 high audit
+  findings; Vite retained the existing >500 kB chunk warning.
+- 2026-08-18: the Agent clean-container suite ran 128 tests, with 125 passing.
+  Three model-selection assertions require the host
+  `~/.codex/models_cache.json` entries that advertise the `fast` service tier
+  and `max` effort, so those tests are not currently hermetic. This does not
+  block dependency setup, but the clean-container test gate is not fully green.
