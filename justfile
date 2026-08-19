@@ -39,7 +39,10 @@ sync-agent:
 build-ui:
     cd "{{workspace_root}}/viz-ui/app" && npm ci && npm run build
 
-build: build-analyzer sync-agent build-ui
+build-intro:
+    cd "{{workspace_root}}/vibesim-intro" && npm ci && npm run build:single
+
+build: build-analyzer sync-agent build-ui build-intro
 
 build-runner-image:
     cd "{{workspace_root}}/user-facing-ui" && \

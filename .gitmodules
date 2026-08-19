@@ -10,3 +10,7 @@
 	path = viz-ui
 	url = https://github.com/SyFI-VibeSim/VibeSimUI.git
 	branch = main
+[submodule "vibesim-intro"]
+	path = vibesim-intro
+	url = https://github.com/SyFI-VibeSim/vibesim-intro.git
+	branch = main

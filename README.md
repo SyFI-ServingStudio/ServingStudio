@@ -1,8 +1,8 @@
 # VibeSim Workspace
 
-This repository pins the three repositories that form the VibeSim application
-and keeps the reproducible build/deployment entry points in one small place.
-It intentionally contains no product source code.
+This repository pins the four repositories that form the VibeSim application
+and introduction site, and keeps the reproducible build/deployment entry points
+in one small place. It intentionally contains no product source code.
 
 ## Clone
 
@@ -36,3 +36,4 @@ service startup, and smoke checks.
 | `main/` | VibeSim simulator and Analyzer | `master` |
 | `user-facing-ui/` | Agent/conversation backend | `agent-http-api` |
 | `viz-ui/` | User-facing Analyzer UI | `main` |
+| `vibesim-intro/` | Standalone VibeSim introduction site | `main` |
