@@ -28,7 +28,7 @@ The current verified component baseline is:
 
 | Directory | Repository | Branch | Verified release commit |
 | --- | --- | --- | --- |
-| `main/` | `https://github.com/SyFI-VibeSim/VibeSim.git` | `master` | `3866383827abe39a3463973f79c8f8f07fbeb2ab` |
+| `main/` | `https://github.com/SyFI-VibeSim/VibeSim.git` | `master` | `48864532c291e5cd48d01efb515d63733496e420` |
 | `user-facing-ui/` | `https://github.com/SyFI-VibeSim/VibeSimAgent.git` | `agent-http-api` | `2c80deb6eedf4a99f27790e659cc057b7a085854` |
 | `viz-ui/` | `https://github.com/SyFI-VibeSim/VibeSimUI.git` | `main` | `3edaf8d8be290bd9a234ad49099ce9cd5a4039ae` |
 
