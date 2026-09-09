@@ -3,6 +3,7 @@
 agent-workspaces/
 runtime-logs/
 tmp/
+old-wt/
+uv-cache/
 .env
 .env.*
-!.env.example

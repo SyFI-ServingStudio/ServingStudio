@@ -27,6 +27,16 @@ Read the relevant README and local agent instructions before editing.
   working directory, command, and log path in the worktree's `progress.md`.
 - Follow each component's environment and test instructions; use `uv` in
   `VibeSim/`. Test the affected behavior and limit formatting to intended files.
+- Run `just setup-env` when setting up or moving the workspace. It writes absolute
+  `TMPDIR`/`UV_CACHE_DIR` paths to the ignored `.env`; root `just` loads it
+  automatically. Before direct shell commands, source the workspace-root `.env`.
+  Keep `.env`, `tmp/`, `old-wt/`, and `uv-cache/` untracked. Never run `uv` as root
+  to work around cache permissions.
+- Keep workspace setup/service logic in `scripts/`, expose entry points through
+  `justfile`, and keep `reproduce.md` aligned with those commands.
+- Before starting services, check all selected ports for conflicts. Follow the
+  per-user port convention in `reproduce.md`; never stop another user's service
+  or silently switch ports.
 - Run physical GPU checks with elevation; sandbox device failures do not prove
   that the host GPU is unavailable.
 - Read and maintain `goal.md`, `progress.md`, and `notes.md` in the working tree.

@@ -10,6 +10,7 @@ in one small place. It intentionally contains no product source code.
 git clone --recurse-submodules \
   https://github.com/SyFI-VibeSim/VibeSimWorkspace.git vibesim-workspace
 cd vibesim-workspace
+just setup-env
 just check-tools
 just build
 ```
