@@ -1,13 +1,13 @@
 [submodule "main"]
-	path = main
+	path = VibeSim
 	url = https://github.com/SyFI-VibeSim/VibeSim.git
 	branch = master
 [submodule "user-facing-ui"]
-	path = user-facing-ui
+	path = VibeSimAgent
 	url = https://github.com/SyFI-VibeSim/VibeSimAgent.git
 	branch = agent-http-api
 [submodule "viz-ui"]
-	path = viz-ui
+	path = VibeSimUI
 	url = https://github.com/SyFI-VibeSim/VibeSimUI.git
 	branch = main
 [submodule "vibesim-intro"]

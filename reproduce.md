@@ -28,9 +28,9 @@ The current verified component baseline is:
 
 | Directory | Repository | Branch | Verified release commit |
 | --- | --- | --- | --- |
-| `main/` | `https://github.com/SyFI-VibeSim/VibeSim.git` | `master` | `48864532c291e5cd48d01efb515d63733496e420` |
-| `user-facing-ui/` | `https://github.com/SyFI-VibeSim/VibeSimAgent.git` | `agent-http-api` | `2c80deb6eedf4a99f27790e659cc057b7a085854` |
-| `viz-ui/` | `https://github.com/SyFI-VibeSim/VibeSimUI.git` | `main` | `3edaf8d8be290bd9a234ad49099ce9cd5a4039ae` |
+| `VibeSim/` | `https://github.com/SyFI-VibeSim/VibeSim.git` | `master` | `48864532c291e5cd48d01efb515d63733496e420` |
+| `VibeSimAgent/` | `https://github.com/SyFI-VibeSim/VibeSimAgent.git` | `agent-http-api` | `2c80deb6eedf4a99f27790e659cc057b7a085854` |
+| `VibeSimUI/` | `https://github.com/SyFI-VibeSim/VibeSimUI.git` | `main` | `3edaf8d8be290bd9a234ad49099ce9cd5a4039ae` |
 
 The GLM development branch is intentionally not part of this released baseline.
 Do not run `git submodule update --remote` during deployment: that command moves
@@ -49,8 +49,8 @@ browser
               -> one Docker Codex runner per active conversation
 ```
 
-The three repositories must remain siblings. `VibeSimAgent` resolves `../main`,
-`../agent-workspaces`, and `../viz-ui` from this layout. The Analyzer reads the
+The three repositories must remain siblings. `VibeSimAgent` resolves `../VibeSim`,
+`../agent-workspaces`, and `../VibeSimUI` from this layout. The Analyzer reads the
 same `agent-workspaces/registry.json` that the backend maintains.
 
 Running the FastAPI backend inside an ordinary container is not currently a
@@ -178,17 +178,17 @@ From the common workspace root:
 ```bash
 mkdir -p agent-workspaces
 
-cd main
+cd VibeSim
 cargo build -p analyzer --release
 uv sync
 cd ..
 
-cd viz-ui/app
+cd VibeSimUI/app
 npm ci
 npm run build
 cd ../..
 
-cd user-facing-ui
+cd VibeSimAgent
 UV_CACHE_DIR="$TMPDIR/uv-cache-user-facing-ui" uv sync
 
 # This is the expensive first-time step. It builds the CUDA/Codex runner image,
@@ -235,7 +235,7 @@ service_socket="$TMPDIR/vibesim-services.sock"
 
 # Backend starts first because it owns and initializes registry.json.
 tmux -S "$service_socket" new-session -d -s backend \
-  "cd '$workspace_root/user-facing-ui' && \
+  "cd '$workspace_root/VibeSimAgent' && \
    export VIBESIM_WORKSPACES_ROOT='$workspace_root/agent-workspaces' && \
    export ANALYZER_MCP_BASE_URL='http://host.docker.internal:8787' && \
    export VIBESIM_MANAGED_BACKEND_URL='http://host.docker.internal:8765' && \
@@ -251,12 +251,12 @@ done
 test -r "$workspace_root/agent-workspaces/registry.json"
 
 tmux -S "$service_socket" new-session -d -s analyzer \
-  "cd '$workspace_root/main' && exec target/release/analyze serve \
+  "cd '$workspace_root/VibeSim' && exec target/release/analyze serve \
     --bind '$docker_bridge_gateway:8787' \
     --workspace-registry '$workspace_root/agent-workspaces/registry.json'"
 
 tmux -S "$service_socket" new-session -d -s frontend \
-  "cd '$workspace_root/viz-ui/app' && \
+  "cd '$workspace_root/VibeSimUI/app' && \
    export ANALYZER_PROXY_TARGET='http://$docker_bridge_gateway:8787' && \
    export CONVERSATION_PROXY_TARGET='http://$docker_bridge_gateway:8765' && \
    export VIBESIM_UI_HOST='0.0.0.0' && \
@@ -285,7 +285,7 @@ The same checks are available as `just smoke`.
 Runner-image acceptance:
 
 ```bash
-cd user-facing-ui
+cd VibeSimAgent
 ./scripts/test-codex-runner-image.sh build
 
 # Optional GPU acceptance with a warm kernel catalog:
