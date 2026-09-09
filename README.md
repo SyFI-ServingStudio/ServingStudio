@@ -33,7 +33,7 @@ service startup, and smoke checks.
 
 | Path | Repository | Tracking branch |
 | --- | --- | --- |
-| `main/` | VibeSim simulator and Analyzer | `master` |
-| `user-facing-ui/` | Agent/conversation backend | `agent-http-api` |
-| `viz-ui/` | User-facing Analyzer UI | `main` |
+| `VibeSim/` | VibeSim simulator and Analyzer | `master` |
+| `VibeSimAgent/` | Agent/conversation backend | `agent-http-api` |
+| `VibeSimUI/` | User-facing Analyzer UI | `main` |
 | `vibesim-intro/` | Standalone VibeSim introduction site | `main` |

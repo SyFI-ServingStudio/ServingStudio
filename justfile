@@ -30,14 +30,14 @@ pull:
     git submodule update --init --recursive
 
 build-analyzer:
-    cd "{{workspace_root}}/main" && cargo build -p analyzer --release
+    cd "{{workspace_root}}/VibeSim" && cargo build -p analyzer --release
 
 sync-agent:
-    cd "{{workspace_root}}/user-facing-ui" && \
+    cd "{{workspace_root}}/VibeSimAgent" && \
       UV_CACHE_DIR="{{task_tmp_dir}}/uv-cache-user-facing-ui" uv sync
 
 build-ui:
-    cd "{{workspace_root}}/viz-ui/app" && npm ci && npm run build
+    cd "{{workspace_root}}/VibeSimUI/app" && npm ci && npm run build
 
 build-intro:
     cd "{{workspace_root}}/vibesim-intro" && npm ci && npm run build:single
@@ -45,7 +45,7 @@ build-intro:
 build: build-analyzer sync-agent build-ui build-intro
 
 build-runner-image:
-    cd "{{workspace_root}}/user-facing-ui" && \
+    cd "{{workspace_root}}/VibeSimAgent" && \
       CODEX_FORCE_IMAGE_BUILD=1 ./scripts/build-codex-runner-image.sh
 
 smoke base_url="http://127.0.0.1:60033":
