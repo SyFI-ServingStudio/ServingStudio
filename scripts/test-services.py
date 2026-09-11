@@ -21,6 +21,13 @@ with open(os.environ['SERVICE_TEST_RECORD'], 'a') as stream:
     stream.write(json.dumps({'command': name, 'args': sys.argv[1:], 'cwd': os.getcwd(),
                             'env': {key: os.environ.get(key) for key in keys}}) + '\n')
 if name == 'tmux':
+    if os.environ.get('SERVICE_TEST_BACKEND_RUNNING'):
+        stopped = pathlib.Path(os.environ['SERVICE_TEST_RECORD'] + '.stopped')
+        if 'send-keys' in sys.argv:
+            stopped.touch()
+            raise SystemExit(0)
+        if 'has-session' in sys.argv and sys.argv[-1] == 'backend' and not stopped.exists():
+            raise SystemExit(0)
     raise SystemExit(1)
 if name == 'docker' and sys.argv[1:3] == ['network', 'inspect']:
     print('127.0.0.1')
@@ -140,7 +147,23 @@ class ServiceCommandsTest(unittest.TestCase):
         (self.root / 'providers.yaml').unlink()
         self.run_script('services.sh', 'stop')
         self.assertEqual([call['args'][-1] for call in self.commands()],
-                         ['frontend', 'analyzer', 'backend'])
+                         ['backend', 'frontend', 'analyzer', 'backend'])
+
+    def test_stop_drains_backend_before_stopping_other_services(self):
+        self.environment['SERVICE_TEST_BACKEND_RUNNING'] = '1'
+        self.run_script('services.sh', 'stop')
+        calls = self.commands()
+        self.assertIn('send-keys', calls[1]['args'])
+        self.assertEqual(calls[1]['args'][-2:], ['backend', 'C-c'])
+        self.assertIn('frontend', calls[4]['args'])
+
+    def test_existing_env_settings_override_ports(self):
+        with (self.root / '.env').open('a') as stream:
+            stream.write('export VIBESIM_PORT_BASE=63042\n')
+        self.run_script('run-service.sh', 'frontend')
+        [call] = self.commands()
+        self.assertEqual(call['args'], ['run', 'dev', '--', '--port', '63042', '--strictPort'])
+        self.assertEqual(call['env']['CONVERSATION_PROXY_TARGET'], 'http://127.0.0.1:63043')
 
 
 if __name__ == '__main__':

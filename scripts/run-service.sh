@@ -7,6 +7,8 @@ case "${1:-}" in
     backend)
         exec >"$TMPDIR/backend.log" 2>&1
         cd "$VIBESIM_AGENT_DIR"
+        export OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-${OPENROUTE_KEY:-}}
+        unset OPENROUTE_KEY
         export VIBESIM_AGENT_ANALYZER_BASE_URL=${VIBESIM_AGENT_ANALYZER_BASE_URL:-http://host.docker.internal:$ANALYZER_PORT}
         export VIBESIM_AGENT_MANAGED_BACKEND_URL=${VIBESIM_AGENT_MANAGED_BACKEND_URL:-http://host.docker.internal:$AGENT_PORT}
         export VIBESIM_AGENT_BIND="$VIBESIM_API_BIND" VIBESIM_AGENT_PORT="$AGENT_PORT"

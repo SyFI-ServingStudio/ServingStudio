@@ -234,6 +234,11 @@ just services-status
 just smoke-local
 ```
 
+`just restart` gracefully stops the backend before restarting the three services
+with the same configuration. Use `just services-status` and `just smoke-local`
+to inspect them. Local service settings stay in the existing ignored `.env`;
+provider connections stay in `VibeSimAgent/providers.yaml`.
+
 `just start` runs `scripts/start-services.sh`: it checks ports and the runner
 image, starts the backend, waits for its registry/API, then starts Analyzer and
 one Vite development UI with `npm run dev`. The backend runs

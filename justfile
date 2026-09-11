@@ -98,6 +98,10 @@ check-ports: check-env
 start: check-env check-docker
     @bash "{{workspace_root}}/scripts/start-services.sh"
 
+# Drain the backend, then restart this workspace's configured services.
+restart: check-env check-docker
+    @bash "{{workspace_root}}/scripts/services.sh" restart
+
 # Initialize only new state; an existing directory is never overwritten or migrated.
 agent-init: check-env
     @bash "{{workspace_root}}/scripts/services.sh" init
