@@ -180,7 +180,7 @@ Optional configuration, exported before startup:
 | `VIBESIM_AGENT_API_TOKEN` | Bearer token for the Agent tools API. This is not an authentication layer for the entire browser application. |
 | `OPENROUTER_API_KEY` | Optional automatic conversation titles. |
 | `HF_HOME` | Existing readable model cache, mounted read-only at `/model` in runners. |
-| `VIBESIM_AGENT_PROVIDERS_FILE` | Optional absolute provider YAML override; otherwise Agent loads `providers.yaml` from its source checkout when present. |
+| `VIBESIM_AGENT_PROVIDERS_FILE` | Optional absolute path override for the required provider YAML; otherwise Agent loads `providers.yaml` from its source checkout. |
 | `VIBESIM_AGENT_WORKSPACES_ROOT` | Absolute durable state directory; defaults to this workspace's `agent-workspaces/`. |
 | `VIBESIM_AGENT_MAIN_DIR` | Absolute main simulator checkout; defaults to `VIBESIM_SIM_DIR`. |
 | `VIBESIM_AGENT_DIR` | Agent source checkout; defaults to `VibeSimAgent/` under this workspace. |
@@ -198,8 +198,10 @@ For multiple Codex/Claude accounts, put the local connection configuration at
 when `VIBESIM_AGENT_DIR` is overridden. Agent discovers that file by default;
 it is ignored by the Agent repository. `VIBESIM_AGENT_PROVIDERS_FILE` can select
 a different absolute path. Start from the selected Agent checkout's
-`examples/providers.yaml`; use environment-variable references for tokens, never
-literal secrets. Profiles retain separate conversation/role session homes. See
+`examples/providers.yaml`. Tokens may use environment-variable references or an
+inline `{value: "..."}` only in the ignored private file; keep that file mode 600
+and never put tokens in the tracked example. Profiles retain separate
+conversation/role session homes. See
 [provider configuration](VibeSimAgent/doc/providers.md).
 
 Legacy `CODEX_*`, `VIBESIM_WORKSPACES_ROOT`, and `VIBESIM_API_TOKEN` configuration
