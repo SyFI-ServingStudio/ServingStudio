@@ -2,6 +2,7 @@
 set -euo pipefail
 source "$(dirname -- "$0")/service-env.sh"
 case "${1:-}" in
+    init) validate_service_config; cd "$VIBESIM_AGENT_DIR"; exec uv run --frozen python -m vibesim_agent init ;;
     check-ports) python3 "$workspace_root/scripts/check-ports.py" ;;
     stop)
         for service in frontend analyzer backend; do
@@ -11,5 +12,5 @@ case "${1:-}" in
         done ;;
     status) tmux -S "$service_socket" list-sessions ;;
     smoke) cd "$workspace_root"; exec just smoke "http://127.0.0.1:$UI_PORT" ;;
-    *) echo "Expected check-ports, status, stop or smoke" >&2; exit 2 ;;
+    *) echo "Expected init, check-ports, status, stop or smoke" >&2; exit 2 ;;
 esac

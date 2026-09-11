@@ -58,13 +58,13 @@ pull:
     git submodule update --init --recursive
 
 build-analyzer: check-env
-    cd "{{workspace_root}}/VibeSim" && cargo build --locked -p analyzer --release
+    source "{{workspace_root}}/scripts/service-env.sh" && cd "$VIBESIM_SIM_DIR" && uv run --frozen cargo build --locked -p analyzer --release
 
 sync-agent: check-env
-    cd "{{workspace_root}}/VibeSimAgent" && uv sync --frozen
+    source "{{workspace_root}}/scripts/service-env.sh" && cd "$VIBESIM_AGENT_DIR" && uv sync --frozen
 
 build-ui: check-env
-    cd "{{workspace_root}}/VibeSimUI/app" && npm ci && npm run build
+    source "{{workspace_root}}/scripts/service-env.sh" && cd "$VIBESIM_UI_DIR" && npm ci && npm run build
 
 build-intro: check-env
     cd "{{workspace_root}}/vibesim-intro" && npm ci && npm run build
@@ -78,14 +78,14 @@ sync-simulator: check-env check-submodules
 
 # Expensive: build the runner image and run its non-GPU acceptance test.
 build-runner-image: check-tools check-submodules check-docker
-    cd "{{workspace_root}}/VibeSimAgent" && \
-      CODEX_FORCE_IMAGE_BUILD=1 ./scripts/build-codex-runner-image.sh
+    source "{{workspace_root}}/scripts/service-env.sh" && cd "$VIBESIM_AGENT_DIR" && \
+      ./scripts/build-runner-image.sh
 
 smoke base_url="http://127.0.0.1:60033": check-env
-    @for endpoint in / /api/workspaces /api/v1/runs /api/v1/predictions \
-      /api/v1/kernel-profiles /api/v1/kernel-measurements; do \
-      auth_args=(); if [[ -n "${VIBESIM_API_TOKEN:-}" ]]; then auth_args=(-H "Authorization: Bearer $VIBESIM_API_TOKEN"); fi; \
-      status=$(curl --noproxy '*' "${auth_args[@]}" -sS -o "{{task_tmp_dir}}/vibesim-smoke-response" -w '%{http_code}' "{{base_url}}$endpoint"); \
+    @for endpoint in / /api/agent/v1/workspaces /api/analyzer/v1/runs /api/analyzer/v1/predictions \
+      /api/analyzer/v1/kernel-profiles /api/analyzer/v1/kernel-measurements; do \
+      auth_args=(); if [[ -n "${VIBESIM_AGENT_API_TOKEN:-}" ]]; then auth_args=(-H "Authorization: Bearer $VIBESIM_AGENT_API_TOKEN"); fi; \
+      status=$(curl --noproxy '*' "${auth_args[@]}" --max-time 10 -sS -o "{{task_tmp_dir}}/vibesim-smoke-response" -w '%{http_code}' "{{base_url}}$endpoint"); \
       printf '%s %s\n' "$status" "$endpoint"; \
       test "$status" = 200 || exit 1; \
     done
@@ -97,6 +97,10 @@ check-ports: check-env
 # Start one backend, Analyzer and UI in workspace-specific tmux sessions.
 start: check-env check-docker
     @bash "{{workspace_root}}/scripts/start-services.sh"
+
+# Initialize only new state; an existing directory is never overwritten or migrated.
+agent-init: check-env
+    @bash "{{workspace_root}}/scripts/services.sh" init
 
 services-status:
     @bash "{{workspace_root}}/scripts/services.sh" status

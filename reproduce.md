@@ -2,7 +2,7 @@
 
 This guide covers the pinned workspace, CPU application builds, and host deployment
 with Docker Agent runners. Run commands as the non-root workspace owner on Ubuntu
-24.04 x86-64. See [validation](#validation) for what the current audit tested.
+24.04 x86-64. See [validation](#validation) for service wiring checks.
 
 ## Checkout
 
@@ -16,12 +16,12 @@ git clone --recurse-submodules \
 cd vibesim-workspace
 ```
 
-| Directory | Role | Tracking branch | Current pinned commit |
-| --- | --- | --- | --- |
-| `VibeSim/` | Simulator, Analyzer, profiling | `master` | `a916c09` |
-| `VibeSimAgent/` | Agent backend and Docker runners | `agent-http-api` | `f86a12a` |
-| `VibeSimUI/` | Application UI | `main` | `74a3ccd` |
-| `vibesim-intro/` | Introduction website | `main` | `cf34771` |
+| Directory | Role | Tracking branch |
+| --- | --- | --- |
+| `VibeSim/` | Simulator, Analyzer, profiling | `master` |
+| `VibeSimAgent/` | Agent backend and Docker runners | `agent-http-api` |
+| `VibeSimUI/` | Application UI | `main` |
+| `vibesim-intro/` | Introduction website | `main` |
 
 Repository URLs are in `.gitmodules`; Git submodule pointers are authoritative.
 Verify them with `git submodule status --recursive`. To update an existing clone:
@@ -104,10 +104,40 @@ it delegates to VibeSim's two-stage DeepGEMM setup. Bare `uv sync` is insufficie
 for that cold setup. The introduction site uses the standard `npm run build`;
 its separate `build:single` export currently fails on external asset references.
 
+## Directory layout
+
+```text
+VibeSimWorkspace/
+  VibeSim/                 Simulator, Analyzer and launcher source
+  VibeSimAgent/
+    vibesim_agent/         API, services, domain, providers, runtime and storage
+    tools/                 Offline migration and deployment tools
+    examples/providers.yaml  Shared configuration template
+    providers.yaml         Private connections, ignored and loaded by default
+  VibeSimUI/app/           Shared browser application
+  vibesim-intro/           Introduction website
+  agent-workspaces/        Default durable state, outside component repositories
+  scripts/                Shared setup and service entry points
+  .env                    Private workspace paths and service settings
+  tmp/                    Disposable build/test/service logs
+```
+
+`VIBESIM_AGENT_WORKSPACES_ROOT` can select a different durable state directory,
+including a verified migration target. Each workspace stores a descriptor and
+SQLite database; conversations share its repository and logs but have separate
+role/provider homes and runtime containers. `w_main` references `VibeSim/`
+directly. Keep state and credentials out of commits and out of disposable `tmp/`.
+The Agent repository has no separate browser frontend; both conversations and
+analysis use VibeSimUI. See [Agent architecture](VibeSimAgent/doc/architecture.md)
+for ownership and [named providers](VibeSimAgent/doc/providers.md) for multiple
+accounts and endpoints.
+
 ## Run the application
 
 Run the commands below from the workspace root after `just build`.
-They start one UI, one Agent backend and one Analyzer in named tmux sessions.
+They start a local development UI, one Agent backend and one Analyzer in named
+tmux sessions. The service commands require the new `vibesim_agent` package;
+old Agent checkouts do not support these entry points.
 On a shared server, assign three ports per user and check them before startup.
 Use `60030 + 3 × UID` as the default base; spacing by three prevents adjacent
 UIDs from sharing backend/Analyzer ports. For example, UID 1003 uses 63039–63041.
@@ -129,33 +159,74 @@ Keep credentials outside the repository. For the Codex runner:
 source .env
 just check-docker
 just check-agent-auth
-export CODEX_DOCKER_IMAGE="vibesim-ui-codex-runner:${USER}"
+export VIBESIM_RUNNER_IMAGE="vibesim-agent-runner:${USER}"
 just build-runner-image 2>&1 | tee "$TMPDIR/runner-image-build.log"
 ```
 
 Run that build inside the build tmux session with `set -o pipefail`. It invokes
-`VibeSimAgent/scripts/build-codex-runner-image.sh` with `CODEX_FORCE_IMAGE_BUILD=1`,
+the selected Agent checkout's `scripts/build-runner-image.sh`,
 prewarms Python dependencies, compiles the Cargo seed, and runs non-GPU acceptance.
 Keep the same user-specific image tag when starting the backend: it records the
 build account's UID/GID and home, so another user's image is unsuitable. GPU work requires
 the NVIDIA driver and Container Toolkit; verify with `just check-gpu` using
-physical-device access. CPU-only runners can use `export CODEX_DOCKER_GPUS=`.
-See the [Agent setup](VibeSimAgent/README.md#run) for authentication, runner
+physical-device access. CPU-only runners can use `export VIBESIM_RUNNER_GPUS=`.
+See the [Agent setup](VibeSimAgent/README.md) for authentication, runner
 configuration, Claude support and deployment details.
 
 Optional configuration, exported before startup:
 
 | Variable | Purpose |
 | --- | --- |
-| `VIBESIM_API_TOKEN` | Bearer token for Agent APIs exposed beyond localhost. |
-| `OPENROUTER_API_KEY` | Automatic titles; `OPENROUTE_KEY` is a compatibility alias. Without credentials, titles may remain pending or use local names. |
+| `VIBESIM_AGENT_API_TOKEN` | Bearer token for the Agent tools API. This is not an authentication layer for the entire browser application. |
+| `OPENROUTER_API_KEY` | Optional automatic conversation titles. |
 | `HF_HOME` | Existing readable model cache, mounted read-only at `/model` in runners. |
-| `CODEX_MODEL`, `CODEX_REASONING_EFFORT` | Model and reasoning overrides. |
+| `VIBESIM_AGENT_PROVIDERS_FILE` | Optional absolute provider YAML override; otherwise Agent loads `providers.yaml` from its source checkout when present. |
+| `VIBESIM_AGENT_WORKSPACES_ROOT` | Absolute durable state directory; defaults to this workspace's `agent-workspaces/`. |
+| `VIBESIM_AGENT_MAIN_DIR` | Absolute main simulator checkout; defaults to `VIBESIM_SIM_DIR`. |
+| `VIBESIM_AGENT_DIR` | Agent source checkout; defaults to `VibeSimAgent/` under this workspace. |
+| `VIBESIM_SIM_DIR` | Simulator/Analyzer source checkout; defaults to `VibeSim/`. |
+| `VIBESIM_UI_DIR` | UI application directory; defaults to `VibeSimUI/app/`. |
+| `VIBESIM_ANALYZER_BIN` | Absolute built Analyzer executable; defaults to `VIBESIM_SIM_DIR/target/release/analyze`. |
 | `VIBESIM_UI_ALLOWED_HOSTS` | Explicit hostname allowlist when accessing Vite remotely. |
 
-### Start the UI and APIs
+All directory overrides must be absolute. Individual `build-analyzer`, `sync-agent`
+and `build-ui` recipes honor the selected component directories. `just build`
+still checks the root repository's recorded submodule revisions first.
 
-From the workspace root, after `just build` and `just build-runner-image`:
+For multiple Codex/Claude accounts, put the local connection configuration at
+`VibeSimAgent/providers.yaml`, or `providers.yaml` in the selected Agent checkout
+when `VIBESIM_AGENT_DIR` is overridden. Agent discovers that file by default;
+it is ignored by the Agent repository. `VIBESIM_AGENT_PROVIDERS_FILE` can select
+a different absolute path. Start from the selected Agent checkout's
+`examples/providers.yaml`; use environment-variable references for tokens, never
+literal secrets. Profiles retain separate conversation/role session homes. See
+[provider configuration](VibeSimAgent/doc/providers.md).
+
+Legacy `CODEX_*`, `VIBESIM_WORKSPACES_ROOT`, and `VIBESIM_API_TOKEN` configuration
+must be converted to the new Agent settings; the service rejects retired keys.
+Use `uv run --frozen python -m vibesim_agent env-reference` from the selected
+Agent directory for the complete supported list. `just check-agent-auth` is only
+a convenience check for the default host Codex account, not a prerequisite for a
+Claude-only YAML configuration.
+
+### Initialize state
+
+For a new installation, choose a new `VIBESIM_AGENT_WORKSPACES_ROOT` and run:
+
+```bash
+just agent-init
+```
+
+Initialization refuses any existing directory, including an empty one. Startup
+never creates or migrates a state directory implicitly. For an existing legacy
+installation, follow the Agent's [migration guide](VibeSimAgent/doc/migration-v1.md)
+and select the validated target directory before using these ordinary service
+commands. Agent and Analyzer read the same selected state's `registry.json`.
+
+### Start the local UI and APIs
+
+From the workspace root, after building components, preparing the runner image,
+and initializing or migrating state:
 
 ```bash
 just start
@@ -165,7 +236,9 @@ just smoke-local
 
 `just start` runs `scripts/start-services.sh`: it checks ports and the runner
 image, starts the backend, waits for its registry/API, then starts Analyzer and
-one UI. Services run in workspace-specific tmux sessions; logs are in
+one Vite development UI with `npm run dev`. The backend runs
+`uv run --frozen python -m vibesim_agent serve` without rebuilding an image.
+Services run in workspace-specific tmux sessions; logs are in
 `tmp/{backend,analyzer,ui}.log`. It refuses to replace existing sessions.
 Open the printed UI address, substituting your server hostname. `just stop`
 stops only these three workspace sessions; inspect logs before restarting after
@@ -179,22 +252,29 @@ APIs bind to the Docker bridge gateway so runners can reach them via
 `.env` before starting services. A containerized backend needs additional host-path
 translation or Docker-in-Docker; these scripts run on the host.
 
+For production, serve the `npm run build` output (`dist/`) from a static web
+server and reverse-proxy `/api/agent/v1` to Agent and `/api/analyzer/v1` to
+Analyzer. Preserve streaming responses on Agent routes. Apply access control at
+that deployment boundary. `just start` is a local development stack; neither
+Vite's development server nor `vite preview` is the production static server.
+
 ## Verify
 
 ```bash
 just smoke-local  # Or: just smoke http://127.0.0.1:<port>
 ```
 
-This requires HTTP 200 through Vite for `/`, `/api/workspaces`, `/api/v1/runs`,
-`/api/v1/predictions`, `/api/v1/kernel-profiles`, and `/api/v1/kernel-measurements`.
+This requires HTTP 200 through Vite for `/`, `/api/agent/v1/workspaces`,
+`/api/analyzer/v1/runs`, `/api/analyzer/v1/predictions`,
+`/api/analyzer/v1/kernel-profiles`, and `/api/analyzer/v1/kernel-measurements`.
 It checks both proxy paths and fails on the first unsuccessful response.
 
 To repeat runner acceptance independently:
 
 ```bash
-(cd VibeSimAgent && ./scripts/test-codex-runner-image.sh build)
+(cd VibeSimAgent && ./scripts/test-runner-image.sh build)
 # Optional, with GPU access and a warm kernel catalog:
-(cd VibeSimAgent && ./scripts/test-codex-runner-image.sh timing)
+(cd VibeSimAgent && ./scripts/test-runner-image.sh timing)
 ```
 
 The final end-to-end gate is a real Agent conversation in workspace `w_main`.
@@ -202,6 +282,12 @@ Refresh while the turn runs; verify SSE reconnects, the answer persists, and any
 managed simulation/timing/profile result appears in Page 0 and opens in Analyzer.
 
 ## Validation
+
+Run `python3 scripts/test-services.py` after sourcing `.env` to check the current
+service command wiring in a private temporary workspace. It checks explicit
+initialization, selected paths and state, both proxy targets, versioned smoke
+routes, and startup/stop failure handling with stubbed external commands. It
+does not start real services or make provider calls.
 
 The September 9, 2026 audit used a clean Ubuntu 24.04 container and exported pinned
 sources without host environments, caches or credentials. It is not evidence of

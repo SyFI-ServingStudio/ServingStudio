@@ -30,6 +30,13 @@ used only when intentionally advancing with `git submodule update --remote`.
 See [reproduce.md](reproduce.md) for prerequisites, credentials, first build,
 service startup, and smoke checks.
 
+The local service entry points use the new `vibesim_agent` package, explicit
+`just agent-init` for new state, and versioned Agent/Analyzer APIs. Configure
+`VibeSimAgent/providers.yaml` (locally ignored) and durable state before `just start`;
+Agent discovers the YAML in its selected checkout by default. Existing legacy state must
+be migrated first. `just start` runs a Vite development UI. Production static
+hosting and proxy requirements are documented in `reproduce.md`.
+
 ## Components
 
 | Path | Repository | Tracking branch |
@@ -38,3 +45,22 @@ service startup, and smoke checks.
 | `VibeSimAgent/` | Agent/conversation backend | `agent-http-api` |
 | `VibeSimUI/` | User-facing Analyzer UI | `main` |
 | `vibesim-intro/` | Standalone VibeSim introduction site | `main` |
+
+## Agent Capabilities
+
+Agent supports named Codex and Claude connections, each with its own account or
+endpoint. A conversation can use a single assistant or an orchestrator and
+implementer, with separate role sessions. Turns and streamed events are durable,
+so reconnecting restores progress; cancellation and restart recovery retain
+conversation history. Managed jobs link simulation and profiling results to
+Analyzer resources.
+
+The browser UI lives in `VibeSimUI/app/`; Agent no longer bundles its own frontend.
+`VibeSimAgent/vibesim_agent/` separates API routes, services, domain objects,
+providers, Docker runtime and storage. Private `providers.yaml` stays in the
+Agent checkout and is ignored by Git. Workspace data lives in a separate state
+directory; `w_main` references the editable `VibeSim/` checkout.
+
+See [Agent architecture](VibeSimAgent/doc/architecture.md),
+[provider configuration](VibeSimAgent/doc/providers.md), and the
+[directory layout](reproduce.md#directory-layout).
