@@ -2,9 +2,11 @@
 # the reproducible workspace commit.
 agent-workspaces/
 agent-workspaces_backup/
+agent-workspaces-claude/
 runtime-logs/
 tmp/
 old-wt/
 uv-cache/
 .env
 .env.*
+sglang-moe-autotune-results/

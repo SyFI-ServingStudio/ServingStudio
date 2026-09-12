@@ -8,9 +8,9 @@ The previous guide's August 18 baseline recorded these component revisions:
 
 | Component | Commit |
 | --- | --- |
-| VibeSim | `48864532c291e5cd48d01efb515d63733496e420` |
-| VibeSimAgent | `2c80deb6eedf4a99f27790e659cc057b7a085854` |
-| VibeSimUI | `3edaf8d8be290bd9a234ad49099ce9cd5a4039ae` |
+| ServingStudio Sim | `48864532c291e5cd48d01efb515d63733496e420` |
+| ServingStudio Agent | `2c80deb6eedf4a99f27790e659cc057b7a085854` |
+| ServingStudio UI | `3edaf8d8be290bd9a234ad49099ce9cd5a4039ae` |
 
 Append dated evidence here when the procedure changes.
 
@@ -26,7 +26,7 @@ Append dated evidence here when the procedure changes.
   were updated and the meta-repo advanced to the verified component commits.
 - 2026-08-01: naive Ubuntu 24.04 container installed Git 2.43, uv 0.12.1,
   Node 22.14.0/npm 10.9.2, Rust stable, protoc 3.21.12, and mold 2.30.
-- 2026-08-01: clean VibeSimUI `npm ci && npm run build` passed. npm reported
+- 2026-08-01: clean ServingStudio UI `npm ci && npm run build` passed. npm reported
   2 moderate and 2 high audit findings; Vite also reported a >500 kB chunk.
 - 2026-08-01: clean Agent sync selected CPython 3.12.13; 50 tests and 5
   subtests passed. Two FastAPI `on_event` deprecation warnings remain.

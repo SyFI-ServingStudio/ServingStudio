@@ -1,4 +1,4 @@
-# Reproduce VibeSim
+# Reproduce ServingStudio Sim
 
 This guide covers the pinned workspace, CPU application builds, and host deployment
 with Docker Agent runners. Run commands as the non-root workspace owner on Ubuntu
@@ -12,16 +12,16 @@ an organization credential helper or, for HTTPS, `gh auth login` followed by
 
 ```bash
 git clone --recurse-submodules \
-  https://github.com/SyFI-VibeSim/VibeSimWorkspace.git vibesim-workspace
-cd vibesim-workspace
+  https://github.com/SyFI-ServingStudio/ServingStudio.git servingstudio
+cd servingstudio
 ```
 
 | Directory | Role | Tracking branch |
 | --- | --- | --- |
-| `VibeSim/` | Simulator, Analyzer, profiling | `master` |
-| `VibeSimAgent/` | Agent backend and Docker runners | `agent-http-api` |
-| `VibeSimUI/` | Application UI | `main` |
-| `vibesim-intro/` | Introduction website | `main` |
+| `ServingStudioSim/` | Simulator, Analyzer, profiling | `master` |
+| `ServingStudioAgent/` | Agent backend and Docker runners | `agent-http-api` |
+| `ServingStudioUI/` | Application UI | `main` |
+| `ServingStudioIntro/` | Introduction website | `main` |
 
 Repository URLs are in `.gitmodules`; Git submodule pointers are authoritative.
 Verify them with `git submodule status --recursive`. To update an existing clone:
@@ -38,7 +38,7 @@ advances to branch tips. Separate GLM development worktrees are outside this bas
 ## Host setup
 
 The CPU build needs Git, Python 3, uv, Rust stable, just, Node.js 22/npm, and the
-native tools below. `mold` is required by VibeSim's Cargo linker configuration;
+native tools below. `mold` is required by ServingStudio Sim's Cargo linker configuration;
 system Python is needed by workspace setup and the Agent startup wrapper.
 
 ```bash
@@ -100,22 +100,22 @@ both the UI and introduction website. Individual targets are `build-analyzer`,
 
 The Analyzer and web stack do not require CUDA or the full simulator Python
 environment. For optional host simulation/profiling, use `just sync-simulator`;
-it delegates to VibeSim's two-stage DeepGEMM setup. Bare `uv sync` is insufficient
+it delegates to ServingStudio Sim's two-stage DeepGEMM setup. Bare `uv sync` is insufficient
 for that cold setup. The introduction site uses the standard `npm run build`;
 its separate `build:single` export currently fails on external asset references.
 
 ## Directory layout
 
 ```text
-VibeSimWorkspace/
-  VibeSim/                 Simulator, Analyzer and launcher source
-  VibeSimAgent/
+ServingStudio/
+  ServingStudioSim/                 Simulator, Analyzer and launcher source
+  ServingStudioAgent/
     vibesim_agent/         API, services, domain, providers, runtime and storage
     tools/                 Offline migration and deployment tools
     examples/providers.yaml  Shared configuration template
     providers.yaml         Private connections, ignored and loaded by default
-  VibeSimUI/app/           Shared browser application
-  vibesim-intro/           Introduction website
+  ServingStudioUI/app/           Shared browser application
+  ServingStudioIntro/           Introduction website
   agent-workspaces/        Default durable state, outside component repositories
   scripts/                Shared setup and service entry points
   .env                    Private workspace paths and service settings
@@ -125,11 +125,11 @@ VibeSimWorkspace/
 `VIBESIM_AGENT_WORKSPACES_ROOT` can select a different durable state directory,
 including a verified migration target. Each workspace stores a descriptor and
 SQLite database; conversations share its repository and logs but have separate
-role/provider homes and runtime containers. `w_main` references `VibeSim/`
+role/provider homes and runtime containers. `w_main` references `ServingStudioSim/`
 directly. Keep state and credentials out of commits and out of disposable `tmp/`.
 The Agent repository has no separate browser frontend; both conversations and
-analysis use VibeSimUI. See [Agent architecture](VibeSimAgent/doc/architecture.md)
-for ownership and [named providers](VibeSimAgent/doc/providers.md) for multiple
+analysis use ServingStudio UI. See [Agent architecture](ServingStudioAgent/doc/architecture.md)
+for ownership and [named providers](ServingStudioAgent/doc/providers.md) for multiple
 accounts and endpoints.
 
 ## Run the application
@@ -170,7 +170,7 @@ Keep the same user-specific image tag when starting the backend: it records the
 build account's UID/GID and home, so another user's image is unsuitable. GPU work requires
 the NVIDIA driver and Container Toolkit; verify with `just check-gpu` using
 physical-device access. CPU-only runners can use `export VIBESIM_RUNNER_GPUS=`.
-See the [Agent setup](VibeSimAgent/README.md) for authentication, runner
+See the [Agent setup](ServingStudioAgent/README.md) for authentication, runner
 configuration, Claude support and deployment details.
 
 Optional configuration, exported before startup:
@@ -183,9 +183,9 @@ Optional configuration, exported before startup:
 | `VIBESIM_AGENT_PROVIDERS_FILE` | Optional absolute path override for the required provider YAML; otherwise Agent loads `providers.yaml` from its source checkout. |
 | `VIBESIM_AGENT_WORKSPACES_ROOT` | Absolute durable state directory; defaults to this workspace's `agent-workspaces/`. |
 | `VIBESIM_AGENT_MAIN_DIR` | Absolute main simulator checkout; defaults to `VIBESIM_SIM_DIR`. |
-| `VIBESIM_AGENT_DIR` | Agent source checkout; defaults to `VibeSimAgent/` under this workspace. |
-| `VIBESIM_SIM_DIR` | Simulator/Analyzer source checkout; defaults to `VibeSim/`. |
-| `VIBESIM_UI_DIR` | UI application directory; defaults to `VibeSimUI/app/`. |
+| `VIBESIM_AGENT_DIR` | Agent source checkout; defaults to `ServingStudioAgent/` under this workspace. |
+| `VIBESIM_SIM_DIR` | Simulator/Analyzer source checkout; defaults to `ServingStudioSim/`. |
+| `VIBESIM_UI_DIR` | UI application directory; defaults to `ServingStudioUI/app/`. |
 | `VIBESIM_ANALYZER_BIN` | Absolute built Analyzer executable; defaults to `VIBESIM_SIM_DIR/target/release/analyze`. |
 | `VIBESIM_UI_ALLOWED_HOSTS` | Explicit hostname allowlist when accessing Vite remotely. |
 
@@ -194,7 +194,7 @@ and `build-ui` recipes honor the selected component directories. `just build`
 still checks the root repository's recorded submodule revisions first.
 
 For multiple Codex/Claude accounts, put the local connection configuration at
-`VibeSimAgent/providers.yaml`, or `providers.yaml` in the selected Agent checkout
+`ServingStudioAgent/providers.yaml`, or `providers.yaml` in the selected Agent checkout
 when `VIBESIM_AGENT_DIR` is overridden. Agent discovers that file by default;
 it is ignored by the Agent repository. `VIBESIM_AGENT_PROVIDERS_FILE` can select
 a different absolute path. Start from the selected Agent checkout's
@@ -202,7 +202,7 @@ a different absolute path. Start from the selected Agent checkout's
 inline `{value: "..."}` only in the ignored private file; keep that file mode 600
 and never put tokens in the tracked example. Profiles retain separate
 conversation/role session homes. See
-[provider configuration](VibeSimAgent/doc/providers.md).
+[provider configuration](ServingStudioAgent/doc/providers.md).
 
 Legacy `CODEX_*`, `VIBESIM_WORKSPACES_ROOT`, and `VIBESIM_API_TOKEN` configuration
 must be converted to the new Agent settings; the service rejects retired keys.
@@ -221,7 +221,7 @@ just agent-init
 
 Initialization refuses any existing directory, including an empty one. Startup
 never creates or migrates a state directory implicitly. For an existing legacy
-installation, follow the Agent's [migration guide](VibeSimAgent/doc/migration-v1.md)
+installation, follow the Agent's [migration guide](ServingStudioAgent/doc/migration-v1.md)
 and select the validated target directory before using these ordinary service
 commands. Agent and Analyzer read the same selected state's `registry.json`.
 
@@ -239,7 +239,7 @@ just smoke-local
 `just restart` gracefully stops the backend before restarting the three services
 with the same configuration. Use `just services-status` and `just smoke-local`
 to inspect them. Local service settings stay in the existing ignored `.env`;
-provider connections stay in `VibeSimAgent/providers.yaml`.
+provider connections stay in `ServingStudioAgent/providers.yaml`.
 
 `just start` runs `scripts/start-services.sh`: it checks ports and the runner
 image, starts the backend, waits for its registry/API, then starts Analyzer and
@@ -279,9 +279,9 @@ It checks both proxy paths and fails on the first unsuccessful response.
 To repeat runner acceptance independently:
 
 ```bash
-(cd VibeSimAgent && ./scripts/test-runner-image.sh build)
+(cd ServingStudioAgent && ./scripts/test-runner-image.sh build)
 # Optional, with GPU access and a warm kernel catalog:
-(cd VibeSimAgent && ./scripts/test-runner-image.sh timing)
+(cd ServingStudioAgent && ./scripts/test-runner-image.sh timing)
 ```
 
 The final end-to-end gate is a real Agent conversation in workspace `w_main`.

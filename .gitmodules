@@ -1,16 +1,16 @@
-[submodule "main"]
-	path = VibeSim
-	url = https://github.com/SyFI-VibeSim/VibeSim.git
+[submodule "ServingStudioSim"]
+	path = ServingStudioSim
+	url = https://github.com/SyFI-ServingStudio/ServingStudioSim.git
 	branch = master
-[submodule "user-facing-ui"]
-	path = VibeSimAgent
-	url = https://github.com/SyFI-VibeSim/VibeSimAgent.git
+[submodule "ServingStudioAgent"]
+	path = ServingStudioAgent
+	url = https://github.com/SyFI-ServingStudio/ServingStudioAgent.git
 	branch = agent-http-api
-[submodule "viz-ui"]
-	path = VibeSimUI
-	url = https://github.com/SyFI-VibeSim/VibeSimUI.git
+[submodule "ServingStudioUI"]
+	path = ServingStudioUI
+	url = https://github.com/SyFI-ServingStudio/ServingStudioUI.git
 	branch = main
-[submodule "vibesim-intro"]
-	path = vibesim-intro
-	url = https://github.com/SyFI-VibeSim/vibesim-intro.git
+[submodule "ServingStudioIntro"]
+	path = ServingStudioIntro
+	url = https://github.com/SyFI-ServingStudio/ServingStudioIntro.git
 	branch = main

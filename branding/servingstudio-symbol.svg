@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="390 215 485 645" role="img" aria-labelledby="title">
+  <title id="title">ServingStudio</title>
+  <defs>
+    <linearGradient id="top" x1="455" y1="390" x2="830" y2="298" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#080465"/><stop offset=".46" stop-color="#0068f8"/><stop offset="1" stop-color="#00d4e9"/>
+    </linearGradient>
+    <linearGradient id="fold" x1="414" y1="410" x2="830" y2="666" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#61aff8"/><stop offset=".5" stop-color="#b5bbff"/><stop offset="1" stop-color="#5146ff"/>
+    </linearGradient>
+    <linearGradient id="center" x1="449" y1="549" x2="797" y2="566" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#b4e8fa"/><stop offset=".43" stop-color="#d4dcfa"/><stop offset="1" stop-color="#8274ff"/>
+    </linearGradient>
+    <linearGradient id="bottom" x1="431" y1="751" x2="789" y2="677" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#00cbe4"/><stop offset=".43" stop-color="#008cff"/><stop offset="1" stop-color="#08036b"/>
+    </linearGradient>
+  </defs>
+  <g>
+    <path fill="url(#fold)" d="M 479,348 C 433,370 414,399 414,437 L 414,481 C 414,514 430,538 457,550 L 768,688 C 798,701 805,720 783,735 C 819,724 841,697 841,665 L 841,625 C 841,594 825,568 795,554 L 483,416 C 448,401 444,375 479,348 Z"/>
+    <path fill="url(#top)" d="M 479,348 L 691,247 C 713,236 733,236 755,247 L 821,281 C 843,292 853,309 852,334 C 852,358 840,375 820,385 L 615,474 L 481,415 C 447,400 444,373 479,348 Z"/>
+    <path fill="url(#center)" d="M 447,543 L 615,474 L 795,554 L 621,620 L 457,550 Z"/>
+    <path fill="url(#bottom)" d="M 621,620 L 766,684 C 800,699 806,720 783,735 L 579,824 C 556,834 535,835 512,824 L 445,792 C 424,782 415,766 416,744 C 416,720 428,702 450,692 Z"/>
+  </g>
+</svg>

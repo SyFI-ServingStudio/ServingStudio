@@ -1,6 +1,10 @@
-# VibeSim Workspace
+<p align="center">
+  <img src="branding/servingstudio-symbol.svg" alt="ServingStudio logo" width="64">
+</p>
 
-This repository pins the four repositories that form the VibeSim application
+<h1 align="center">ServingStudio</h1>
+
+This repository pins the four repositories that form the ServingStudio application
 and introduction site, and keeps the reproducible build/deployment entry points
 in one small place. It intentionally contains no product source code.
 
@@ -8,8 +12,8 @@ in one small place. It intentionally contains no product source code.
 
 ```bash
 git clone --recurse-submodules \
-  https://github.com/SyFI-VibeSim/VibeSimWorkspace.git vibesim-workspace
-cd vibesim-workspace
+  https://github.com/SyFI-ServingStudio/ServingStudio.git servingstudio
+cd servingstudio
 just setup-env
 just check-tools
 just build
@@ -32,7 +36,7 @@ service startup, and smoke checks.
 
 The local service entry points use the new `vibesim_agent` package, explicit
 `just agent-init` for new state, and versioned Agent/Analyzer APIs. Configure
-`VibeSimAgent/providers.yaml` (locally ignored) and durable state before `just start`;
+`ServingStudioAgent/providers.yaml` (locally ignored) and durable state before `just start`;
 Agent discovers the YAML in its selected checkout by default. Existing legacy state must
 be migrated first. `just start` runs a Vite development UI. Production static
 hosting and proxy requirements are documented in `reproduce.md`.
@@ -41,10 +45,10 @@ hosting and proxy requirements are documented in `reproduce.md`.
 
 | Path | Repository | Tracking branch |
 | --- | --- | --- |
-| `VibeSim/` | VibeSim simulator and Analyzer | `master` |
-| `VibeSimAgent/` | Agent/conversation backend | `agent-http-api` |
-| `VibeSimUI/` | User-facing Analyzer UI | `main` |
-| `vibesim-intro/` | Standalone VibeSim introduction site | `main` |
+| `ServingStudioSim/` | Simulator and ServingStudio Analyzer | `master` |
+| `ServingStudioAgent/` | Agent/conversation backend | `agent-http-api` |
+| `ServingStudioUI/` | User-facing Analyzer UI | `main` |
+| `ServingStudioIntro/` | ServingStudio introduction website | `main` |
 
 ## Agent Capabilities
 
@@ -55,12 +59,12 @@ so reconnecting restores progress; cancellation and restart recovery retain
 conversation history. Managed jobs link simulation and profiling results to
 Analyzer resources.
 
-The browser UI lives in `VibeSimUI/app/`; Agent no longer bundles its own frontend.
-`VibeSimAgent/vibesim_agent/` separates API routes, services, domain objects,
+The browser UI lives in `ServingStudioUI/app/`; Agent no longer bundles its own frontend.
+`ServingStudioAgent/vibesim_agent/` separates API routes, services, domain objects,
 providers, Docker runtime and storage. Private `providers.yaml` stays in the
 Agent checkout and is ignored by Git. Workspace data lives in a separate state
-directory; `w_main` references the editable `VibeSim/` checkout.
+directory; `w_main` references the editable `ServingStudioSim/` checkout.
 
-See [Agent architecture](VibeSimAgent/doc/architecture.md),
-[provider configuration](VibeSimAgent/doc/providers.md), and the
+See [Agent architecture](ServingStudioAgent/doc/architecture.md),
+[provider configuration](ServingStudioAgent/doc/providers.md), and the
 [directory layout](reproduce.md#directory-layout).

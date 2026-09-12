@@ -67,14 +67,14 @@ build-ui: check-env
     source "{{workspace_root}}/scripts/service-env.sh" && cd "$VIBESIM_UI_DIR" && npm ci && npm run build
 
 build-intro: check-env
-    cd "{{workspace_root}}/vibesim-intro" && npm ci && npm run build
+    cd "{{workspace_root}}/ServingStudioIntro" && npm ci && npm run build
 
 # CPU web stack; no Agent runner image, GPU, or model credentials required.
 build: check-tools check-submodules build-analyzer sync-agent build-ui build-intro
 
 # Optional host simulator/profiling environment, including CUDA Python packages.
 sync-simulator: check-env check-submodules
-    cd "{{workspace_root}}/VibeSim" && just sync
+    cd "{{workspace_root}}/ServingStudioSim" && just sync
 
 # Expensive: build the runner image and run its non-GPU acceptance test.
 build-runner-image: check-tools check-submodules check-docker

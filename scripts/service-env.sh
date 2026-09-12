@@ -11,9 +11,9 @@ set +a
 export VIBESIM_PORT_BASE=${VIBESIM_PORT_BASE:-$((60030 + 3 * $(id -u)))}
 export UI_PORT=$VIBESIM_PORT_BASE
 export AGENT_PORT=$((UI_PORT + 1)) ANALYZER_PORT=$((UI_PORT + 2))
-export VIBESIM_AGENT_DIR=${VIBESIM_AGENT_DIR:-$workspace_root/VibeSimAgent}
-export VIBESIM_SIM_DIR=${VIBESIM_SIM_DIR:-$workspace_root/VibeSim}
-export VIBESIM_UI_DIR=${VIBESIM_UI_DIR:-$workspace_root/VibeSimUI/app}
+export VIBESIM_AGENT_DIR=${VIBESIM_AGENT_DIR:-$workspace_root/ServingStudioAgent}
+export VIBESIM_SIM_DIR=${VIBESIM_SIM_DIR:-$workspace_root/ServingStudioSim}
+export VIBESIM_UI_DIR=${VIBESIM_UI_DIR:-$workspace_root/ServingStudioUI/app}
 export VIBESIM_ANALYZER_BIN=${VIBESIM_ANALYZER_BIN:-$VIBESIM_SIM_DIR/target/release/analyze}
 export VIBESIM_AGENT_MAIN_DIR=${VIBESIM_AGENT_MAIN_DIR:-$VIBESIM_SIM_DIR}
 export VIBESIM_AGENT_WORKSPACES_ROOT=${VIBESIM_AGENT_WORKSPACES_ROOT:-$workspace_root/agent-workspaces}
