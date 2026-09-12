@@ -1,8 +1,6 @@
 <p align="center">
-  <img src="branding/servingstudio-symbol.svg" alt="ServingStudio logo" width="64">
+  <img src="branding/servingstudio-logo.svg" alt="ServingStudio" width="280">
 </p>
-
-<h1 align="center">ServingStudio</h1>
 
 This repository pins the four repositories that form the ServingStudio application
 and introduction site, and keeps the reproducible build/deployment entry points
@@ -45,8 +43,8 @@ hosting and proxy requirements are documented in `reproduce.md`.
 
 | Path | Repository | Tracking branch |
 | --- | --- | --- |
-| `ServingStudioSim/` | Simulator and ServingStudio Analyzer | `master` |
-| `ServingStudioAgent/` | Agent/conversation backend | `agent-http-api` |
+| `ServingStudioSim/` | Simulator and ServingStudio Analyzer | `main` |
+| `ServingStudioAgent/` | Agent/conversation backend | `main` |
 | `ServingStudioUI/` | User-facing Analyzer UI | `main` |
 | `ServingStudioIntro/` | ServingStudio introduction website | `main` |
 

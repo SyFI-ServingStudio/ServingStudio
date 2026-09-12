@@ -18,8 +18,8 @@ cd servingstudio
 
 | Directory | Role | Tracking branch |
 | --- | --- | --- |
-| `ServingStudioSim/` | Simulator, Analyzer, profiling | `master` |
-| `ServingStudioAgent/` | Agent backend and Docker runners | `agent-http-api` |
+| `ServingStudioSim/` | Simulator, Analyzer, profiling | `main` |
+| `ServingStudioAgent/` | Agent backend and Docker runners | `main` |
 | `ServingStudioUI/` | Application UI | `main` |
 | `ServingStudioIntro/` | Introduction website | `main` |
 

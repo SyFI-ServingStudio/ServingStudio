@@ -1,11 +1,11 @@
 [submodule "ServingStudioSim"]
 	path = ServingStudioSim
 	url = https://github.com/SyFI-ServingStudio/ServingStudioSim.git
-	branch = master
+	branch = main
 [submodule "ServingStudioAgent"]
 	path = ServingStudioAgent
 	url = https://github.com/SyFI-ServingStudio/ServingStudioAgent.git
-	branch = agent-http-api
+	branch = main
 [submodule "ServingStudioUI"]
 	path = ServingStudioUI
 	url = https://github.com/SyFI-ServingStudio/ServingStudioUI.git
