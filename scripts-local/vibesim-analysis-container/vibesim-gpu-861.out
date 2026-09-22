@@ -1,0 +1,58 @@
+==== slurm_gpu.sh on cayenne job=861 ====
+CUDA_VISIBLE_DEVICES=0
+allocated GPU UUID(s): GPU-17dce9e8-fd5a-2fcc-3847-dc31ae451efc
+0, GPU-17dce9e8-fd5a-2fcc-3847-dc31ae451efc, 0 MiB
+==== exec: ./run_kimi_single_layer.sh --point 1,1048576;128,8192 --split --attn-type mla --moe-backend flashinfer_mxfp4 --attention-backend cutedsl_mla --attn-heads 12 --kv-cache-dtype fp8_e4m3 --experts 112 --ep 8 --cuda-graph --iters 40 --replay /work/kimi_single_layer/golden/mla_prod.pt ====
+==== kimi_single_layer: img=lmsysorg/sglang:v0.5.20 gpu="device=GPU-17dce9e8-fd5a-2fcc-3847-dc31ae451efc" args=--point 1,1048576;128,8192 --split --attn-type mla --moe-backend flashinfer_mxfp4 --attention-backend cutedsl_mla --attn-heads 12 --kv-cache-dtype fp8_e4m3 --experts 112 --ep 8 --cuda-graph --iters 40 --replay /work/kimi_single_layer/golden/mla_prod.pt ====
+--- Wrapper: Applying owner=yilegu, memory=432834647654 bytes, and cpus=28.8 ---
+==============================================================================
+kimi_single_layer_decode v3 (K3/MLA)  experts=112 EP=8 layer_idx=4 iters=40 warmup=20 split=True moe_backend=flashinfer_mxfp4 attention_backend=cutedsl_mla page_size=64 attn_heads=12 cuda_graph=True kv_cache_dtype=fp8_e4m3 mamba_ssm_dtype=float32
+torch=2.13.0+cu130  dev=NVIDIA B200
+sglang=0.5.20
+==============================================================================
+[cfg] wrote /tmp/k3_cfg/config.json  experts=112 (EP=8) top_k=16 shared=2 layers=8  moe_backend=flashinfer_mxfp4 hidden_act=situ  attn_type=mla target_layer=4 mla_heads=12 kda_heads=96 kda_layers=[1, 2, 3, 4, 6, 7, 8] full_attn=[5]
+[moe] flashinfer_mxfp4_moe_precision=default
+[moe] runner_backend=MoeRunnerBackend.FLASHINFER_MXFP4 is_flashinfer_mxfp4=True is_deep_gemm=False
+[boot] tp=1 attn_tp=1 world=1  is_kda_layer(4)=False  attention_arch=1 dtype=torch.bfloat16
+[layer] mxfp4 quant_config=Mxfp4Config quant_format=None
+[layer] UnquantizedLinearMethod from sglang.srt.layers.quantization.unquant
+[layer] patched Mxfp4Config.get_quant_method: LinearBase/RadixAttention -> bf16 unquantized fallback
+[layer] KimiK3DecoderLayer(layer_idx=4): self_attn=KimiK3MLAAttention (KDA=False MLA=True)  mlp=KimiK3MoE (MoE=True)
+[layer] float params=0.217B (fp32 kept: 0.00M)
+[layer] random-init 0.217B float params -> cuda/bf16/eval (MLA: absorbed kv_b_proj -> w_kc(12, 128, 512) w_vc(12, 512, 128))
+[mxfp4] experts=FusedMoE tensors:
+[mxfp4]   w13_weight                       (112, 6144, 1792)      torch.uint8 <- e2m1 randint
+[mxfp4]   w13_weight_scale                 (112, 6144, 112)       torch.uint8 <- ue8m0 fill 127
+[mxfp4]   w13_weight_bias                  (112, 6144)            torch.bfloat16 <- bias normal
+[mxfp4]   w2_weight                        (112, 3584, 1536)      torch.uint8 <- e2m1 randint
+[mxfp4]   w2_weight_scale                  (112, 3584, 96)        torch.uint8 <- ue8m0 fill 127
+[mxfp4]   w2_weight_bias                   (112, 3584)            torch.bfloat16 <- bias normal
+[mxfp4] quant_method=Mxfp4MoEMethod use_flashinfer=True use_marlin=False _fi_kernel=trtllm_sm100 precision=default
+[mxfp4] quant_method.process_weights_after_loading(experts) OK
+[layer] post_load_merge: front_w=(15984, 7168) fused_front_eligible=True bias_dtype=torch.float32
+[moe] resolved expert method: {'class': 'Mxfp4MoEMethod', 'use_flashinfer': True, 'use_marlin': False, '_fi_kernel': 'trtllm_sm100', 'flashinfer_mxfp4_moe_precision': 'default'}
+
+---- rung adhoc ----
+/sgl-workspace/sglang/python/sglang/srt/layers/attention/flashinfer_mla_backend.py:292: UserWarning: BatchMLAPagedAttentionWrapper: backend='auto' selected 'fa2' on SM100, which is not Blackwell-native and gives poor MLA decode performance. For decode, use flashinfer.mla.trtllm_batch_decode_with_kv_cache_mla (Blackwell-native trtllm-gen); backend='cutlass' is the closest in-wrapper alternative but may be slower than this fallback for decode shapes.
+  self.prefill_wrapper_paged = BatchMLAPagedAttentionWrapper(
+[mla] CuteDslMLABackend built (attention_backend=cutedsl_mla page_size=64 kv_dtype=torch.float8_e4m3fn); kv=0.604GB kv_dim=576 num_head=12
+/opt/sglang/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/pipeline/helpers.py:669: UserWarning: NamedBarrier wait also arrives on the barrier. Routing call to NamedBarrier.arrive_and_wait().
+  warnings.warn(
+CHECK {"max_abs_err": 0.0, "max_rel_err": 0.0, "mean_rel_err": 0.0, "nan": false, "state_ok": true, "rel_err_max": 0.02, "pass": true}
+[time] B=    1 L=  1048576  us/step=  1433.09  us/tok=1433.088  kv=0.604GB  peak=6.92GB  finite=True  shape=[1, 7168]  GRAPH us/step=333.1 (x4.30 vs eager, meta_prep=34.8us finite=True)  attn=578.8us moe=658.8us norms=42.8us  floor=86.3us a/floor=6.71x
+JSON {"B": 1, "seq_len": 1048576, "ok": true, "latency_us": 333.0880105495453, "latency_mode": "graph", "us_step": 1433.087944984436, "us_step_graph": 333.0880105495453, "us_attn": 578.8480043411255, "us_moe": 658.7839722633362, "us_norms": 42.847998440265656, "finite": true, "graph_finite": true, "attention_backend": "cutedsl_mla", "attn_heads": 12, "seed": 0, "error": null, "point": [1, 1048576], "correctness": {"max_abs_err": 0.0, "max_rel_err": 0.0, "mean_rel_err": 0.0, "nan": false, "state_ok": true, "rel_err_max": 0.02, "pass": true}}
+[mla] CuteDslMLABackend built (attention_backend=cutedsl_mla page_size=64 kv_dtype=torch.float8_e4m3fn); kv=0.604GB kv_dim=576 num_head=12
+/opt/sglang/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/pipeline/helpers.py:669: UserWarning: NamedBarrier wait also arrives on the barrier. Routing call to NamedBarrier.arrive_and_wait().
+  warnings.warn(
+CHECK {"max_abs_err": 0.0, "max_rel_err": 0.0, "mean_rel_err": 0.0, "nan": false, "state_ok": true, "rel_err_max": 0.02, "pass": true}
+[time] B=  128 L=     8192  us/step=  1345.92  us/tok=  10.515  kv=0.604GB  peak=6.67GB  finite=True  shape=[128, 7168]  GRAPH us/step=642.3 (x2.10 vs eager, meta_prep=37.2us finite=True)  attn=567.7us moe=659.8us norms=43.8us  floor=86.3us a/floor=6.58x
+JSON {"B": 128, "seq_len": 8192, "ok": true, "latency_us": 642.3360109329224, "latency_mode": "graph", "us_step": 1345.9199666976929, "us_step_graph": 642.3360109329224, "us_attn": 567.7440166473389, "us_moe": 659.8399877548218, "us_norms": 43.83999854326248, "finite": true, "graph_finite": true, "attention_backend": "cutedsl_mla", "attn_heads": 12, "seed": 0, "error": null, "point": [128, 8192], "correctness": {"max_abs_err": 0.0, "max_rel_err": 0.0, "mean_rel_err": 0.0, "nan": false, "state_ok": true, "rel_err_max": 0.02, "pass": true}}
+
+==============================================================================
+rung              B   seq_len    us/step    us/tok     kv_GB  status
+adhoc             1   1048576    1433.09  1433.088     0.604  ok  attn=578.8 moe=658.8 norms=42.8 floor=86.3 a/floor=6.71x  graph=333.1us (x4.30) meta=34.8
+adhoc           128      8192    1345.92    10.515     0.604  ok  attn=567.7 moe=659.8 norms=43.8 floor=86.3 a/floor=6.58x  graph=642.3us (x2.10) meta=37.2
+==============================================================================
+[out] wrote /work/kimi_single_layer/result_20260922_112438.json
+[rank0]:[W922 18:25:37.508192072 ProcessGroupNCCL.cpp:1624] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())
+==== done; json -> /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/kimi_single_layer/result_20260922_112438.json ====

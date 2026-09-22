@@ -1,0 +1,33 @@
+{
+  "_note": "Kimi-K3 open-ended optimizer case: ONE KDA (Kimi Delta Attention, linear-attn) decoder layer of Kimi-K3 on sglang v0.5.20, B200, in the cookbook production shape (attention TP8 rank = 12 heads, EP8 rank = 112 mxfp4 routed experts, bf16 KDA state). Metric = CUDA-graph replay time of the decode step. No PR answer key: the judge scores improvement over the pristine tree with a correctness gate (output + post-step recurrent state vs a seeded golden).",
+  "case": "k3_kda",
+  "mode": "open_ended",
+  "framework": "sglang",
+  "codex_image": "rga-local/sglang-k3:v0520-codex",
+  "before_image": "lmsysorg/sglang:v0.5.20",
+  "judge": "judge_k3.py",
+  "task_template": "agent_task_k3_opt.md",
+  "driver": "kimi_single_layer_decode.py",
+  "driver_args": "--attn-type kda --moe-backend flashinfer_mxfp4 --attn-heads 12 --mamba-ssm-dtype bfloat16 --experts 112 --ep 8 --cuda-graph --iters 40 --warmup 10",
+  "points": {"primary": [128, 8192], "secondary": [[32, 8192], [1, 8192]]},
+  "reps": 5,
+  "min_improvement": 0.05,
+  "rel_err_max": 0.02,
+  "seed": 0,
+  "edit_tree": {"container_path": "/sgl-workspace/sglang/python/sglang"},
+  "mounts": ["/raid/hf/hub:/raid/hf/hub:ro"],
+  "shm_size": "32g",
+  "codex_model": "gpt-5.6-luna",
+  "render": {
+    "METRIC": "CUDA-graph decode-step latency of one Kimi-K3 KDA decoder layer",
+    "FRAMEWORK": "sglang",
+    "CHECKOUT": "/sgl-workspace/sglang",
+    "MODEL_NAME": "Kimi-K3 (moonshotai/Kimi-K3): one KDA (linear-attention) decoder layer, as it runs on one B200 of the production TP8/EP8 deployment (12 attention heads, 112 local mxfp4 experts, bf16 recurrent state)",
+    "WORKLOAD": "batched decode, one token per request per step: B=128 requests at context 8192 (primary), plus B=32 and B=1 at 8192 (must not regress)",
+    "DRIVER_ARGS": "--attn-type kda --moe-backend flashinfer_mxfp4 --attn-heads 12 --mamba-ssm-dtype bfloat16 --experts 112 --ep 8 --cuda-graph --iters 40 --warmup 10",
+    "POINTS": "128,8192;32,8192;1,8192",
+    "INSTALL_CMD": "true",
+    "REBUILD_CMD": "find /sgl-workspace/sglang/python/sglang -name __pycache__ -prune -exec rm -rf {} + ; cd /tmp && python3 /tmp/kimi_single_layer_decode.py --point 1,8192 --attn-type kda --moe-backend flashinfer_mxfp4 --attn-heads 12 --mamba-ssm-dtype bfloat16 --experts 112 --ep 8 --cuda-graph --iters 5 --warmup 2 && echo LAYER_SMOKE_OK",
+    "ORACLE_URL": "http://172.17.0.1:8801"
+  }
+}

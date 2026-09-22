@@ -1,0 +1,139 @@
+{
+ "kernels": [
+  {
+   "name": "bmm_MxE4m3_MxE2m1MxE4m3_Fp32_Ab32_Bb32_Cb32_t128x16x256u2_s3_et128x16_m128x16x32_c1x1x1_rM_TN_transOut_schPd2x1x2x3_biasFp32M_bN_tma_ldgstsSf_rgTma_clmp_siTuGlu_dynB_sm100f",
+   "count": 1.0,
+   "total_us": 264.8414999999999,
+   "avg_us": 264.8414999999999
+  },
+  {
+   "name": "bmm_Bfloat16_MxE2m1MxE4m3_Fp32_Ab32_Bb32_t128x16x256u2_s3_et128x16_m128x16x32_c1x1x1_rM_TN_transOut_schPd2x1x2x3_biasFp32M_bN_rgTma_clmp_dynB_sm100f",
+   "count": 1.0,
+   "total_us": 134.6529,
+   "avg_us": 134.6529
+  },
+  {
+   "name": "nvjet_sm100_tss_240x64_64x9_1x2_2cta_h_bz_TNN",
+   "count": 1.0,
+   "total_us": 49.95170000000004,
+   "avg_us": 49.95170000000004
+  },
+  {
+   "name": "void sglang::kda_decode_fusion_many_heads_kernel<true, true, 12, 12, true, false, false, false, false, false, true, true, true, true, true, true, true, 3, true>(__nv_bfloat16 const*, __nv_bfloat16 const*, __nv_bfloat16 const*, float const*, float const*, float const*, float const*, float const*, float const*, __nv_bfloat16*, __nv_bfloat16*, __nv_bfloat16*, float const*, __nv_bfloat16 const*, float const*, __nv_bfloat16 const*, __nv_bfloat16 const*, float const*, int const*, int const*, float*, __nv_bfloat16*, int, int, int, float, float, float, long, long, long, long, long, long, long)",
+   "count": 1.0,
+   "total_us": 39.5489999999999,
+   "avg_us": 39.5489999999999
+  },
+  {
+   "name": "nvjet_sm100_tst_128x64_64x10_2x2_2cta_h_bz_TNT",
+   "count": 1.0,
+   "total_us": 22.703800000000037,
+   "avg_us": 22.703800000000037
+  },
+  {
+   "name": "nvjet_sm100_tst_112x64_64x14_2x2_2cta_h_bz_TNN",
+   "count": 2.0,
+   "total_us": 20.20799999999982,
+   "avg_us": 10.10399999999991
+  },
+  {
+   "name": "nvjet_sm100_tst_64x64_64x16_2x1_2cta_v_bz_TNT",
+   "count": 1.0,
+   "total_us": 15.154999999999973,
+   "avg_us": 15.154999999999973
+  },
+  {
+   "name": "nvjet_sm100_tst_64x32_64x16_2x4_2cta_h_bz_splitK_TNT",
+   "count": 2.0,
+   "total_us": 11.35369999999997,
+   "avg_us": 5.676849999999985
+  },
+  {
+   "name": "void moe::dev::finalize::finalizeKernelVecLoad<moe::dev::finalize::KernelParams<cutlass::bfloat16_t, float, 4, true> >(moe::dev::finalize::KernelParams<cutlass::bfloat16_t, float, 4, true>)",
+   "count": 1.0,
+   "total_us": 10.217499999999973,
+   "avg_us": 10.217499999999973
+  },
+  {
+   "name": "void sglang::situ_and_mul_kernel<float, __nv_bfloat16, true, true>(sglang::SituAndMulParams)",
+   "count": 1.0,
+   "total_us": 8.659200000000089,
+   "avg_us": 8.659200000000089
+  },
+  {
+   "name": "kernel_cutlass_kernel_flashinfernormkernelsfused_add_rmsnormFusedAddRMSNormKernel_object_at__tensorptrbf16gmemalign128oi64716871681_tensorptrbf16gmemalign128oi64716871681_tensorptrbf16gme_0",
+   "count": 1.0,
+   "total_us": 7.801500000000044,
+   "avg_us": 7.801500000000044
+  },
+  {
+   "name": "void moe::dev::routing::routingCustom::routingIndicesClusterKernel<moe::dev::routing::routingCustom::KernelParams<__nv_bfloat16, __nv_bfloat16, 256, 16, moe::dev::routing::TopKExpertSelect<moe::dev::routing::NoOpPreprocess, moe::dev::routing::SoftmaxPostprocess> >, 512>(moe::dev::routing::routingCustom::KernelParams<__nv_bfloat16, __nv_bfloat16, 256, 16, moe::dev::routing::TopKExpertSelect<moe::dev::routing::NoOpPreprocess, moe::dev::routing::SoftmaxPostprocess> >)",
+   "count": 1.0,
+   "total_us": 7.689699999999993,
+   "avg_us": 7.689699999999993
+  },
+  {
+   "name": "nvjet_sm100_tst_24x64_64x16_4x1_v_bz_TNN",
+   "count": 2.0,
+   "total_us": 6.662400000000048,
+   "avg_us": 3.331200000000024
+  },
+  {
+   "name": "void cublasLt::splitKreduce_kernel<32, 16, int, float, __nv_bfloat16, float, __nv_bfloat16, false, float, __nv_bfloat16, __nv_bfloat16, true, false, false, false>(cublasLt::cublasSplitKParams<float>, float const*, __nv_bfloat16 const*, float*, __nv_bfloat16*, float const*, float const*, __nv_bfloat16 const*, float const*, __nv_bfloat16*, void*, long, float*, int*, float*, float*, float const*, float const*, float const*, float const*, float const*)",
+   "count": 2.0,
+   "total_us": 6.422500000000014,
+   "avg_us": 3.211250000000007
+  },
+  {
+   "name": "_router_triton_kernel",
+   "count": 1.0,
+   "total_us": 5.980800000000011,
+   "avg_us": 5.980800000000011
+  },
+  {
+   "name": "void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_128x2_tn_align2>(cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_128x2_tn_align2::Params)",
+   "count": 1.0,
+   "total_us": 4.236900000000105,
+   "avg_us": 4.236900000000105
+  },
+  {
+   "name": "kernel_cutlass_kernel_flashinfernormkernelsrmsnormRMSNormKernel_object_at__tensorptrbf16gmemalign128oi64716871681_tensorptrbf16gmemalign16o71681_tensorptrbf16gmemalign128oi64716871681___T_0",
+   "count": 1.0,
+   "total_us": 3.08459999999983,
+   "avg_us": 3.08459999999983
+  },
+  {
+   "name": "void cublasLt::splitKreduce_kernel<32, 16, int, __nv_bfloat16, __nv_bfloat16, float, __nv_bfloat16, false, __nv_bfloat16, __nv_bfloat16, __nv_bfloat16, true, false, false, false>(cublasLt::cublasSplitKParams<float>, __nv_bfloat16 const*, __nv_bfloat16 const*, __nv_bfloat16*, __nv_bfloat16*, float const*, float const*, __nv_bfloat16 const*, __nv_bfloat16 const*, __nv_bfloat16*, void*, long, float*, int*, float*, float*, float const*, float const*, float const*, float const*, float const*)",
+   "count": 1.0,
+   "total_us": 3.056100000000049,
+   "avg_us": 3.056100000000049
+  },
+  {
+   "name": "void sglang::per_token_group_quant_flat_kernel<sglang::QuantTrait<float, __nv_fp8_e4m3, 32u, true, true, true, false>, true>(sglang::QuantKernelParams)",
+   "count": 1.0,
+   "total_us": 2.4510999999999283,
+   "avg_us": 2.4510999999999283
+  },
+  {
+   "name": "void at::native::vectorized_elementwise_kernel<8, at::native::CUDAFunctor_add<c10::BFloat16>, std::array<char*, 3ul> >(int, at::native::CUDAFunctor_add<c10::BFloat16>, std::array<char*, 3ul>)",
+   "count": 1.0,
+   "total_us": 2.4064000000000076,
+   "avg_us": 2.4064000000000076
+  },
+  {
+   "name": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<float>, std::array<char*, 1ul> >(int, at::native::FillFunctor<float>, std::array<char*, 1ul>)",
+   "count": 1.0,
+   "total_us": 1.1454999999999587,
+   "avg_us": 1.1454999999999587
+  }
+ ],
+ "total_kernel_us": 628.2297999999996,
+ "num_launches": 25.0,
+ "point": [
+  128,
+  8192
+ ],
+ "latency_us": 598.5280275344849,
+ "latency_mode": "graph",
+ "attn_type": "kda"
+}

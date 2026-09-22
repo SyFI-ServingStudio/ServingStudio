@@ -108,7 +108,9 @@ def build_config_dir(experts, ep, num_layers=8, out_dir="/tmp/k3_cfg",
         "num_experts": experts,             # EP-rank-shrunk (896/EP; 56 @ EP16)
         "num_experts_per_token": 16,        # K3 top-k
         "num_shared_experts": 2,
-        "routed_scaling_factor": 2.5,
+        "intermediate_size": 33792,         # dense layer-0 MLP (real HF value)
+        "routed_scaling_factor": 1.0,       # real HF value (was 2.5 in the first sweeps)
+        "mla_use_output_gate": True,        # real HF value: MLA o_proj output gate
         "first_k_dense_replace": 1,
         "moe_layer_freq": 1,
         "use_grouped_topk": True,
@@ -139,7 +141,10 @@ def build_config_dir(experts, ep, num_layers=8, out_dir="/tmp/k3_cfg",
             "kda_layers": kda_layers,
             "full_attn_layers": full_attn_layers,
             "gate_lower_bound": -5.0,
-            "use_full_rank_gate": False,
+            # Real HF config (moonshotai/Kimi-K3 text_config.linear_attn_config):
+            # full-rank f/g gates (7168->heads*128 each) -> the fused qkvbfg
+            # projection + _merge_bfa_weights paths engage as in production.
+            "use_full_rank_gate": True,
         },
     }
     os.makedirs(out_dir, exist_ok=True)
@@ -240,7 +245,7 @@ def bootstrap(cfg_dir, moe_backend="bf16", attn_type="kda", target_layer=5,
 # --------------------------------------------------------------------------- #
 # Layer
 # --------------------------------------------------------------------------- #
-def build_layer(cfg, layer_idx=5, moe_backend="bf16", attn_type="kda"):
+def build_layer(cfg, layer_idx=5, moe_backend="bf16", attn_type="kda", seed=0):
     """Build ONE KimiK3DecoderLayer; random-init bf16. attn_type "kda" builds at a
     KDA (linear-attn) layer index (self_attn=KimiK3DeltaAttention); "mla" builds at
     a full-attn index (self_attn=KimiK3MLAAttention, dense MLA).
@@ -305,7 +310,7 @@ def build_layer(cfg, layer_idx=5, moe_backend="bf16", attn_type="kda"):
         Mxfp4Config.get_quant_method = _gqm_linear_fallback
         log("[layer] patched Mxfp4Config.get_quant_method: LinearBase/RadixAttention "
             "-> bf16 unquantized fallback")
-    torch.manual_seed(0)
+    torch.manual_seed(seed)   # weights + mxfp4 fill are drawn from the global RNG
     # Production (KimiK3Model.__init__, kimi_k3.py:2816) hands every layer three
     # side streams: [0] MoE shared-expert overlap, [1] MLA alt, [2] KDA bfa /
     # MLA gate. The bfa/gate side-stream paths only fire under CUDA-graph
@@ -478,7 +483,7 @@ class KDAState:
     """Owns the fixed-size conv + temporal recurrent state and the stub surface
     that KDAAttnBackend / forward_decode read."""
 
-    def __init__(self, cfg, sa, B, device="cuda"):
+    def __init__(self, cfg, sa, B, device="cuda", seed=0):
         from sglang.srt.layers.attention.linear.utils import (
             LinearAttnKernelBackend, LinearAttnBackends,
         )
@@ -493,13 +498,22 @@ class KDAState:
         conv_dtype = params.dtype.conv                 # bf16
         ssm_dtype = params.dtype.temporal              # fp32
 
-        torch.manual_seed(0)
-        self.conv = torch.randn(
-            (num_slots, *conv_shape), dtype=conv_dtype, device=device) * 0.02
-        self.temporal = torch.randn(
-            (num_slots, *temporal_shape), dtype=ssm_dtype, device=device) * 0.02
+        # Seeded, NON-zero-mean recurrent state: a step that skips the state read
+        # (or its writeback) then changes the output / post-step state measurably,
+        # which a zero-mean random state would hide behind averaging.
+        gen = torch.Generator(device=device)
+        gen.manual_seed(seed + 17)
+        self.conv = (torch.randn((num_slots, *conv_shape), dtype=torch.bfloat16,
+                                 device=device, generator=gen) * 0.02).to(conv_dtype)
+        self.temporal = (torch.randn((num_slots, *temporal_shape), dtype=torch.float32,
+                                     device=device, generator=gen) * 0.02 + 0.05
+                         ).to(ssm_dtype)
         self.state_bytes = (self.conv.numel() * self.conv.element_size()
                             + self.temporal.numel() * self.temporal.element_size())
+        # Golden support: initial copies so a correctness step can start from the
+        # same state after warm-up/timing mutated the buffers in place.
+        self._conv0 = self.conv.clone()
+        self._temporal0 = self.temporal.clone()
 
         conv_buf = self.conv
         temporal_buf = self.temporal
@@ -552,6 +566,16 @@ class KDAState:
         log(f"[kda] KDAAttnBackend built; conv={tuple(self.conv.shape)}/{self.conv.dtype} "
             f"temporal={tuple(self.temporal.shape)}/{self.temporal.dtype} "
             f"state={self.state_bytes/1e6:.2f}MB/slot-set")
+
+    def reset(self):
+        with torch.no_grad():
+            self.conv.copy_(self._conv0)
+            self.temporal.copy_(self._temporal0)
+
+    def state_after(self):
+        """Post-step recurrent state of the real requests (slots 0..B-1)."""
+        return {"conv": self.conv[:self.B].clone(),
+                "temporal": self.temporal[:self.B].clone()}
 
     def make_forward_batch(self, cfg, seq_len):
         from sglang.srt.model_executor.forward_batch_info import (
@@ -609,7 +633,8 @@ class MLAState:
     values may be non-finite (reported)."""
 
     def __init__(self, cfg, mc, sa, layer_idx, B, L, device="cuda",
-                 attention_backend="triton", page_size=1, kv_dtype=torch.bfloat16):
+                 attention_backend="triton", page_size=1, kv_dtype=torch.bfloat16,
+                 seed=0):
         from sglang.srt.mem_cache.memory_pool import (
             MLATokenToKVPool, ReqToTokenPool,
         )
@@ -647,19 +672,34 @@ class MLAState:
         self.kv_pool.get_v_head_dim = (
             lambda: self.kv_pool.get_value_buffer(_sl).shape[-1]
         )
-        # Seed the latent+rope context random (finite). fp8 has no normal_(): fill
-        # a bf16 staging tensor chunk-wise and cast.
-        torch.manual_seed(0)
+        # Seeded latent+rope context (finite). fp8 has no normal_(): fill via a bf16
+        # staging tensor chunk-wise and cast. STRUCTURED: on top of the N(0,0.02)
+        # background, 64 rows per request spread uniformly over [0, L) are scaled
+        # x32 ("planted keys"). Softmax then concentrates on those rows, so an
+        # attention that reads only part of the context (a cheating "speedup")
+        # produces a measurably different output; uniform random KV would not.
+        gen = torch.Generator(device=device)
+        gen.manual_seed(seed + 23)
+        self.slot0 = page_size
         with torch.no_grad():
             kb = self.kv_pool.kv_buffer[0]
-            if kb.dtype == torch.bfloat16:
-                kb.normal_(0.0, 0.02)
-            else:
-                step = 1 << 20
-                for s in range(0, kb.shape[0], step):
-                    chunk = kb[s:s + step]
-                    chunk.copy_(torch.randn(chunk.shape, device=device,
-                                            dtype=torch.bfloat16) * 0.02)
+            step = 1 << 20
+            for s in range(0, kb.shape[0], step):
+                chunk = kb[s:s + step]
+                chunk.copy_(torch.randn(chunk.shape, device=device,
+                                        dtype=torch.bfloat16, generator=gen) * 0.02)
+            n_plant = min(64, L)
+            offs = (torch.arange(n_plant, device=device) * (L // n_plant)
+                    + torch.randint(0, max(1, L // n_plant), (n_plant,),
+                                    device=device, generator=gen))
+            for r in range(B):
+                rows = self.slot0 + r * L + offs
+                kb[rows] = (kb[rows].to(torch.bfloat16) * 32.0).to(kb.dtype)
+            # Golden support: the step writes exactly one row per request
+            # (out_cache_loc = last slot of the request's range).
+            self.write_locs = (self.slot0 + torch.arange(B, device=device) * L
+                               + (L - 1))
+            self._kv0_rows = kb[self.write_locs].clone()
         kb = self.kv_pool.kv_buffer[0]
         self.kv_bytes = kb.numel() * kb.element_size()
 
@@ -668,7 +708,6 @@ class MLAState:
         self.req_pool = ReqToTokenPool(
             size=B, max_context_len=L, device=device, enable_memory_saver=False,
         )
-        self.slot0 = page_size
         rows = torch.arange(B, device=device, dtype=torch.int32).view(B, 1) * L
         cols = torch.arange(L, device=device, dtype=torch.int32).view(1, L)
         self.req_pool.req_to_token[1:B + 1, :L] = self.slot0 + rows + cols
@@ -716,6 +755,14 @@ class MLAState:
             f"kv={self.kv_bytes/1e9:.3f}GB "
             f"kv_dim={self.kv_pool.kv_cache_dim} "
             f"num_head={getattr(self.backend, 'num_head', getattr(self.backend, 'num_q_heads', '?'))}")
+
+    def reset(self):
+        with torch.no_grad():
+            self.kv_pool.kv_buffer[0][self.write_locs] = self._kv0_rows
+
+    def state_after(self):
+        """The KV rows the step wrote (one per request)."""
+        return {"kv_rows": self.kv_pool.kv_buffer[0][self.write_locs].clone()}
 
     def make_forward_batch(self, cfg):
         from sglang.srt.model_executor.forward_batch_info import (
@@ -872,6 +919,84 @@ def graph_capture_and_time(layer, backend, backend_for_ctx, fb, positions, hidde
     return out
 
 
+def _point_path(path, B, L):
+    """Per-point file name: fill {B}/{L} if present, else insert _B{B}_L{L} before the ext."""
+    if "{B}" in path or "{L}" in path:
+        return path.replace("{B}", str(B)).replace("{L}", str(L))
+    root, ext = os.path.splitext(path)
+    return f"{root}_B{B}_L{L}{ext or '.pt'}"
+
+
+def gen_hidden(seed, B, device="cuda"):
+    """Seeded decode input (one token per request), independent of the global RNG."""
+    gen = torch.Generator(device=device)
+    gen.manual_seed(seed + 1000 + B)
+    return torch.randn(B, HIDDEN_SIZE, device=device, dtype=torch.bfloat16,
+                       generator=gen) * 0.02
+
+
+def _tensor_diff(a, b):
+    a = a.float(); b = b.float()
+    d = (a - b).abs()
+    ref = b.abs().max().item() + 1e-6
+    return {"max_abs_err": d.max().item(),
+            "max_rel_err": d.max().item() / ref,
+            "mean_rel_err": (d.mean() / (b.abs().mean() + 1e-6)).item(),
+            "nan": bool(~torch.isfinite(a).all())}
+
+
+def correctness_step(layer, st, fb, positions, hidden, seed, backend_for_ctx,
+                     graph=None, static_out=None):
+    """One decode step from the GOLDEN initial state and input; returns
+    (output[B,H] bf16, post-step state dict). Uses the captured graph when
+    available (the judged metric is graph replay, so the checked numerics must be
+    the graph's), else the eager path."""
+    st.reset()
+    with torch.no_grad():
+        hidden.copy_(gen_hidden(seed, hidden.shape[0]))
+    torch.cuda.synchronize()
+    if graph is not None:
+        graph.replay()
+        torch.cuda.synchronize()
+        out = static_out.clone()
+    else:
+        with forward_ctx(backend_for_ctx), torch.inference_mode():
+            o = call_layer(layer, fb, positions, hidden)
+        torch.cuda.synchronize()
+        out = (o[0] if isinstance(o, tuple) else o).clone()
+    return out, st.state_after()
+
+
+def profile_kernels(fn, n=10):
+    """torch.profiler pass over n calls of fn -> per-kernel {name,count,total_us,avg_us}
+    (works for graph replays: CUDA activities inside a graph are recorded)."""
+    from torch.profiler import profile, ProfilerActivity
+    fn(); torch.cuda.synchronize()
+    with profile(activities=[ProfilerActivity.CUDA]) as prof:
+        for _ in range(n):
+            fn()
+        torch.cuda.synchronize()
+    agg = {}
+    for ev in prof.events():
+        if getattr(ev, "device_type", None) is None:
+            continue
+        if "CUDA" not in str(ev.device_type):
+            continue
+        dur = ev.time_range.elapsed_us() if hasattr(ev, "time_range") else getattr(ev, "cuda_time", 0.0)
+        a = agg.setdefault(ev.name, {"name": ev.name, "count": 0, "total_us": 0.0})
+        a["count"] += 1
+        a["total_us"] += dur
+    rows = []
+    for a in agg.values():
+        a["count"] = a["count"] / n
+        a["total_us"] = a["total_us"] / n
+        a["avg_us"] = a["total_us"] / max(a["count"], 1e-9)
+        rows.append(a)
+    rows.sort(key=lambda r: -r["total_us"])
+    return {"kernels": rows, "total_kernel_us": sum(r["total_us"] for r in rows),
+            "num_launches": sum(r["count"] for r in rows)}
+
+
 def time_split(layer, fb, positions, hidden, iters, warmup, attn_type="kda"):
     """Separately time self_attn vs MoE mlp vs the two RMSNorms."""
     out = {}
@@ -910,15 +1035,17 @@ def time_split(layer, fb, positions, hidden, iters, warmup, attn_type="kda"):
 
 def time_point(cfg, sa, layer, B, seq_len, iters, warmup, split=False,
                attn_type="kda", mc=None, layer_idx=5, attention_backend="triton",
-               cuda_graph=False, page_size=1, kv_dtype=torch.bfloat16):
-    res = {"B": B, "seq_len": seq_len, "ok": False, "attn_type": attn_type}
+               cuda_graph=False, page_size=1, kv_dtype=torch.bfloat16, seed=0,
+               golden=None, profile_kernels_out=None):
+    """golden: None | {"mode": "capture"|"replay", "path": str, "rel_err_max": float}."""
+    res = {"B": B, "seq_len": seq_len, "ok": False, "attn_type": attn_type, "seed": seed}
     st = None
     graph_keepalive = None
     try:
         if attn_type == "mla":
             st = MLAState(cfg, mc, sa, layer_idx, B, seq_len,
                           attention_backend=attention_backend, page_size=page_size,
-                          kv_dtype=kv_dtype)
+                          kv_dtype=kv_dtype, seed=seed)
             res["page_size"] = page_size
             res["kv_dtype"] = str(kv_dtype)
             fb = st.make_forward_batch(cfg)
@@ -926,11 +1053,10 @@ def time_point(cfg, sa, layer, B, seq_len, iters, warmup, split=False,
             res["attention_backend"] = attention_backend
             res["attention_backend_class"] = type(st.backend).__name__
         else:
-            st = KDAState(cfg, sa, B)
+            st = KDAState(cfg, sa, B, seed=seed)
             fb = st.make_forward_batch(cfg, seq_len)
             backend_for_ctx = KDADecodeShim(st.kda)
-        torch.manual_seed(0)
-        hidden = torch.randn(B, HIDDEN_SIZE, device="cuda", dtype=torch.bfloat16) * 0.02
+        hidden = gen_hidden(seed, B)
         positions = fb.positions
 
         with forward_ctx(backend_for_ctx), torch.inference_mode():
@@ -978,6 +1104,59 @@ def time_point(cfg, sa, layer, B, seq_len, iters, warmup, split=False,
                 res["graph_traceback"] = traceback.format_exc()
                 log(f"[graph] B={B} L={seq_len} CAPTURE FAILED: {res['graph_error']}")
                 log(res["graph_traceback"])
+
+        # The judged latency: graph replay when captured, else eager.
+        res["latency_us"] = res["us_step_graph"] if res.get("graph_ok") else res["us_step"]
+        res["latency_mode"] = "graph" if res.get("graph_ok") else "eager"
+
+        if profile_kernels_out:
+            graph = graph_keepalive[0] if graph_keepalive else None
+            if graph is not None:
+                fn = graph.replay
+            else:
+                def fn():
+                    with forward_ctx(backend_for_ctx), torch.inference_mode():
+                        call_layer(layer, fb, positions, hidden)
+            prof = profile_kernels(fn)
+            prof.update({"point": [B, seq_len], "latency_us": res["latency_us"],
+                         "latency_mode": res["latency_mode"], "attn_type": attn_type})
+            res["kernel_profile"] = {k: prof[k] for k in ("total_kernel_us", "num_launches")}
+            res["kernel_profile_top"] = prof["kernels"][:12]
+            os.makedirs(os.path.dirname(os.path.abspath(profile_kernels_out)), exist_ok=True)
+            ppath = _point_path(profile_kernels_out, B, seq_len)
+            json.dump(prof, open(ppath, "w"), indent=1)
+            log(f"[profile] {ppath}: {prof['num_launches']:.0f} launches/step, "
+                f"kernel sum {prof['total_kernel_us']:.1f}us "
+                f"(latency {res['latency_us']:.1f}us {res['latency_mode']})")
+
+        if golden is not None:
+            graph, static_out = graph_keepalive if graph_keepalive else (None, None)
+            out, state = correctness_step(layer, st, fb, positions, hidden, seed,
+                                          backend_for_ctx, graph, static_out)
+            gpath = _point_path(golden["path"], B, seq_len)
+            if golden["mode"] == "capture":
+                torch.save({"B": B, "seq_len": seq_len, "seed": seed, "attn_type": attn_type,
+                            "latency_mode": res["latency_mode"], "out": out.cpu(),
+                            "state": {k: v.cpu() for k, v in state.items()}}, gpath)
+                res["golden_path"] = gpath
+                log(f"saved golden -> {gpath}")
+            else:
+                ref = torch.load(gpath, map_location="cuda")
+                assert ref["B"] == B and ref["seq_len"] == seq_len and ref["seed"] == seed, \
+                    f"golden {gpath} is for B={ref['B']} L={ref['seq_len']} seed={ref['seed']}"
+                chk = _tensor_diff(out, ref["out"].cuda())
+                state_chk = {k: _tensor_diff(state[k], ref["state"][k].cuda())
+                             for k in state}
+                tol = golden["rel_err_max"]
+                state_ok = all((not c["nan"]) and c["max_rel_err"] <= tol
+                               for c in state_chk.values())
+                chk.update({
+                    "state": state_chk, "state_ok": state_ok, "rel_err_max": tol,
+                    "pass": bool((not chk["nan"]) and chk["max_rel_err"] <= tol and state_ok),
+                })
+                res["correctness"] = chk
+                log("CHECK " + json.dumps({k: (round(v, 6) if isinstance(v, float) else v)
+                                           for k, v in chk.items() if k != "state"}))
 
         extra = ""
         if res.get("graph_ok"):
@@ -1077,6 +1256,17 @@ def main():
     ap.add_argument("--cuda-graph", action="store_true",
                     help="also capture the decode step in a CUDA graph and time "
                          "replays (us_step_graph); eager us_step is still reported")
+    ap.add_argument("--seed", type=int, default=0,
+                    help="seed for weights, state/KV, and the decode input")
+    ap.add_argument("--capture", type=str, default="",
+                    help="save the golden (output + post-step state) per point to this "
+                         "path (multi-point: _B{B}_L{L} suffix or {B}/{L} placeholders)")
+    ap.add_argument("--replay", type=str, default="",
+                    help="compare this run's output/state against a golden saved by --capture")
+    ap.add_argument("--rel-err-max", type=float, default=2e-2,
+                    help="CHECK passes iff max|a-b|/max|b| <= this for output and state")
+    ap.add_argument("--profile-kernels", type=str, default="",
+                    help="write a per-kernel torch.profiler table (JSON) per point")
     ap.add_argument("--point", type=str, default="", help="single point B,seq_len")
     ap.add_argument("--json-out", type=str, default="")
     args = ap.parse_args()
@@ -1112,7 +1302,13 @@ def main():
                             attention_backend=args.attention_backend,
                             page_size=args.page_size, kv_cache_dtype=sa_kv_dtype)
     layer = build_layer(cfg, args.layer_idx, moe_backend=args.moe_backend,
-                        attn_type=args.attn_type)
+                        attn_type=args.attn_type, seed=args.seed)
+    assert not (args.capture and args.replay), "use --capture or --replay, not both"
+    golden = None
+    if args.capture:
+        golden = {"mode": "capture", "path": args.capture, "rel_err_max": args.rel_err_max}
+    elif args.replay:
+        golden = {"mode": "replay", "path": args.replay, "rel_err_max": args.rel_err_max}
 
     # Record the resolved MoE expert method for the report.
     try:
@@ -1181,9 +1377,21 @@ def main():
                            layer_idx=args.layer_idx,
                            attention_backend=args.attention_backend,
                            cuda_graph=args.cuda_graph, page_size=args.page_size,
-                           kv_dtype=kv_dtype)
+                           kv_dtype=kv_dtype, seed=args.seed, golden=golden,
+                           profile_kernels_out=args.profile_kernels)
             r["rung"] = name
             results["points"].append(r)
+            # Machine-readable per-point line (what the judge parses).
+            summary = {k: r.get(k) for k in (
+                "B", "seq_len", "ok", "latency_us", "latency_mode", "us_step",
+                "us_step_graph", "us_attn", "us_moe", "us_norms", "finite",
+                "graph_finite", "attention_backend", "attn_heads", "seed", "error")}
+            summary["attn_heads"] = args.attn_heads
+            summary["point"] = [r["B"], r["seq_len"]]
+            if "correctness" in r:
+                summary["correctness"] = {k: v for k, v in r["correctness"].items()
+                                          if k != "state"}
+            log("JSON " + json.dumps(summary))
 
     log("\n" + "=" * 78)
     memcol = "kv_GB" if args.attn_type == "mla" else "state_MB"

@@ -17,5 +17,7 @@ vibesim-analysis-container/probe_*/
 vibesim-analysis-container/micro_*/
 vibesim-analysis-container/kernels_*/
 vibesim-analysis-container/sglang_capture_validate/
+vibesim-analysis-container/kimi_single_layer/golden/
+vibesim-analysis-container/iter_opt_eval_*/
 __pycache__/
 *.pyc
