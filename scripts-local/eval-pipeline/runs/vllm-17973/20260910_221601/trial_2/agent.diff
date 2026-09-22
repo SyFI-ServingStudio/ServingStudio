@@ -1,0 +1,699 @@
+diff --git a/model/work/README.md b/model/work/README.md
+index 933e0ea..186fe83 100644
+--- a/model/work/README.md
++++ b/model/work/README.md
+@@ -239,13 +239,15 @@ windowed-attention ViT is an explicit scope boundary and is not silently present
+ fully accounted. A multimodal prefill workload may carry an explicit `VisionGrid`;
+ the source-derived rotary and window-index footprints remain diagnostics, while the
+ two cumulative attention-boundary inputs are emitted as zero-FLOP `Segment` rows by
+-`Model.label()` and included in the necessary-work floor for both arms. The BEFORE
+-CostTree still lists its three legacy preparation locations in the 20-location map,
+-and both maps retain optional mRoPE locations: the rotary/window-index entries are
+-empty, while the cumulative entries retain their semantic mappings. The
+-`mrope_before_prepare` flag is bool-validated and survives only the prefill partition
+-in `attention_phases`; it cannot change the label rows or the floor basis. Its three
+-BEFORE-only preparation quantities remain materialization diagnostics outside
++`Model.label()` and included in the necessary-work floor for both arms. Both before
++and after CostTrees use the same 17-location map: the BEFORE selector
++keeps its legacy name, but its three old preparation quantities are diagnostics
++rather than timing leaves. Both maps retain optional mRoPE locations: the
++rotary/window-index entries are empty, while the cumulative entries retain their
++semantic mappings. The `mrope_before_prepare` flag is bool-validated and survives
++only the prefill partition in `attention_phases`; it cannot change the label rows
++or the floor basis. Its three BEFORE-only preparation quantities remain
++materialization diagnostics outside
+ necessary-work accounting.
+ 
+ For the audited `[t=1,h=36,w=36,count=1]` grid, the nested vLLM tensors are
+@@ -258,7 +260,7 @@ window index is `(36/2)*(36/2)=324` int64 values, so `324*8 = 2592` bytes,
+ not `1296*2 B`. Qwen's `window_merger` is `112/(14*2)=4` merged tokens per
+ side; `_num_window_groups(18)=ceil(18/4)=5`, giving `5*5=25` windows and
+ `cu_window_seqlens=(1+25)*4=104 B` int32 plus
+-`cu_seqlens=(1+1)*4=8 B` int32. The BEFORE cumulative preparation proxy is
++`cu_seqlens=(1+1)*4=8 B` int32. The BEFORE cumulative preparation diagnostic is
+ `104+8=112` bytes, and the shared output total is `207360+2592+104+8=210064`
+ bytes. The cumulative arrays are the required attention-boundary inputs and are
+ compulsory decoder-side rows in both arms. No source establishes that rotary or
+diff --git a/model/work/location_maps/qwen2_5_vl_mrope_before_unified.json b/model/work/location_maps/qwen2_5_vl_mrope_before_unified.json
+index 0658ffe..1c2d3ef 100644
+--- a/model/work/location_maps/qwen2_5_vl_mrope_before_unified.json
++++ b/model/work/location_maps/qwen2_5_vl_mrope_before_unified.json
+@@ -1,11 +1,8 @@
+ {
+   "schema_version": 1,
+-  "mapping_id": "qwen2-5-vl-mrope-before-unified-v1",
++  "mapping_id": "qwen2-5-vl-mrope-before-unified-v2",
+   "arch_types": ["qwen2_5_vl_mrope_before"],
+   "locations": [
+-    {"location": "unified.mrope.rot_pos_emb", "semantics": []},
+-    {"location": "unified.mrope.get_window_index", "semantics": []},
+-    {"location": "unified.mrope.old_cu_seqlens", "semantics": []},
+     {"location": "unified.mrope.rotary_pos_emb", "semantics": [], "optional": true},
+     {"location": "unified.mrope.window_index", "semantics": [], "optional": true},
+     {"location": "unified.mrope.cu_window_seqlens", "semantics": ["mrope.cu_window_seqlens"], "optional": true},
+diff --git a/simulator/src/arch/qwen2_5_vl_mrope_before.rs b/simulator/src/arch/qwen2_5_vl_mrope_before.rs
+index fa162a1..b06b93d 100644
+--- a/simulator/src/arch/qwen2_5_vl_mrope_before.rs
++++ b/simulator/src/arch/qwen2_5_vl_mrope_before.rs
+@@ -1,8 +1,9 @@
+ //! Qwen2.5-VL-3B local iter-wise architecture for the legacy mRoPE path.
+ //!
+-//! `BeforeRecipe` fixes the mRoPE prologue to the three old device-side
+-//! ElementwiseKernel proxy leaves followed by the four H2D transfers. The
+-//! dense language decoder is shared with the after recipe.
++//! `BeforeRecipe` retains the legacy selector label while using the same four
++//! assembled H2D transfer leaves as the optimized path. The dense language
++//! decoder is shared with the after recipe; source-derived legacy preparation
++//! footprints remain diagnostics outside the CostTree.
+ 
+ use crate::arch::model_cfg::ModelCfg;
+ use crate::timing::{BuildError, Dim, PerfApiBridge};
+@@ -127,7 +128,6 @@ mod tests {
+             (207_360, 2_592, 104, 8)
+         );
+         assert_eq!(cfgs.mrope.h2d_copy_backends, vec!["torch"]);
+-        assert_eq!(cfgs.mrope.elementwise_backends, vec!["triton"]);
+         assert_eq!(cfgs.attn.backends, vec!["fa2"]);
+         assert_eq!(cfgs.attn.kv_cache_append_backends, vec!["torch"]);
+         assert_eq!(
+@@ -181,7 +181,7 @@ mod tests {
+     }
+ 
+     #[test]
+-    fn before_has_legacy_mrope_slots_and_expected_kv_bytes() {
++    fn before_has_optimized_mrope_slots_and_expected_kv_bytes() {
+         let cfgs = build_configs(&model(), &parallel());
+         let resolved = resolve_configs(&cfgs);
+         assert_eq!(total_kv_bytes_per_token(&resolved), 36_864);
+@@ -190,16 +190,13 @@ mod tests {
+         bridge.enable_enumerate();
+         let model = build("unified".to_string(), resolved, &bridge).unwrap();
+         let tree = model.cost_tree();
+-        assert_eq!(tree.n_slots(), 20);
++        assert_eq!(tree.n_slots(), 17);
+         assert_eq!(
+             tree.slots
+                 .iter()
+                 .map(|slot| slot.name.as_str())
+                 .collect::<Vec<_>>(),
+             [
+-                "unified.mrope.rot_pos_emb",
+-                "unified.mrope.get_window_index",
+-                "unified.mrope.old_cu_seqlens",
+                 "unified.mrope.rotary_pos_emb",
+                 "unified.mrope.window_index",
+                 "unified.mrope.cu_window_seqlens",
+diff --git a/simulator/src/arch/qwen2_5_vl_mrope_common.rs b/simulator/src/arch/qwen2_5_vl_mrope_common.rs
+index b8c1bb6..dc87dc6 100644
+--- a/simulator/src/arch/qwen2_5_vl_mrope_common.rs
++++ b/simulator/src/arch/qwen2_5_vl_mrope_common.rs
+@@ -1,9 +1,8 @@
+ //! Private shared L4 implementation for the paired Qwen2.5-VL mRoPE recipes.
+ //!
+ //! The language decoder is the ordinary dense GQA decoder described by the
+-//! checkpoint config.  The recipe type only selects the fixed mRoPE prologue;
+-//! it is not a runtime branch, so the before and after CostTrees have stable,
+-//! different slot manifests while retaining identical decoder configs.
++//! checkpoint config. The recipe type only selects the fixed mRoPE label; both
++//! recipes use the same four-transfer prologue and identical decoder configs.
+ 
+ use std::marker::PhantomData;
+ use std::sync::Arc;
+@@ -33,7 +32,6 @@ const GEMM_BACKENDS: &[&str] = &["torch", "torch_linear"];
+ const ACT_BACKENDS: &[&str] = &["triton"];
+ const ATTN_BACKENDS: &[&str] = &["fa2"];
+ const MROPE_H2D_BACKENDS: &[&str] = &["torch"];
+-const MROPE_PROXY_BACKENDS: &[&str] = &["triton"];
+ 
+ const SPATIAL_MERGE_SIZE: u64 = 2;
+ const PATCH_SIZE: u64 = 14;
+@@ -87,9 +85,9 @@ pub struct MropeTransferBytes {
+     pub cu_seqlens: u64,
+ }
+ 
+-/// Separate source-derived footprints for the three legacy device-side proxy
+-/// leaves. The cumulative leaf combines the two int32 sequence tensors into one
+-/// logical proxy because it is one stable CostTree location.
++/// Separate source-derived footprints for the three legacy materialization
++/// diagnostics. They are retained for geometry checks, but are not CostTree
++/// leaves. The cumulative diagnostic combines the two int32 sequence tensors.
+ #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+ pub struct MropeProxyFootprints {
+     pub rot_pos_emb: MropeProxyFootprint,
+@@ -135,8 +133,8 @@ pub fn derive_mrope_transfer_bytes(grid: MropeGrid) -> MropeTransferBytes {
+ }
+ 
+ /// Derive the logical token counts and materialized tensor bytes used by the
+-/// BEFORE-only ElementwiseKernel proxies. This is source geometry, not a
+-/// profiler or CostTree-derived estimate.
++/// BEFORE-only diagnostics. This is source geometry, not a profiler or
++/// CostTree-derived estimate.
+ pub fn derive_mrope_proxy_footprints(grid: MropeGrid) -> MropeProxyFootprints {
+     let transfer = derive_mrope_transfer_bytes(grid);
+     let count_t = u64::from(grid.count) * u64::from(grid.t);
+@@ -232,7 +230,6 @@ pub fn build_configs<R: Recipe>(
+         mrope: Qwen25VlMropeLocalWorkletConfig {
+             gpu_name: gpu.clone(),
+             h2d_copy_backends: MROPE_H2D_BACKENDS.to_vec(),
+-            elementwise_backends: MROPE_PROXY_BACKENDS.to_vec(),
+             rotary_pos_emb_bytes: transfer.rotary_pos_emb,
+             window_index_bytes: transfer.window_index,
+             cu_window_seqlens_bytes: transfer.cu_window_seqlens,
+diff --git a/simulator/src/timing_predict.rs b/simulator/src/timing_predict.rs
+index 27b578b..0fb81c6 100644
+--- a/simulator/src/timing_predict.rs
++++ b/simulator/src/timing_predict.rs
+@@ -3,8 +3,8 @@
+ //! This is the same family as `dry-run` / `build-cache-only` / `kernel-query`:
+ //! it does NOT run the discrete-event sim (no scheduler, no trace, no clock). It
+ //! takes a batch of explicit batch shapes and, for each, runs the cost model over
+-//! the compiled `CostTree(s)`, predicting timings WITHOUT a GPU (a warm
+-//! `profile.db`) or JIT-profiling on demand (a cold one).
++//! the compiled `CostTree(s)`, predicting timings WITHOUT a GPU from the existing
++//! cache. Missing `profile.db` rows fail instead of triggering profiling.
+ //!
+ //! Three arch kinds, one tool (the `arch` selector picks):
+ //!   - `iter` — ONE [`IterwiseUnifiedModel::eval_iter`] over the whole forward
+@@ -299,15 +299,11 @@ mod provenance_tests {
+     }
+ }
+ 
+-/// Offline what-if bridge: JIT-fill missing `profile.db` rows on build (like
+-/// `kernel-query`), rather than the strict fail-fast a real `run` uses. A warm
+-/// cache then needs no GPU; a cold one profiles on demand.
++/// Cache-only bridge for offline prediction. `PerfApiBridge::new` disables JIT,
++/// so a missing `profile.db` row is returned as an error instead of invoking a
++/// profiler or using a GPU.
+ fn predict_bridge() -> Result<PerfApiBridge> {
+-    let bridge = PerfApiBridge::new().context("starting the PyO3 perf_api bridge")?;
+-    bridge
+-        .enable_jit_profiling()
+-        .context("enabling JIT profiling for offline prediction")?;
+-    Ok(bridge)
++    PerfApiBridge::new().context("starting the cache-only PyO3 perf_api bridge")
+ }
+ 
+ /// Run the iter-wise cases: one [`CostBuffers::run_iter`] per case (one parquet row
+diff --git a/simulator/src/worklet/qwen2_5_vl_mrope_local.rs b/simulator/src/worklet/qwen2_5_vl_mrope_local.rs
+index b9c8e44..315ac54 100644
+--- a/simulator/src/worklet/qwen2_5_vl_mrope_local.rs
++++ b/simulator/src/worklet/qwen2_5_vl_mrope_local.rs
+@@ -3,31 +3,27 @@
+ //! This worklet models only device-visible preparation work. The optimized
+ //! (`After`) recipe has four H2D transfer leaves for the assembled
+ //! `rotary_pos_emb`, `window_index`, `cu_window_seqlens`, and `cu_seqlens`
+-//! payloads. The legacy (`Before`) recipe adds three explicit
+-//! `ElementwiseKernel` leaves for the old device-side preparation locations.
++//! payloads. The legacy (`Before`) selector uses the same four-leaf topology;
++//! its source-derived old preparation footprints remain diagnostics only.
+ //!
+-//! Those before-only elementwise leaves are temporary device-work proxies. They
+-//! do not model host Python time, and all of these mRoPE locations remain
+-//! orchestration/overhead for the independent model.work scope. The recipe is a
+-//! type parameter so the two CostTrees have fixed, different slot sets.
++//! The recipe is a type parameter so the two CostTrees retain distinct labels
++//! while sharing the same cache-backed slot set.
+ 
+ use std::fmt::Debug;
+ use std::sync::Arc;
+ 
+ use crate::op::Op;
+ use crate::timing::kernels::{
+-    ElementwiseKernel, ElementwiseKernelConfig, ElementwiseKernelInput, H2dCopyKernel,
+-    H2dCopyKernelConfig, H2dCopyKernelInput,
++    H2dCopyKernel, H2dCopyKernelConfig, H2dCopyKernelInput,
+ };
+ use crate::timing::{
+     BuildError, CostNode, CostTreeBuilder, Evaluator, LeafMetrics, PerfApiBridge, Probe, SlotInput,
+ };
+ 
+-/// One old device-side materialized tensor footprint for one configured vision
+-/// request. ElementwiseKernel's token axis is interpreted as logical tensor
+-/// elements, and both its input and output rates represent one device read plus
+-/// one device write of this same footprint. Host Python construction, cache hits,
+-/// and synchronization stalls are outside this proxy.
++/// One source-derived legacy materialization footprint for one configured vision
++/// request. These values are retained as diagnostics and are not CostTree leaves;
++/// host Python construction, cache hits, and synchronization stalls remain outside
++/// this worklet.
+ #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+ pub struct MropeProxyFootprint {
+     pub logical_elements_per_request: u32,
+@@ -60,7 +56,6 @@ impl MropeProxyFootprint {
+ pub struct Qwen25VlMropeLocalWorkletConfig {
+     pub gpu_name: String,
+     pub h2d_copy_backends: Vec<&'static str>,
+-    pub elementwise_backends: Vec<&'static str>,
+     pub rotary_pos_emb_bytes: u64,
+     pub window_index_bytes: u64,
+     pub cu_window_seqlens_bytes: u64,
+@@ -89,7 +84,7 @@ pub struct Qwen25VlMropeLocalWorkletResolved<R: MropeRecipe> {
+     pub extra: R::Resolved,
+ }
+ 
+-/// Compile-time recipe contract for the before/after fixed topologies.
++/// Compile-time recipe contract for the before/after fixed topology.
+ pub trait MropeRecipe: Sized + 'static {
+     type Resolved: Clone + Debug;
+     type Ops;
+@@ -145,120 +140,39 @@ impl MropeRecipe for Qwen25VlMropeAfterRecipe {
+     }
+ }
+ 
+-/// The legacy recipe's three explicit device-side preparation placeholders.
+-#[derive(Clone, Debug)]
+-pub struct Qwen25VlMropeBeforeResolved {
+-    pub rot_pos_emb: ElementwiseKernelConfig,
+-    pub get_window_index: ElementwiseKernelConfig,
+-    pub old_cu_seqlens: ElementwiseKernelConfig,
+-    pub rot_pos_emb_footprint: MropeProxyFootprint,
+-    pub get_window_index_footprint: MropeProxyFootprint,
+-    pub old_cu_seqlens_footprint: MropeProxyFootprint,
+-}
+-
+-pub struct Qwen25VlMropeBeforeOps {
+-    pub rot_pos_emb: Op<ElementwiseKernel>,
+-    pub get_window_index: Op<ElementwiseKernel>,
+-    pub old_cu_seqlens: Op<ElementwiseKernel>,
+-    pub rot_pos_emb_footprint: MropeProxyFootprint,
+-    pub get_window_index_footprint: MropeProxyFootprint,
+-    pub old_cu_seqlens_footprint: MropeProxyFootprint,
+-}
+-
++/// The legacy selector keeps its historical label but uses the optimized
++/// cache-backed transfer topology. The old device-side preparation quantities
++/// are intentionally not modeled as timing leaves.
+ #[derive(Clone, Debug)]
+ pub struct Qwen25VlMropeBeforeRecipe;
+ 
+ impl MropeRecipe for Qwen25VlMropeBeforeRecipe {
+-    type Resolved = Qwen25VlMropeBeforeResolved;
+-    type Ops = Qwen25VlMropeBeforeOps;
++    type Resolved = ();
++    type Ops = ();
+ 
+     const LABEL: &'static str = "before";
+ 
+-    fn resolve_extra(cfg: &Qwen25VlMropeLocalWorkletConfig) -> Self::Resolved {
+-        let proxy = |footprint: MropeProxyFootprint| ElementwiseKernelConfig {
+-            backends: cfg.elementwise_backends.clone(),
+-            gpu_name: cfg.gpu_name.clone(),
+-            input_bytes_per_token: footprint.bytes_per_element().into(),
+-            output_bytes_per_token: footprint.bytes_per_element().into(),
+-        };
+-        let rot_pos_emb_footprint = cfg.old_device_proxy_rotary;
+-        let get_window_index_footprint = cfg.old_device_proxy_window_index;
+-        let old_cu_seqlens_footprint = cfg.old_device_proxy_cumulative;
+-        Qwen25VlMropeBeforeResolved {
+-            rot_pos_emb: proxy(rot_pos_emb_footprint),
+-            get_window_index: proxy(get_window_index_footprint),
+-            old_cu_seqlens: proxy(old_cu_seqlens_footprint),
+-            rot_pos_emb_footprint,
+-            get_window_index_footprint,
+-            old_cu_seqlens_footprint,
+-        }
++    fn resolve_extra(_cfg: &Qwen25VlMropeLocalWorkletConfig) -> Self::Resolved {
++        ()
+     }
+ 
+     fn build_extra(
+-        name: &str,
+-        resolved: &Self::Resolved,
+-        bridge: &PerfApiBridge,
++        _name: &str,
++        _resolved: &Self::Resolved,
++        _bridge: &PerfApiBridge,
+     ) -> Result<Self::Ops, BuildError> {
+-        Ok(Qwen25VlMropeBeforeOps {
+-            rot_pos_emb: build_atomic(
+-                name,
+-                "rot_pos_emb",
+-                resolved.rot_pos_emb.clone(),
+-                ElementwiseKernel::build,
+-                bridge,
+-            )?,
+-            get_window_index: build_atomic(
+-                name,
+-                "get_window_index",
+-                resolved.get_window_index.clone(),
+-                ElementwiseKernel::build,
+-                bridge,
+-            )?,
+-            old_cu_seqlens: build_atomic(
+-                name,
+-                "old_cu_seqlens",
+-                resolved.old_cu_seqlens.clone(),
+-                ElementwiseKernel::build,
+-                bridge,
+-            )?,
+-            rot_pos_emb_footprint: resolved.rot_pos_emb_footprint,
+-            get_window_index_footprint: resolved.get_window_index_footprint,
+-            old_cu_seqlens_footprint: resolved.old_cu_seqlens_footprint,
+-        })
++        Ok(())
+     }
+ 
+-    fn compile_extra(extra: &Self::Ops, builder: &mut CostTreeBuilder) -> Vec<CostNode> {
+-        vec![
+-            extra.rot_pos_emb.compile(builder),
+-            extra.get_window_index.compile(builder),
+-            extra.old_cu_seqlens.compile(builder),
+-        ]
++    fn compile_extra(_extra: &Self::Ops, _builder: &mut CostTreeBuilder) -> Vec<CostNode> {
++        Vec::new()
+     }
+ 
+     fn eval_extra(
+-        extra: &Self::Ops,
+-        input: &Qwen25VlMropeLocalWorkletInput,
+-        ev: &mut Evaluator,
++        _extra: &Self::Ops,
++        _input: &Qwen25VlMropeLocalWorkletInput,
++        _ev: &mut Evaluator,
+     ) {
+-        let active = input.prefill_tokens > 0 && input.vision_requests > 0;
+-        eval_atomic_or_zero(
+-            &extra.rot_pos_emb,
+-            proxy_input(extra.rot_pos_emb_footprint, input.vision_requests),
+-            active,
+-            ev,
+-        );
+-        eval_atomic_or_zero(
+-            &extra.get_window_index,
+-            proxy_input(extra.get_window_index_footprint, input.vision_requests),
+-            active,
+-            ev,
+-        );
+-        eval_atomic_or_zero(
+-            &extra.old_cu_seqlens,
+-            proxy_input(extra.old_cu_seqlens_footprint, input.vision_requests),
+-            active,
+-            ev,
+-        );
+     }
+ }
+ 
+@@ -339,24 +253,15 @@ impl<R: MropeRecipe> Qwen25VlMropeLocalWorklet<R> {
+             self.cu_window_seqlens.compile(builder),
+             self.cu_seqlens.compile(builder),
+         ]);
+-        let proxy_label = |footprint: MropeProxyFootprint| {
+-            format!(
+-                "{}B/{}el",
+-                footprint.bytes_per_request, footprint.logical_elements_per_request
+-            )
+-        };
+         CostNode::Labeled {
+             label: format!(
+-                "{} (Qwen25VlMropeLocalWorklet/{}) [local (1 GPU); rotary_pos_emb={}, window_index={}, cu_window_seqlens={}, cu_seqlens={}; old device proxy read/write footprints per request: rot_pos_emb={}, get_window_index={}, old_cu_seqlens={}]",
++                "{} (Qwen25VlMropeLocalWorklet/{}) [local (1 GPU); rotary_pos_emb={}, window_index={}, cu_window_seqlens={}, cu_seqlens={}; legacy device-side preparation diagnostics omitted from CostTree]",
+                 self.name,
+                 R::LABEL,
+                 cfg.rotary_pos_emb_bytes,
+                 cfg.window_index_bytes,
+                 cfg.cu_window_seqlens_bytes,
+                 cfg.cu_seqlens_bytes,
+-                proxy_label(cfg.old_device_proxy_rotary),
+-                proxy_label(cfg.old_device_proxy_window_index),
+-                proxy_label(cfg.old_device_proxy_cumulative),
+             ),
+             child: Box::new(CostNode::Sum(children)),
+         }
+@@ -443,12 +348,6 @@ where
+     ))
+ }
+ 
+-fn proxy_input(footprint: MropeProxyFootprint, requests: u32) -> ElementwiseKernelInput {
+-    ElementwiseKernelInput {
+-        num_tokens: footprint.logical_elements_for_requests(requests),
+-    }
+-}
+-
+ fn eval_atomic_or_zero<K>(op: &Op<K>, input: K::Input, active: bool, ev: &mut Evaluator)
+ where
+     K: Probe,
+@@ -472,7 +371,6 @@ mod tests {
+         Qwen25VlMropeLocalWorkletConfig {
+             gpu_name: "NVIDIA H200".into(),
+             h2d_copy_backends: vec!["torch"],
+-            elementwise_backends: vec!["triton"],
+             // [1, 36, 36] vision geometry: [1296, 40] f32.
+             rotary_pos_emb_bytes: 1296 * 40 * 4,
+             // [324] int64.
+@@ -519,7 +417,7 @@ mod tests {
+     }
+ 
+     #[test]
+-    fn resolved_config_keeps_exact_transfer_geometry_and_proxy() {
++    fn resolved_config_keeps_exact_transfer_geometry_and_diagnostic_footprints() {
+         let resolved = Qwen25VlMropeLocalAfterWorklet::resolve_config(&cfg());
+         assert_eq!(
+             (
+@@ -534,16 +432,22 @@ mod tests {
+         assert_eq!(resolved.rotary_pos_emb.gpu_name, "NVIDIA H200");
+ 
+         let before = Qwen25VlMropeLocalBeforeWorklet::resolve_config(&cfg());
+-        assert_eq!(before.extra.rot_pos_emb.input_bytes_per_token, 160);
+-        assert_eq!(before.extra.rot_pos_emb.output_bytes_per_token, 160);
+-        assert_eq!(before.extra.get_window_index.input_bytes_per_token, 8);
+-        assert_eq!(before.extra.get_window_index.output_bytes_per_token, 8);
+-        assert_eq!(before.extra.old_cu_seqlens.input_bytes_per_token, 4);
+-        assert_eq!(before.extra.old_cu_seqlens.output_bytes_per_token, 4);
+-        assert_eq!(before.extra.rot_pos_emb_footprint.logical_elements_per_request, 1_296);
+-        assert_eq!(before.extra.get_window_index_footprint.logical_elements_per_request, 324);
+-        assert_eq!(before.extra.old_cu_seqlens_footprint.logical_elements_per_request, 28);
+-        assert_eq!(before.extra.get_window_index.gpu_name, "NVIDIA H200");
++        assert_eq!(before.extra, ());
++        assert_eq!(before.raw_cfg.old_device_proxy_rotary.logical_elements_per_request, 1_296);
++        assert_eq!(
++            before
++                .raw_cfg
++                .old_device_proxy_window_index
++                .logical_elements_per_request,
++            324
++        );
++        assert_eq!(
++            before
++                .raw_cfg
++                .old_device_proxy_cumulative
++                .logical_elements_per_request,
++            28
++        );
+     }
+ 
+     #[test]
+@@ -551,29 +455,29 @@ mod tests {
+         let resolved = Qwen25VlMropeLocalBeforeWorklet::resolve_config(&cfg());
+         assert_eq!(
+             resolved
+-                .extra
+-                .rot_pos_emb_footprint
++                .raw_cfg
++                .old_device_proxy_rotary
+                 .logical_elements_for_requests(2),
+             2_592
+         );
+         assert_eq!(
+             resolved
+-                .extra
+-                .get_window_index_footprint
++                .raw_cfg
++                .old_device_proxy_window_index
+                 .logical_elements_for_requests(2),
+             648
+         );
+         assert_eq!(
+             resolved
+-                .extra
+-                .old_cu_seqlens_footprint
++                .raw_cfg
++                .old_device_proxy_cumulative
+                 .logical_elements_for_requests(2),
+             56
+         );
+     }
+ 
+     #[test]
+-    fn before_and_after_have_fixed_distinct_topologies_and_order() {
++    fn before_and_after_share_fixed_transfer_topology_and_order() {
+         let after = after_worklet();
+         let before = before_worklet();
+ 
+@@ -600,32 +504,10 @@ mod tests {
+                 .iter()
+                 .map(|slot| slot.name.strip_prefix("model.mrope.").unwrap())
+                 .collect::<Vec<_>>(),
+-            [
+-                "rot_pos_emb",
+-                "get_window_index",
+-                "old_cu_seqlens",
+-                "rotary_pos_emb",
+-                "window_index",
+-                "cu_window_seqlens",
+-                "cu_seqlens",
+-            ]
+-        );
+-        assert_eq!(
+-            before_tree
+-                .slots
+-                .iter()
+-                .map(|slot| slot.kind.as_str())
+-                .collect::<Vec<_>>(),
+-            [
+-                "elementwise",
+-                "elementwise",
+-                "elementwise",
+-                "h2d_copy",
+-                "h2d_copy",
+-                "h2d_copy",
+-                "h2d_copy",
+-            ]
++            ["rotary_pos_emb", "window_index", "cu_window_seqlens", "cu_seqlens"]
+         );
++        assert_eq!(before_tree.slots.len(), 4);
++        assert!(before_tree.slots.iter().all(|slot| slot.kind == "h2d_copy"));
+     }
+ 
+     #[test]
+@@ -669,7 +551,7 @@ mod tests {
+             ]),
+         );
+         assert_inactive(
+-            7,
++            4,
+             |ev| {
+                 before_worklet().eval(
+                     &Qwen25VlMropeLocalWorkletInput {
+@@ -680,9 +562,6 @@ mod tests {
+                 )
+             },
+             serde_json::json!([
+-                {"num_tokens": 0},
+-                {"num_tokens": 0},
+-                {"num_tokens": 0},
+                 {"num_bytes": 0},
+                 {"num_bytes": 0},
+                 {"num_bytes": 0},
+@@ -711,26 +590,6 @@ mod tests {
+         }
+     }
+ 
+-    struct ReturnElementwiseMetrics;
+-
+-    impl Probe for ReturnElementwiseMetrics {
+-        type Input = ElementwiseKernelInput;
+-
+-        fn eval(&self, input: &Self::Input) -> LeafMetrics {
+-            let mut metrics = LeafMetrics::ZERO;
+-            metrics.m.time_ms = input.num_tokens as f32;
+-            metrics
+-        }
+-
+-        fn kind(&self) -> &'static str {
+-            "elementwise"
+-        }
+-
+-        fn describe_config(&self) -> serde_json::Value {
+-            serde_json::json!({})
+-        }
+-    }
+-
+     struct MustNotEvalH2d;
+ 
+     impl Probe for MustNotEvalH2d {
+@@ -783,13 +642,11 @@ mod tests {
+     }
+ 
+     #[test]
+-    fn active_proxy_and_transfer_inputs_stay_aligned_and_scaled() {
+-        let proxy = Op::new("proxy".into(), Arc::new(ReturnElementwiseMetrics));
++    fn active_transfer_inputs_scale_by_request_count() {
+         let transfer = Op::new("h2d".into(), Arc::new(ReturnH2dMetrics));
+-        let mut metrics = [LeafMetrics::MISS; 2];
++        let mut metrics = [LeafMetrics::MISS; 1];
+         let mut inputs = Vec::new();
+         let mut ev = Evaluator::with_inputs(&mut metrics, &mut inputs);
+-        eval_atomic_or_zero(&proxy, proxy_input(cfg().old_device_proxy_rotary, 2), true, &mut ev);
+         eval_atomic_or_zero(
+             &transfer,
+             H2dCopyKernelInput {
+@@ -798,12 +655,11 @@ mod tests {
+             true,
+             &mut ev,
+         );
+-        assert_eq!(ev.filled(), 2);
+-        assert_eq!(metrics[0].m.time_ms, 2_592.0);
+-        assert_eq!(metrics[1].m.time_ms, 414_720.0);
++        assert_eq!(ev.filled(), 1);
++        assert_eq!(metrics[0].m.time_ms, 414_720.0);
+         assert_eq!(
+             serde_json::to_value(inputs).unwrap(),
+-            serde_json::json!([{"num_tokens": 2_592}, {"num_bytes": 414_720}])
++            serde_json::json!([{"num_bytes": 414_720}])
+         );
+     }
+ }
+diff --git a/tests/test_model_work.py b/tests/test_model_work.py
+index 15ac641..0be1766 100644
+--- a/tests/test_model_work.py
++++ b/tests/test_model_work.py
+@@ -1036,9 +1036,6 @@ def test_qwen25vl_decoder_only_location_maps_are_exact(qwen25vl_model):
+     before = json.loads((maps_dir / "qwen2_5_vl_mrope_before_unified.json").read_text())
+     after = json.loads((maps_dir / "qwen2_5_vl_mrope_after_unified.json").read_text())
+     before_locations = [
+-        "unified.mrope.rot_pos_emb",
+-        "unified.mrope.get_window_index",
+-        "unified.mrope.old_cu_seqlens",
+         "unified.mrope.rotary_pos_emb",
+         "unified.mrope.window_index",
+         "unified.mrope.cu_window_seqlens",
+@@ -1057,7 +1054,7 @@ def test_qwen25vl_decoder_only_location_maps_are_exact(qwen25vl_model):
+         "unified.final_norm",
+         "unified.lm_head",
+     ]
+-    after_locations = before_locations[3:]
++    after_locations = before_locations
+     semantic_names = {
+         "embedding",
+         "input_norm",
+@@ -1080,7 +1077,7 @@ def test_qwen25vl_decoder_only_location_maps_are_exact(qwen25vl_model):
+             before,
+             "qwen2_5_vl_mrope_before",
+             before_locations,
+-            "qwen2-5-vl-mrope-before-unified-v1",
++            "qwen2-5-vl-mrope-before-unified-v2",
+             semantic_names,
+         ),
+         (
+@@ -1103,9 +1100,7 @@ def test_qwen25vl_decoder_only_location_maps_are_exact(qwen25vl_model):
+ 
+     before_rows = {row["location"]: row["semantics"] for row in before["locations"]}
+     after_rows = {row["location"]: row["semantics"] for row in after["locations"]}
+-    assert before_rows["unified.mrope.rot_pos_emb"] == []
+-    assert before_rows["unified.mrope.get_window_index"] == []
+-    assert before_rows["unified.mrope.old_cu_seqlens"] == []
++    assert before_rows == after_rows
+     assert before_rows["unified.mrope.rotary_pos_emb"] == []
+     assert before_rows["unified.mrope.window_index"] == []
+     assert before_rows["unified.mrope.cu_window_seqlens"] == ["mrope.cu_window_seqlens"]
+@@ -1120,20 +1115,10 @@ def test_qwen25vl_decoder_only_location_maps_are_exact(qwen25vl_model):
+         "unified.mrope.cu_window_seqlens",
+         "unified.mrope.cu_seqlens",
+     }
+-    legacy_before_locations = {
+-        "unified.mrope.rot_pos_emb",
+-        "unified.mrope.get_window_index",
+-        "unified.mrope.old_cu_seqlens",
+-    }
+     for location_map in (before, after):
+         assert {
+             row["location"] for row in location_map["locations"] if row.get("optional") is True
+         } == shared_mrope_locations
+-    assert all(
+-        row.get("optional") is not True
+-        for row in before["locations"]
+-        if row["location"] in legacy_before_locations
+-    )
+     assert {
+         semantic
+         for row in before["locations"]

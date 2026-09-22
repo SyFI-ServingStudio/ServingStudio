@@ -1,0 +1,74 @@
+{
+  "trial": 1,
+  "wid": "w_45893bc43b51",
+  "issue": "vllm-28103-api",
+  "ts": 1789695746.660293,
+  "baseline_commit": "defcc63b439f8cc9a3e12171fe7043c233b44303",
+  "conversation_id": "37497d401488",
+  "agent_seconds": 26.1,
+  "agent_final": "The orchestrator could not run: the upstream model gateway is unavailable (HTTP 503), and the Codex CLI already exhausted its own reconnects. No output was produced \u2014 this is an API outage, not a model or parsing problem.",
+  "gate": {
+    "pass": false,
+    "checks": [
+      {
+        "name": "structural.no_forbidden_leaves",
+        "pass": false,
+        "detail": "forbidden matches=['unified.qk_norm.q_input_copy', 'unified.qk_norm.k_input_copy'] in ['unified.qk_norm.q_input_copy', 'unified.qk_norm.q_norm', 'unified.qk_norm.k_input_copy', 'unified.qk_norm.k_norm']"
+      },
+      {
+        "name": "structural.required_leaves_present",
+        "pass": true,
+        "detail": "required=['unified.qk_norm.q_norm', 'unified.qk_norm.k_norm'] leaves=['unified.qk_norm.q_input_copy', 'unified.qk_norm.q_norm', 'unified.qk_norm.k_input_copy', 'unified.qk_norm.k_norm']"
+      },
+      {
+        "name": "metric.r0_measured.near_after",
+        "pass": false,
+        "detail": "val=4.7138e-04 after=2.7270e-04 rel=0.729<= 0.25"
+      },
+      {
+        "name": "metric.r0_measured.below_before",
+        "pass": false,
+        "detail": "val=4.7138e-04 <= before*0.8=3.7712e-04"
+      },
+      {
+        "name": "metric.r5_hardware_limit.near_after",
+        "pass": false,
+        "detail": "val=8.8768e-05 after=4.4380e-05 rel=1.000<= 0.25"
+      },
+      {
+        "name": "metric.r5_hardware_limit.below_before",
+        "pass": false,
+        "detail": "val=8.8768e-05 <= before*0.8=7.1016e-05"
+      },
+      {
+        "name": "necessary.unchanged",
+        "pass": true,
+        "detail": "val=1.7920e-09 before=1.7920e-09 rel<= 0.1"
+      }
+    ],
+    "predict_rc": 0,
+    "analyze_rc": 0,
+    "scoped_leaves": [
+      "unified.qk_norm.q_input_copy",
+      "unified.qk_norm.q_norm",
+      "unified.qk_norm.k_input_copy",
+      "unified.qk_norm.k_norm"
+    ]
+  },
+  "judge": {
+    "matches_root_cause": null,
+    "score": null,
+    "reasoning": "no JSON in verdict",
+    "raw": "The assistant could not run: the upstream model gateway is unavailable (HTTP 503), and the Codex CLI already exhausted its own reconnects. No output was produced \u2014 this is an API outage, not a model or parsing problem.",
+    "_conversation_id": "c0631f68473a"
+  },
+  "trajectory": {
+    "conversation_id": "37497d401488",
+    "events_scanned": 8,
+    "hard_fail": false,
+    "n_hard": 0,
+    "n_soft": 0,
+    "flags": []
+  },
+  "correct": false
+}

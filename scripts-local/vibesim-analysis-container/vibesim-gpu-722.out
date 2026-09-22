@@ -1,0 +1,13 @@
+==== slurm_gpu.sh on cayenne job=722 ====
+CUDA_VISIBLE_DEVICES=0
+allocated GPU UUID(s): GPU-c09878e8-fb6a-ff0c-3c33-05993065d679
+0, GPU-c09878e8-fb6a-ff0c-3c33-05993065d679, 0 MiB
+==== exec: ./measure_floor.sh issue_32296.json ====
+==== floor measure: case=32296 fw=sglang target=sglang.kernels.ops.quantization.fp8_kernel:sglang_per_token_group_quant_fp8 reps=5 margin=3 gpu="device=GPU-c09878e8-fb6a-ff0c-3c33-05993065d679" ====
+--- Wrapper: Applying owner=yilegu, memory=432834647654 bytes, and cpus=28.8 ---
+--- Wrapper: Applying owner=yilegu, memory=432834647654 bytes, and cpus=28.8 ---
+==== FLOOR REPORT (32296) ====
+  before 21.293+-1.187 us   after 21.935+-2.725 us
+  gap -0.643 us   noise(pooled sd) 2.972 us   floor(3.0sigma) 8.916 us
+  RESOLVABLE = False  (gap below floor -> NULL for this harness)
+==== done -> /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/floor_32296/floor_report.json ====

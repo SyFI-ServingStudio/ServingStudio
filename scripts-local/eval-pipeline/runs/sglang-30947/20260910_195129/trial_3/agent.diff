@@ -1,0 +1,509 @@
+diff --git a/simulator/src/arch/qwen2_dense_sglang_after.rs b/simulator/src/arch/qwen2_dense_sglang_after.rs
+index 714a5c5..48a99a6 100644
+--- a/simulator/src/arch/qwen2_dense_sglang_after.rs
++++ b/simulator/src/arch/qwen2_dense_sglang_after.rs
+@@ -1,6 +1,7 @@
+ //! Qwen2 dense SGLang target-only graph using the fused Triton `draft_topk1` backend.
+ 
+ use crate::arch::model_cfg::ModelCfg;
++use crate::op::attention::KvCacheAppendImplementation;
+ use crate::timing::{BuildError, Dim, PerfApiBridge};
+ 
+ use super::qwen2_dense_sglang_common as common;
+@@ -9,6 +10,8 @@ pub struct AfterRecipe;
+ 
+ impl common::Recipe for AfterRecipe {
+     const DRAFT_TOPK1_BACKEND: &'static str = "triton";
++    const KV_CACHE_APPEND_IMPLEMENTATION: KvCacheAppendImplementation =
++        KvCacheAppendImplementation::Profiled;
+ }
+ 
+ pub type Qwen2DenseSglangAfterParallel = common::Qwen2DenseSglangParallel;
+diff --git a/simulator/src/arch/qwen2_dense_sglang_before.rs b/simulator/src/arch/qwen2_dense_sglang_before.rs
+index 96bd847..203f0df 100644
+--- a/simulator/src/arch/qwen2_dense_sglang_before.rs
++++ b/simulator/src/arch/qwen2_dense_sglang_before.rs
+@@ -1,6 +1,7 @@
+ //! Qwen2 dense SGLang target-only graph using the eager `draft_topk1` backend.
+ 
+ use crate::arch::model_cfg::ModelCfg;
++use crate::op::attention::KvCacheAppendImplementation;
+ use crate::timing::{BuildError, Dim, PerfApiBridge};
+ 
+ use super::qwen2_dense_sglang_common as common;
+@@ -9,6 +10,8 @@ pub struct BeforeRecipe;
+ 
+ impl common::Recipe for BeforeRecipe {
+     const DRAFT_TOPK1_BACKEND: &'static str = "torch";
++    const KV_CACHE_APPEND_IMPLEMENTATION: KvCacheAppendImplementation =
++        KvCacheAppendImplementation::B200Roofline;
+ }
+ 
+ pub type Qwen2DenseSglangBeforeParallel = common::Qwen2DenseSglangParallel;
+diff --git a/simulator/src/arch/qwen2_dense_sglang_common.rs b/simulator/src/arch/qwen2_dense_sglang_common.rs
+index e659312..3ffe02b 100644
+--- a/simulator/src/arch/qwen2_dense_sglang_common.rs
++++ b/simulator/src/arch/qwen2_dense_sglang_common.rs
+@@ -11,6 +11,7 @@ use std::sync::Arc;
+ use crate::arch::contract::{IterwiseUnifiedModel, UnifiedArchInput};
+ use crate::arch::model_cfg::ModelCfg;
+ use crate::op::Op;
++use crate::op::attention::KvCacheAppendImplementation;
+ use crate::timing::bridge::DType;
+ use crate::timing::kernels::{
+     DraftTopk1Kernel, DraftTopk1KernelConfig, DraftTopk1KernelInput, ElementwiseKernel,
+@@ -38,9 +39,11 @@ const ACT_BACKENDS: &[&str] = &["triton"];
+ // target backend.
+ const ATTN_BACKENDS: &[&str] = &["fa2"];
+ 
+-/// Compile-time recipe choice for the one SGLang EAGLE postprocess leaf.
++/// Compile-time recipe choices for the SGLang EAGLE postprocess and cache-append
++/// leaves.
+ pub trait Recipe: Send + Sync + 'static {
+     const DRAFT_TOPK1_BACKEND: &'static str;
++    const KV_CACHE_APPEND_IMPLEMENTATION: KvCacheAppendImplementation;
+ }
+ 
+ /// Numeric parallel input: both target-only recipes run on one local GPU.
+@@ -58,6 +61,7 @@ pub struct Qwen2DenseSglangConfigs<R: Recipe> {
+     pub final_norm: RmsNormKernelConfig,
+     pub lm_head: SingleGemmKernelConfig,
+     pub draft_topk1: DraftTopk1KernelConfig,
++    pub kv_cache_append_implementation: KvCacheAppendImplementation,
+     pub num_layers: u32,
+     pub(crate) recipe: PhantomData<R>,
+ }
+@@ -71,6 +75,7 @@ pub struct Qwen2DenseSglangResolved<R: Recipe> {
+     pub final_norm: RmsNormKernelConfig,
+     pub lm_head: SingleGemmKernelConfig,
+     pub draft_topk1: DraftTopk1KernelConfig,
++    pub kv_cache_append_implementation: KvCacheAppendImplementation,
+     pub num_layers: u32,
+     pub(crate) recipe: PhantomData<R>,
+ }
+@@ -117,8 +122,9 @@ pub(crate) fn build_configs<R: Recipe>(
+             fp8: false,
+             gpu_name: gpu.clone(),
+             backends: ATTN_BACKENDS.to_vec(),
+-            // Non-target SGLang-compatible reference fallback: no SGLang-specific
+-            // cache-append profiler row exists, so use the registered torch backend.
++            // Keep the registered Torch identity as the profile-backed fallback;
++            // the before recipe's explicit L2 selector replaces only this leaf
++            // with the B200 fused roofline representation.
+             kv_cache_append_backends: vec!["torch"],
+             kv_cache_block_size: 16,
+             kv_cache_layout: "NHD".to_string(),
+@@ -161,6 +167,7 @@ pub(crate) fn build_configs<R: Recipe>(
+             num_steps: 3,
+             logits_dtype: DType::Fp32,
+         },
++        kv_cache_append_implementation: R::KV_CACHE_APPEND_IMPLEMENTATION,
+         num_layers: model.num_layers,
+         recipe: PhantomData,
+     }
+@@ -188,6 +195,7 @@ pub(crate) fn resolve_configs<R: Recipe>(
+         final_norm: cfgs.final_norm.clone(),
+         lm_head: cfgs.lm_head.clone(),
+         draft_topk1: cfgs.draft_topk1.clone(),
++        kv_cache_append_implementation: cfgs.kv_cache_append_implementation,
+         num_layers: cfgs.num_layers,
+         recipe: PhantomData,
+     }
+@@ -219,7 +227,12 @@ pub(crate) fn build<R: Recipe>(
+         resolved.pre_attn,
+         bridge,
+     )?;
+-    let attn = AttnLocalWorklet::build(format!("{model_name}.attn"), resolved.attn, bridge)?;
++    let attn = AttnLocalWorklet::build_with_kv_cache_append_implementation(
++        format!("{model_name}.attn"),
++        resolved.attn,
++        resolved.kv_cache_append_implementation,
++        bridge,
++    )?;
+     let post_attn = PostAttnLocalWorklet::build(
+         format!("{model_name}.post_attn"),
+         resolved.post_attn,
+@@ -411,6 +424,8 @@ mod tests {
+ 
+     impl Recipe for TestRecipe {
+         const DRAFT_TOPK1_BACKEND: &'static str = "triton";
++        const KV_CACHE_APPEND_IMPLEMENTATION: KvCacheAppendImplementation =
++            KvCacheAppendImplementation::Profiled;
+     }
+ 
+     fn qwen2_5_7b(layers: u32) -> ModelCfg {
+@@ -454,6 +469,10 @@ mod tests {
+         assert_eq!(cfgs.draft_topk1.num_steps, 3);
+         assert_eq!(cfgs.draft_topk1.logits_dtype, DType::Fp32);
+         assert_eq!(cfgs.draft_topk1.gpu_name, "NVIDIA B200");
++        assert_eq!(
++            cfgs.kv_cache_append_implementation,
++            KvCacheAppendImplementation::Profiled
++        );
+ 
+         let resolved = resolve_configs(&cfgs);
+         assert_eq!(resolved.pre_attn.qkv.n, 4608);
+@@ -518,6 +537,22 @@ mod tests {
+         assert_eq!(after_cfgs.attn.backends, ["fa2"]);
+         assert_eq!(before_cfgs.attn.kv_cache_append_backends, ["torch"]);
+         assert_eq!(after_cfgs.attn.kv_cache_append_backends, ["torch"]);
++        assert_eq!(
++            before_cfgs.kv_cache_append_implementation,
++            KvCacheAppendImplementation::B200Roofline
++        );
++        assert_eq!(
++            after_cfgs.kv_cache_append_implementation,
++            KvCacheAppendImplementation::Profiled
++        );
++        assert_eq!(
++            before::BeforeRecipe::KV_CACHE_APPEND_IMPLEMENTATION,
++            KvCacheAppendImplementation::B200Roofline
++        );
++        assert_eq!(
++            after::AfterRecipe::KV_CACHE_APPEND_IMPLEMENTATION,
++            KvCacheAppendImplementation::Profiled
++        );
+         let before_model = before::build(
+             "model".to_string(),
+             before::resolve_configs(&before_cfgs),
+@@ -549,6 +584,16 @@ mod tests {
+             before_tree.slots.last().unwrap().kernel_config["backends"],
+             serde_json::json!(["torch"])
+         );
++        let before_append = before_tree
++            .slots
++            .iter()
++            .find(|slot| slot.name.ends_with(".attn.attn.kv_cache_append"))
++            .expect("Qwen2 attention tree has a cache-append leaf");
++        assert_eq!(before_append.kind, "kv_cache_append");
++        assert_eq!(
++            before_append.kernel_config["implementation"],
++            "fused_cache_only_roofline"
++        );
+         assert_eq!(
+             after_tree.slots.last().unwrap().kernel_config["backends"],
+             serde_json::json!(["triton"])
+diff --git a/simulator/src/op/attention/flashinfer.rs b/simulator/src/op/attention/flashinfer.rs
+index f1d8a74..62bb5a4 100644
+--- a/simulator/src/op/attention/flashinfer.rs
++++ b/simulator/src/op/attention/flashinfer.rs
+@@ -30,10 +30,26 @@ use crate::timing::kernels::{
+     KvCacheAppendKernelInput,
+ };
+ use crate::timing::{
+-    AttnPrefillLog, BuildError, CostNode, CostTreeBuilder, Dim, Evaluator, LeafMetrics,
+-    PerfApiBridge, Probe,
++    AttnPrefillLog, BuildError, CostNode, CostTreeBuilder, CoverageFlags, Dim, Evaluator,
++    KernelConfig, LeafMetrics, Metrics4, PerfApiBridge, Probe,
+ };
+ 
++const B200_GPU_NAME: &str = "NVIDIA B200";
++const B200_ROOFLINE_BANDWIDTH_GBPS: f64 = 8_000.0;
++const B200_ROOFLINE_BANDWIDTH_BYTES_PER_MS: f64 = B200_ROOFLINE_BANDWIDTH_GBPS * 1e6;
++
++/// Selects how the attention op prices the cache-append leaf.
++///
++/// `Profiled` is the normal L1 path. `B200Roofline` is intentionally an L2
++/// representation for the Qwen2 SGLang-before recipe: it models the fused
++/// `reshape_and_cache_flash_kernel` traffic without asking the global kernel
++/// cache for a backend row that is not present on B200.
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub enum KvCacheAppendImplementation {
++    Profiled,
++    B200Roofline,
++}
++
+ /// Single op-level config; expands into three sub-kernel configs. The op owns
+ /// the FP8 precision policy: `dtype` is the base (16-bit) dtype and `fp8` picks
+ /// the per-phase preset (mirrors ref `python_bridge.rs prefill_dtypes` /
+@@ -90,22 +106,130 @@ impl FlashInferAttentionConfig {
+ 
+ pub struct FlashInferAttentionOp {
+     pub name: String,
+-    pub kv_cache_append: Arc<KvCacheAppendKernel>,
++    pub kv_cache_append: KvCacheAppendLeaf,
+     pub prefill: Arc<FlashinferAttnPrefillKernel>,
+     pub decode: Arc<FlashinferAttnDecodeKernel>,
+ }
+ 
++/// L2 cache-append leaf. The profile-backed variant owns the normal L1 kernel;
++/// the B200 variant owns only its physical config and computes the same logical
++/// traffic at the catalog roofline. Both variants expose the same leaf kind and
++/// consume the same `KvCacheAppendKernelInput`.
++pub struct KvCacheAppendLeaf {
++    /// Kept public for existing attention-worklet inspection/tests and for the
++    /// shared K/V layout metadata used by both implementations.
++    pub config: KvCacheAppendKernelConfig,
++    implementation: KvCacheAppendImplementation,
++    profiled: Option<Arc<KvCacheAppendKernel>>,
++}
++
++impl KvCacheAppendLeaf {
++    fn profiled(
++        name: String,
++        config: KvCacheAppendKernelConfig,
++        bridge: &PerfApiBridge,
++    ) -> Result<Self, BuildError> {
++        Ok(Self {
++            config: config.clone(),
++            implementation: KvCacheAppendImplementation::Profiled,
++            profiled: Some(Arc::new(KvCacheAppendKernel::build(name, config, bridge)?)),
++        })
++    }
++
++    fn b200_roofline(config: KvCacheAppendKernelConfig) -> Result<Self, BuildError> {
++        if config.gpu_name != B200_GPU_NAME {
++            return Err(BuildError::FitFailed {
++                kind: "kv_cache_append",
++                reason: format!(
++                    "B200 cache-only roofline requires gpu_name {B200_GPU_NAME:?}, got {:?}",
++                    config.gpu_name
++                ),
++            });
++        }
++        Ok(Self {
++            config,
++            implementation: KvCacheAppendImplementation::B200Roofline,
++            profiled: None,
++        })
++    }
++
++    pub fn implementation(&self) -> KvCacheAppendImplementation {
++        self.implementation
++    }
++
++    fn kind(&self) -> &'static str {
++        "kv_cache_append"
++    }
++
++    fn describe_config(&self) -> serde_json::Value {
++        let mut config = self.config.describe_config();
++        if self.implementation == KvCacheAppendImplementation::B200Roofline {
++            let object = config
++                .as_object_mut()
++                .expect("KvCacheAppendKernelConfig serializes as an object");
++            object.insert(
++                "backends".to_string(),
++                serde_json::json!(["b200_roofline"]),
++            );
++            object.insert(
++                "implementation".to_string(),
++                serde_json::json!("fused_cache_only_roofline"),
++            );
++            object.insert(
++                "fused_kernel".to_string(),
++                serde_json::json!("reshape_and_cache_flash_kernel"),
++            );
++            object.insert(
++                "roofline_bandwidth_gbps".to_string(),
++                serde_json::json!(B200_ROOFLINE_BANDWIDTH_GBPS),
++            );
++            object.insert(
++                "timing_source".to_string(),
++                serde_json::json!("gpu_catalog_mem_bandwidth"),
++            );
++        }
++        config
++    }
++
++    fn eval(&self, input: &KvCacheAppendKernelInput) -> LeafMetrics {
++        match &self.profiled {
++            Some(kernel) => kernel.eval(input),
++            None => b200_roofline_metrics(&self.config, input),
++        }
++    }
++}
++
+ impl FlashInferAttentionOp {
+     pub fn build(
+         name: String,
+         cfg: FlashInferAttentionConfig,
+         bridge: &PerfApiBridge,
+     ) -> Result<Self, BuildError> {
+-        let kv_cache_append = Arc::new(KvCacheAppendKernel::build(
+-            format!("{name}.kv_cache_append"),
+-            kv_cache_append_config(&cfg),
++        Self::build_with_kv_cache_append_implementation(
++            name,
++            cfg,
++            KvCacheAppendImplementation::Profiled,
+             bridge,
+-        )?);
++        )
++    }
++
++    pub fn build_with_kv_cache_append_implementation(
++        name: String,
++        cfg: FlashInferAttentionConfig,
++        kv_cache_append_implementation: KvCacheAppendImplementation,
++        bridge: &PerfApiBridge,
++    ) -> Result<Self, BuildError> {
++        let kv_cache_append_config = kv_cache_append_config(&cfg);
++        let kv_cache_append = match kv_cache_append_implementation {
++            KvCacheAppendImplementation::Profiled => KvCacheAppendLeaf::profiled(
++                format!("{name}.kv_cache_append"),
++                kv_cache_append_config,
++                bridge,
++            )?,
++            KvCacheAppendImplementation::B200Roofline => {
++                KvCacheAppendLeaf::b200_roofline(kv_cache_append_config)?
++            }
++        };
+         let prefill = Arc::new(FlashinferAttnPrefillKernel::build(
+             format!("{name}.prefill"),
+             prefill_config(&cfg),
+@@ -233,6 +357,40 @@ fn kv_cache_append_input(input: &FlashInferAttentionInput) -> Option<KvCacheAppe
+     (num_tokens > 0).then_some(KvCacheAppendKernelInput { num_tokens })
+ }
+ 
++/// Logical traffic for the cache append runner: read the newly produced K/V rows,
++/// write the cache rows, and read the int64 slot map used for indexed placement.
++/// This is deliberately the same accounting used by both profiling backends.
++fn kv_cache_append_bytes(
++    config: &KvCacheAppendKernelConfig,
++    input: &KvCacheAppendKernelInput,
++) -> u64 {
++    let num_tokens = u64::from(input.num_tokens);
++    let elements = 2
++        * num_tokens
++        * u64::from(config.num_kv_heads.get())
++        * u64::from(config.head_dim.get());
++    elements * u64::from(config.input_dtype.size_bytes())
++        + elements * u64::from(config.kv_dtype.size_bytes())
++        + num_tokens * 8
++}
++
++fn b200_roofline_metrics(
++    config: &KvCacheAppendKernelConfig,
++    input: &KvCacheAppendKernelInput,
++) -> LeafMetrics {
++    let bytes = kv_cache_append_bytes(config, input);
++    LeafMetrics {
++        m: Metrics4 {
++            time_ms: (bytes as f64 / B200_ROOFLINE_BANDWIDTH_BYTES_PER_MS) as f32,
++            flops: 0.0,
++            bytes: bytes as f32,
++            energy_j: 0.0,
++        },
++        coverage: CoverageFlags::EMPTY,
++        backend_index: 0,
++    }
++}
++
+ /// Prefill / chunked preset. fp8 → **fp8816** (q=fp8, kv=fp8, o=base) on `fa3`
+ /// (fa2 has no fp8-query kernel); else base dtype on the caller's backends.
+ fn prefill_config(cfg: &FlashInferAttentionConfig) -> FlashinferAttnPrefillKernelConfig {
+@@ -289,10 +447,13 @@ fn decode_input(decode_kv_lens: &[u32]) -> Option<FlashinferAttnDecodeKernelInpu
+ #[cfg(test)]
+ mod tests {
+     use super::{
+-        decode_config, decode_input, kv_cache_append_config, kv_cache_append_input, prefill_config,
+-        FlashInferAttentionConfig, FlashInferAttentionInput,
++        b200_roofline_metrics, decode_config, decode_input, kv_cache_append_bytes,
++        kv_cache_append_config, kv_cache_append_input, prefill_config, B200_GPU_NAME,
++        B200_ROOFLINE_BANDWIDTH_BYTES_PER_MS, FlashInferAttentionConfig, FlashInferAttentionInput,
++        KvCacheAppendLeaf,
+     };
+     use crate::timing::bridge::DType;
++    use crate::timing::kernels::KvCacheAppendKernelInput;
+ 
+     fn cfg(fp8: bool) -> FlashInferAttentionConfig {
+         FlashInferAttentionConfig {
+@@ -373,4 +534,43 @@ mod tests {
+         assert_eq!(c.cache_layout, "NHD");
+         assert_eq!(c.scale_granularity, "tensor");
+     }
++
++    #[test]
++    fn b200_roofline_preserves_append_bytes_and_uses_catalog_bandwidth() {
++        let mut attention = cfg(false);
++        attention.gpu_name = B200_GPU_NAME.to_string();
++        let config = kv_cache_append_config(&attention);
++        let input = KvCacheAppendKernelInput { num_tokens: 643 };
++        let expected_bytes = 2 * 643 * 2 * 128 * (2 + 2) + 643 * 8;
++
++        assert_eq!(kv_cache_append_bytes(&config, &input), expected_bytes);
++        let metrics = b200_roofline_metrics(&config, &input);
++        assert_eq!(metrics.m.bytes, expected_bytes as f32);
++        assert_eq!(
++            metrics.m.time_ms,
++            (expected_bytes as f64 / B200_ROOFLINE_BANDWIDTH_BYTES_PER_MS) as f32
++        );
++        assert_eq!(metrics.m.flops, 0.0);
++
++        let leaf = KvCacheAppendLeaf::b200_roofline(config).unwrap();
++        assert_eq!(leaf.kind(), "kv_cache_append");
++        assert_eq!(
++            leaf.describe_config()["implementation"],
++            "fused_cache_only_roofline"
++        );
++        assert_eq!(
++            leaf.describe_config()["fused_kernel"],
++            "reshape_and_cache_flash_kernel"
++        );
++        assert_eq!(leaf.describe_config()["backends"], serde_json::json!(["b200_roofline"]));
++    }
++
++    #[test]
++    fn b200_roofline_rejects_non_b200_configs() {
++        let error = match KvCacheAppendLeaf::b200_roofline(kv_cache_append_config(&cfg(false))) {
++            Ok(_) => panic!("the analytic leaf is B200-specific"),
++            Err(error) => error,
++        };
++        assert!(error.to_string().contains("B200 cache-only roofline"));
++    }
+ }
+diff --git a/simulator/src/op/attention/mod.rs b/simulator/src/op/attention/mod.rs
+index c01f267..05ca832 100644
+--- a/simulator/src/op/attention/mod.rs
++++ b/simulator/src/op/attention/mod.rs
+@@ -8,4 +8,7 @@ pub use dsa_indexer::{DsaIndexerConfig, DsaIndexerDecodeInput, DsaIndexerInput,
+ pub use dsa_sparse_mla::{
+     DsaSparseMlaAttentionConfig, DsaSparseMlaAttentionInput, DsaSparseMlaAttentionOp,
+ };
+-pub use flashinfer::{FlashInferAttentionConfig, FlashInferAttentionInput, FlashInferAttentionOp};
++pub use flashinfer::{
++    FlashInferAttentionConfig, FlashInferAttentionInput, FlashInferAttentionOp,
++    KvCacheAppendImplementation,
++};
+diff --git a/simulator/src/worklet/attn_local.rs b/simulator/src/worklet/attn_local.rs
+index 005c619..7b651f9 100644
+--- a/simulator/src/worklet/attn_local.rs
++++ b/simulator/src/worklet/attn_local.rs
+@@ -11,6 +11,7 @@
+ 
+ use crate::op::attention::{
+     FlashInferAttentionConfig, FlashInferAttentionInput, FlashInferAttentionOp,
++    KvCacheAppendImplementation,
+ };
+ use crate::timing::bridge::DType;
+ use crate::timing::{BuildError, CostNode, CostTreeBuilder, Dim, Evaluator, PerfApiBridge};
+@@ -77,8 +78,26 @@ impl AttnLocalWorklet {
+         resolved: AttnLocalWorkletResolved,
+         bridge: &PerfApiBridge,
+     ) -> Result<Self, BuildError> {
+-        let attn =
+-            FlashInferAttentionOp::build(format!("{name}.attn"), resolved.attn.clone(), bridge)?;
++        Self::build_with_kv_cache_append_implementation(
++            name,
++            resolved,
++            KvCacheAppendImplementation::Profiled,
++            bridge,
++        )
++    }
++
++    pub fn build_with_kv_cache_append_implementation(
++        name: String,
++        resolved: AttnLocalWorkletResolved,
++        kv_cache_append_implementation: KvCacheAppendImplementation,
++        bridge: &PerfApiBridge,
++    ) -> Result<Self, BuildError> {
++        let attn = FlashInferAttentionOp::build_with_kv_cache_append_implementation(
++            format!("{name}.attn"),
++            resolved.attn.clone(),
++            kv_cache_append_implementation,
++            bridge,
++        )?;
+         Ok(Self {
+             name,
+             attn,

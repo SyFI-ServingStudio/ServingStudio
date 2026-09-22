@@ -1,0 +1,141 @@
+{
+  "sglang_version": "0.5.20",
+  "moe_backend": "flashinfer_mxfp4",
+  "hidden_act": "situ",
+  "moe_method": {
+    "class": "Mxfp4MoEMethod",
+    "use_flashinfer": true,
+    "use_marlin": false,
+    "_fi_kernel": "trtllm_sm100",
+    "flashinfer_mxfp4_moe_precision": "default"
+  },
+  "experts": 56,
+  "ep": 16,
+  "layer_idx": 4,
+  "attn_type": "mla",
+  "attention_backend": "triton",
+  "page_size": 1,
+  "attn_heads": 12,
+  "cuda_graph": false,
+  "num_attention_heads": 12,
+  "config": {
+    "num_experts": 56,
+    "num_experts_per_token": 16,
+    "num_shared_experts": 2,
+    "moe_intermediate_size": 3072,
+    "routed_expert_hidden_size": 3584,
+    "hidden_size": 7168
+  },
+  "mla": {
+    "num_attention_heads": 12,
+    "kv_lora_rank": 512,
+    "qk_nope_head_dim": 128,
+    "qk_rope_head_dim": 64,
+    "v_head_dim": 128,
+    "q_lora_rank": 1536,
+    "kv_cache_dim": 576
+  },
+  "kda": null,
+  "points": [
+    {
+      "B": 1,
+      "seq_len": 1048576,
+      "ok": true,
+      "attn_type": "mla",
+      "page_size": 1,
+      "attention_backend": "triton",
+      "attention_backend_class": "TritonAttnBackend",
+      "out_shape": [
+        1,
+        7168
+      ],
+      "finite": true,
+      "us_step": 1272.096037864685,
+      "us_token": 1272.096037864685,
+      "kv_gb": 1.207960704,
+      "mla_kv_read_bytes": 1207959552,
+      "floor_us": 172.5656502857143,
+      "peak_gb": 3.68033792,
+      "us_attn": 1131.8080425262451,
+      "us_moe": 561.8559718132019,
+      "us_norms": 36.448001861572266,
+      "attn_over_floor": 6.558709920846518,
+      "rung": "adhoc"
+    },
+    {
+      "B": 16,
+      "seq_len": 65536,
+      "ok": true,
+      "attn_type": "mla",
+      "page_size": 1,
+      "attention_backend": "triton",
+      "attention_backend_class": "TritonAttnBackend",
+      "out_shape": [
+        16,
+        7168
+      ],
+      "finite": true,
+      "us_step": 1598.8479852676392,
+      "us_token": 99.92799907922745,
+      "kv_gb": 1.207960704,
+      "mla_kv_read_bytes": 1207959552,
+      "floor_us": 172.5656502857143,
+      "peak_gb": 2.78982912,
+      "us_attn": 1412.4799966812134,
+      "us_moe": 577.1520137786865,
+      "us_norms": 35.840000957250595,
+      "attn_over_floor": 8.185174710856952,
+      "rung": "adhoc"
+    },
+    {
+      "B": 32,
+      "seq_len": 8192,
+      "ok": true,
+      "attn_type": "mla",
+      "page_size": 1,
+      "attention_backend": "triton",
+      "attention_backend_class": "TritonAttnBackend",
+      "out_shape": [
+        32,
+        7168
+      ],
+      "finite": true,
+      "us_step": 1172.7999448776245,
+      "us_token": 36.649998277425766,
+      "kv_gb": 0.30199104,
+      "mla_kv_read_bytes": 301989888,
+      "floor_us": 43.141412571428575,
+      "peak_gb": 2.7813504,
+      "us_attn": 423.23198914527893,
+      "us_moe": 573.7919807434082,
+      "us_norms": 36.12799942493439,
+      "attn_over_floor": 9.810341477450239,
+      "rung": "adhoc"
+    },
+    {
+      "B": 128,
+      "seq_len": 8192,
+      "ok": true,
+      "attn_type": "mla",
+      "page_size": 1,
+      "attention_backend": "triton",
+      "attention_backend_class": "TritonAttnBackend",
+      "out_shape": [
+        128,
+        7168
+      ],
+      "finite": true,
+      "us_step": 1757.5360536575317,
+      "us_token": 13.730750419199467,
+      "kv_gb": 1.207960704,
+      "mla_kv_read_bytes": 1207959552,
+      "floor_us": 172.5656502857143,
+      "peak_gb": 3.544303104,
+      "us_attn": 1427.9680252075195,
+      "us_moe": 584.9279761314392,
+      "us_norms": 35.93600168824196,
+      "attn_over_floor": 8.274926225719051,
+      "rung": "adhoc"
+    }
+  ]
+}

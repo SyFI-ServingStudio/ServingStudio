@@ -1,0 +1,73 @@
+# Ground-truth spec: vLLM PR #27931 — vectorized RMSNorm kernel.
+#
+# Before: the standalone (non-residual) RMSNorm runs the scalar pre-PR vLLM
+# kernel (VEC_SIZE=1, BACKEND "vllm_before") — R0 4.6x above its hardware limit
+# at 4096-token prefill. After: vectorized kernel (VEC_SIZE=8, better block cap)
+# cuts the leaf 39us -> 18us (-55%). Kernel-efficiency fix: R0 moves, R5/R6
+# and the leaf set do not. Expressed ONLY on the llama3 4096-prefill case mix
+# (the qwen3-8b variant pair shows zero delta — do not use it).
+#
+# Sim ground truth: simulator/src/arch/llama3_dense_vllm_before.rs
+#   BACKEND "vllm_before" -> "vllm_after", VEC_SIZE 1 -> 8,
+#   BLOCK_SIZE_LARGE_CAP 1024 -> 256.
+# v3 SEALED variant: after implementations removed, backend names neutralized
+# (vllm_cuda), so the fix must be AUTHORED (vec_size/block-cap parameters), not
+# copied from an in-repo after recipe. Eval workspace: w_9169afebff09.
+# Source workspace: w_befc5365ebdc
+# (cached logs 20260824_20/21_llama3_4096_prefill_timing_predict_{before,after}).
+#
+# Fairness note (from the 30947 lesson): kv_cache_append (10.7x) and
+# attn.prefill (7.3x) out-rank this leaf (4.6x) on R0/R5, but have no cached
+# alternative implementation; the task text states the cache-only achievability
+# constraint so surveying agents can pivot to the fixable operator.
+
+issue_id: vllm-27931-v3
+source_workspace: w_befc5365ebdc
+arch_before: llama3_dense_vllm_before
+arch_after: llama3_dense_vllm_after
+
+gt_scope:
+  label_contains: "unified.pre_attn.input_norm"
+  path: "iter/1"
+
+harness:
+  baseline_commit: b6d4cf5
+  analyze_bin: /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/agent-workspaces/w_45893bc43b51/repo/target/release/analyze
+  task_file: agent_task_27931.md
+
+objective_gate:
+  forbidden_leaf_regex: null
+  required_leaves:
+    - unified.pre_attn.input_norm
+  expected_leaves_exact:
+    - unified.pre_attn.input_norm
+  metric_rungs: [r0_measured]
+  unchanged_rungs: [r5_hardware_limit]
+  rungs:
+    before:
+      r0_measured: 3.8872e-05
+      r5_hardware_limit: 8.389632e-06
+      r6_segmented_necessary: 3.2768e-08
+    after:
+      r0_measured: 1.7605e-05
+      r5_hardware_limit: 8.389632e-06
+      r6_segmented_necessary: 3.2768e-08
+  tolerance:
+    rel_to_after: 0.25          # R0 within ±25% of 1.7605e-5
+    min_drop_from_before: 0.30  # and ≥30% below 3.8872e-5 (GT drop is 55%)
+  necessary_unchanged_rel: 0.10
+
+gt_root_cause: |
+  vLLM PR #27931: the standalone (non-residual) RMSNorm CUDA kernel processed
+  one element per thread (scalar loads, VEC_SIZE=1) with an oversized block
+  cap, leaving memory bandwidth on the table — at 4096-token prefill the
+  operator ran ~4.6x above its hardware roofline. The fix vectorizes the
+  kernel (8-wide vectorized loads/stores, VEC_SIZE=8, block size cap reduced
+  1024->256), cutting the standalone input RMSNorm leaf's measured cost ~2.2x
+  (38.9us -> 17.6us) with hardware limit, necessary work, and the cost-tree
+  structure unchanged. In the simulator this is the llama3_dense_vllm recipe's
+  RMSNorm BACKEND switching "vllm_before" -> "vllm_after" with VEC_SIZE 1 -> 8.
+  A correct rediscovery identifies the standalone RMSNorm as running far above
+  its bandwidth roofline due to the scalar unvectorized kernel and swaps in the
+  vectorized implementation; it does NOT change the residual-fused norms,
+  attention internals, or what the operator computes.

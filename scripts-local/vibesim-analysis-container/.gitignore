@@ -1,0 +1,4 @@
+# Built docker context (large: analyze binary 257M + profile.db + baked prediction).
+# Regenerate with ./build_context.sh
+context/
+*.tar

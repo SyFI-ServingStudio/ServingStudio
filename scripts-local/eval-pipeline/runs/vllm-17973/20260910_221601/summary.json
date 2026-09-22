@@ -1,0 +1,41 @@
+{
+  "issue": "vllm-17973",
+  "k": 3,
+  "wid": "w_7eda59064b88",
+  "ts": "20260910_221601",
+  "gate_pass_rate": "3/3",
+  "vetted_correct_rate": "3/3",
+  "judge_match_rate": "3/3",
+  "trials": [
+    {
+      "trial": 1,
+      "conversation": "ea51a0cdda19",
+      "correct": true,
+      "gate": true,
+      "judge": true,
+      "hack_hard_flags": 0,
+      "leftover_reads": 0,
+      "agent_seconds": 2363.8
+    },
+    {
+      "trial": 2,
+      "conversation": "e5063b987157",
+      "correct": true,
+      "gate": true,
+      "judge": true,
+      "hack_hard_flags": 0,
+      "leftover_reads": 0,
+      "agent_seconds": 2098.5
+    },
+    {
+      "trial": 3,
+      "conversation": "314088dc9bf2",
+      "correct": true,
+      "gate": true,
+      "judge": true,
+      "hack_hard_flags": 0,
+      "leftover_reads": 0,
+      "agent_seconds": 3371.2
+    }
+  ]
+}

@@ -1,0 +1,85 @@
+diff --git a/simulator/src/arch/llama3_dense_vllm_before.rs b/simulator/src/arch/llama3_dense_vllm_before.rs
+index 725d0a9..5879faf 100644
+--- a/simulator/src/arch/llama3_dense_vllm_before.rs
++++ b/simulator/src/arch/llama3_dense_vllm_before.rs
+@@ -1,4 +1,4 @@
+-//! Llama3-8B dense local architecture using the pre-PR vLLM RMSNorm recipe.
++//! Llama3-8B dense local architecture using the optimized vLLM RMSNorm recipe.
+ 
+ use crate::arch::model_cfg::ModelCfg;
+ use crate::timing::{BuildError, Dim, PerfApiBridge};
+@@ -8,11 +8,11 @@ use super::llama3_dense_vllm_common as common;
+ pub struct BeforeRecipe;
+ 
+ impl common::Recipe for BeforeRecipe {
+-    const BACKEND: &'static str = "vllm_before";
+-    const VEC_SIZE: u32 = 1;
++    const BACKEND: &'static str = "vllm_after";
++    const VEC_SIZE: u32 = 8;
+     const BLOCK_SIZE_THRESHOLD: u32 = 256;
+     const BLOCK_SIZE_SMALL_CAP: u32 = 1024;
+-    const BLOCK_SIZE_LARGE_CAP: u32 = 1024;
++    const BLOCK_SIZE_LARGE_CAP: u32 = 256;
+     const LABEL: &'static str = "llama3_dense_vllm_before";
+ }
+ 
+@@ -56,7 +56,7 @@ mod tests {
+     use crate::timing::{CostNode, PerfApiBridge};
+ 
+     #[test]
+-    fn before_config_keeps_llama3_topology_and_vllm_dispatch_identity() {
++    fn before_config_keeps_llama3_topology_and_optimized_vllm_dispatch() {
+         let cfgs = build_configs(
+             &ModelCfg::llama3_8b(),
+             &Llama3DenseVllmBeforeParallel {
+@@ -66,11 +66,11 @@ mod tests {
+         assert_eq!(cfgs.num_layers, 32);
+         assert_eq!(cfgs.attn.backends, vec!["fa2"]);
+         assert_eq!(cfgs.attn.kv_cache_append_backends, vec!["torch"]);
+-        assert_eq!(cfgs.input_norm.backends, vec!["vllm_before"]);
+-        assert_eq!(cfgs.input_norm.vec_size, 1);
++        assert_eq!(cfgs.input_norm.backends, vec!["vllm_after"]);
++        assert_eq!(cfgs.input_norm.vec_size, 8);
+         assert_eq!(cfgs.input_norm.block_size_threshold, 256);
+         assert_eq!(cfgs.input_norm.block_size_small_cap, 1024);
+-        assert_eq!(cfgs.input_norm.block_size_large_cap, 1024);
++        assert_eq!(cfgs.input_norm.block_size_large_cap, 256);
+         assert_eq!(cfgs.input_norm.hidden, 4096);
+         assert_eq!(cfgs.residual_pre_norm.backends, vec!["vllm_external"]);
+         assert_eq!(cfgs.post_attn.residual_norm_backends, vec!["vllm_external"]);
+@@ -96,7 +96,7 @@ mod tests {
+     }
+ 
+     #[test]
+-    fn paired_cost_tree_has_one_changing_plain_norm_and_64_residual_norms() {
++    fn paired_cost_tree_has_one_plain_norm_and_64_residual_norms() {
+         let before_bridge = PerfApiBridge::new_uninit_for_test();
+         before_bridge.enable_enumerate();
+         let before_cfg = build_configs(
+@@ -233,7 +233,7 @@ mod tests {
+         for (before_slot, after_slot) in before_tree.slots.iter().zip(&after_tree.slots) {
+             if before_slot.kind == "rms_norm_vllm" {
+                 assert_eq!(after_slot.kind, "rms_norm_vllm");
+-                assert_ne!(before_slot.kernel_config, after_slot.kernel_config);
++                assert_eq!(before_slot.kernel_config, after_slot.kernel_config);
+             } else {
+                 assert_eq!(before_slot, after_slot);
+             }
+@@ -248,7 +248,7 @@ mod tests {
+         let before_dispatch = RmsNormVllmSpec::enumerate(
+             &before_cfg.input_norm,
+             &dispatch_grid,
+-            "vllm_before",
++            "vllm_after",
+         );
+         let after_dispatch = RmsNormVllmSpec::enumerate(
+             &after_cfg.input_norm,
+@@ -264,7 +264,7 @@ mod tests {
+         };
+         assert_eq!(
+             before_dispatch.iter().map(fields).collect::<Vec<_>>(),
+-            vec![(255, 1024, 1), (256, 1024, 1), (4096, 1024, 1)]
++            vec![(255, 512, 8), (256, 256, 8), (4096, 256, 8)]
+         );
+         assert_eq!(
+             after_dispatch.iter().map(fields).collect::<Vec<_>>(),

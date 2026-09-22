@@ -1,0 +1,163 @@
+diff --git a/model/work/location_maps/qwen3_dense_vllm_before_unified.json b/model/work/location_maps/qwen3_dense_vllm_before_unified.json
+index d0377a7..0548c68 100644
+--- a/model/work/location_maps/qwen3_dense_vllm_before_unified.json
++++ b/model/work/location_maps/qwen3_dense_vllm_before_unified.json
+@@ -6,9 +6,7 @@
+     {"location": "unified.embedding", "semantics": ["embedding"]},
+     {"location": "unified.pre_attn.input_norm", "semantics": ["input_norm"]},
+     {"location": "unified.pre_attn.qkv_proj", "semantics": ["qkv"]},
+-    {"location": "unified.qk_norm.q_input_copy", "semantics": []},
+     {"location": "unified.qk_norm.q_norm", "semantics": ["q_norm"]},
+-    {"location": "unified.qk_norm.k_input_copy", "semantics": []},
+     {"location": "unified.qk_norm.k_norm", "semantics": ["k_norm"]},
+     {
+       "location": "unified.attn.attn.kv_cache_append",
+diff --git a/simulator/src/arch/qwen3_dense_vllm_before.rs b/simulator/src/arch/qwen3_dense_vllm_before.rs
+index aa88bc3..94e0d0a 100644
+--- a/simulator/src/arch/qwen3_dense_vllm_before.rs
++++ b/simulator/src/arch/qwen3_dense_vllm_before.rs
+@@ -1,7 +1,7 @@
+-//! Qwen3-0.6B dense local architecture matching the vLLM PR-before graph.
++//! Qwen3-0.6B dense local architecture for the vLLM before/after comparison.
+ //!
+-//! The Q/K input copies are fixed by the `BeforeRecipe` type and therefore
+-//! appear as concrete CostTree slots in every model built from this module.
++//! The before recipe keeps the required Q/K RMSNorm leaves while omitting the
++//! redundant input-copy leaves from its CostTree.
+ 
+ use crate::arch::model_cfg::ModelCfg;
+ use crate::timing::{BuildError, Dim, PerfApiBridge};
+@@ -11,7 +11,7 @@ use super::qwen3_dense_vllm_common as common;
+ pub struct BeforeRecipe;
+ 
+ impl common::Recipe for BeforeRecipe {
+-    const COPY_INPUTS: bool = true;
++    const COPY_INPUTS: bool = false;
+     const LABEL: &'static str = "qwen3_dense_vllm_before";
+ }
+ 
+@@ -58,7 +58,7 @@ mod tests {
+     }
+ 
+     #[test]
+-    fn build_and_resolve_qwen3_before_shapes() {
++    fn build_and_resolve_qwen3_before_shapes_without_redundant_copies() {
+         let cfgs = build_configs(
+             &model(),
+             &Qwen3DenseVllmBeforeParallel {
+@@ -66,7 +66,7 @@ mod tests {
+             },
+         );
+         assert_eq!(cfgs.num_layers, 28);
+-        assert_eq!(cfgs.qk_norm.copy_inputs, true);
++        assert!(!cfgs.qk_norm.copy_inputs);
+         assert_eq!(cfgs.lm_head.n, 151936);
+         assert_eq!(cfgs.qk_norm.copy_backends, vec!["triton"]);
+ 
+@@ -80,12 +80,8 @@ mod tests {
+         assert_eq!(resolved.qk_norm.k_norm_m_per_token, 8);
+         assert_eq!(resolved.post_attn.up_gate.n, 6144);
+         assert_eq!(resolved.post_attn.down.k, 3072);
+-        let q_copy = resolved.qk_norm.q_input_copy.as_ref().unwrap();
+-        let k_copy = resolved.qk_norm.k_input_copy.as_ref().unwrap();
+-        assert_eq!(q_copy.input_bytes_per_token, 4096);
+-        assert_eq!(q_copy.output_bytes_per_token, 4096);
+-        assert_eq!(k_copy.input_bytes_per_token, 2048);
+-        assert_eq!(k_copy.output_bytes_per_token, 2048);
++        assert!(resolved.qk_norm.q_input_copy.is_none());
++        assert!(resolved.qk_norm.k_input_copy.is_none());
+         assert_eq!(total_kv_bytes_per_token(&resolved), 114688);
+     }
+ }
+diff --git a/simulator/src/timing_predict.rs b/simulator/src/timing_predict.rs
+index 09636a7..11912f5 100644
+--- a/simulator/src/timing_predict.rs
++++ b/simulator/src/timing_predict.rs
+@@ -3,8 +3,8 @@
+ //! This is the same family as `dry-run` / `build-cache-only` / `kernel-query`:
+ //! it does NOT run the discrete-event sim (no scheduler, no trace, no clock). It
+ //! takes a batch of explicit batch shapes and, for each, runs the cost model over
+-//! the compiled `CostTree(s)`, predicting timings WITHOUT a GPU (a warm
+-//! `profile.db`) or JIT-profiling on demand (a cold one).
++//! the compiled `CostTree(s)`, predicting timings from the cached rows in a warm
++//! `profile.db`. A missing row is a hard error; this path never launches profiling.
+ //!
+ //! Three arch kinds, one tool (the `arch` selector picks):
+ //!   - `iter` — ONE [`IterwiseUnifiedModel::eval_iter`] over the whole forward
+@@ -236,15 +236,11 @@ pub fn run_timing_predict(config_path: &Path) -> Result<()> {
+     Ok(())
+ }
+ 
+-/// Offline what-if bridge: JIT-fill missing `profile.db` rows on build (like
+-/// `kernel-query`), rather than the strict fail-fast a real `run` uses. A warm
+-/// cache then needs no GPU; a cold one profiles on demand.
++/// Strict offline bridge: use only rows already present in `profile.db`.
++/// `PerfApiBridge::new` disables JIT profiling, so a missing row fails the
++/// prediction instead of launching GPU work.
+ fn predict_bridge() -> Result<PerfApiBridge> {
+-    let bridge = PerfApiBridge::new().context("starting the PyO3 perf_api bridge")?;
+-    bridge
+-        .enable_jit_profiling()
+-        .context("enabling JIT profiling for offline prediction")?;
+-    Ok(bridge)
++    PerfApiBridge::new().context("starting the PyO3 perf_api bridge")
+ }
+ 
+ /// Run the iter-wise cases: one [`CostBuffers::run_iter`] per case (one parquet row
+diff --git a/simulator/src/worklet/qk_norm_local.rs b/simulator/src/worklet/qk_norm_local.rs
+index 3e60bae..890d005 100644
+--- a/simulator/src/worklet/qk_norm_local.rs
++++ b/simulator/src/worklet/qk_norm_local.rs
+@@ -1,10 +1,10 @@
+ //! `QkNormLocalWorklet` — single-GPU Q/K RMSNorm section after fused QKV.
+ //!
+ //! Qwen3 applies RMSNorm independently to the query and key head rows.  The
+-//! norm kernel's `m` axis is therefore the number of heads, while the optional
+-//! input copies are byte-keyed over the original batch-token rows.  The
+-//! `copy_inputs` switch captures the vLLM PR-before graph (copies present) and
+-//! PR-after graph (copies removed) without changing the concrete norm slots.
++//! norm kernel's `m` axis is therefore the number of heads, while optional input
++//! copies are byte-keyed over the original batch-token rows. The `copy_inputs`
++//! switch controls those optional leaves without changing the concrete norm
++//! slots.
+ 
+ use std::sync::Arc;
+ 
+@@ -24,7 +24,7 @@ pub struct QkNormLocalWorkletConfig {
+     pub head_dim: Dim,
+     pub dtype: DType,
+     pub gpu_name: String,
+-    /// vLLM PR-before graph has explicit Q/K input copies; PR-after does not.
++    /// Whether to include optional Q/K input-copy leaves in the CostTree.
+     pub copy_inputs: bool,
+     pub norm_backends: Vec<&'static str>,
+     pub copy_backends: Vec<&'static str>,
+@@ -226,7 +226,7 @@ mod tests {
+     }
+ 
+     #[test]
+-    fn resolve_before_graph_has_head_multipliers_and_copy_slots() {
++    fn resolve_copy_enabled_graph_has_head_multipliers_and_copy_slots() {
+         let r = QkNormLocalWorklet::resolve_config(&cfg(true));
+ 
+         assert_eq!(r.q_norm.hidden, 128);
+@@ -234,16 +234,16 @@ mod tests {
+         assert_eq!(r.q_norm_m_per_token, 16);
+         assert_eq!(r.k_norm_m_per_token, 8);
+ 
+-        let q_copy = r.q_input_copy.expect("PR-before Q copy must be present");
++        let q_copy = r.q_input_copy.expect("copy-enabled Q copy must be present");
+         assert_eq!(q_copy.input_bytes_per_token, 16 * 128 * 2);
+         assert_eq!(q_copy.output_bytes_per_token, 16 * 128 * 2);
+-        let k_copy = r.k_input_copy.expect("PR-before K copy must be present");
++        let k_copy = r.k_input_copy.expect("copy-enabled K copy must be present");
+         assert_eq!(k_copy.input_bytes_per_token, 8 * 128 * 2);
+         assert_eq!(k_copy.output_bytes_per_token, 8 * 128 * 2);
+     }
+ 
+     #[test]
+-    fn resolve_after_graph_omits_copy_configs() {
++    fn resolve_copy_disabled_graph_omits_copy_configs() {
+         let r = QkNormLocalWorklet::resolve_config(&cfg(false));
+ 
+         assert!(r.q_input_copy.is_none());

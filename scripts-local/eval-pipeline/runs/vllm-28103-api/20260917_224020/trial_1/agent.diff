@@ -1,0 +1,56 @@
+diff --git a/model/work/location_maps/qwen3_dense_vllm_after_unified.json b/model/work/location_maps/qwen3_dense_vllm_after_unified.json
+index 1e170ca..67acddd 100644
+--- a/model/work/location_maps/qwen3_dense_vllm_after_unified.json
++++ b/model/work/location_maps/qwen3_dense_vllm_after_unified.json
+@@ -1,7 +1,7 @@
+ {
+   "schema_version": 1,
+   "mapping_id": "qwen3-dense-vllm-after-unified-v1",
+-  "arch_types": ["qwen3_dense_vllm_after"],
++  "arch_types": ["qwen3_dense_vllm_after", "qwen3_dense_vllm_before"],
+   "locations": [
+     {"location": "unified.embedding", "semantics": ["embedding"]},
+     {"location": "unified.pre_attn.input_norm", "semantics": ["input_norm"]},
+diff --git a/simulator/src/arch/qwen3_dense_vllm_before.rs b/simulator/src/arch/qwen3_dense_vllm_before.rs
+index aa88bc3..29bf122 100644
+--- a/simulator/src/arch/qwen3_dense_vllm_before.rs
++++ b/simulator/src/arch/qwen3_dense_vllm_before.rs
+@@ -11,7 +11,7 @@ use super::qwen3_dense_vllm_common as common;
+ pub struct BeforeRecipe;
+ 
+ impl common::Recipe for BeforeRecipe {
+-    const COPY_INPUTS: bool = true;
++    const COPY_INPUTS: bool = false;
+     const LABEL: &'static str = "qwen3_dense_vllm_before";
+ }
+ 
+@@ -66,7 +66,7 @@ mod tests {
+             },
+         );
+         assert_eq!(cfgs.num_layers, 28);
+-        assert_eq!(cfgs.qk_norm.copy_inputs, true);
++        assert!(!cfgs.qk_norm.copy_inputs);
+         assert_eq!(cfgs.lm_head.n, 151936);
+         assert_eq!(cfgs.qk_norm.copy_backends, vec!["triton"]);
+ 
+@@ -74,18 +74,14 @@ mod tests {
+         // Qwen3 uses GQA: q + k + v = (16 + 2 * 8) * 128 = 4096.
+         // 6144 would be a three-QO-head projection and is not this checkpoint.
+         assert_eq!(resolved.pre_attn.qkv.n, 4096);
++        assert!(resolved.qk_norm.q_input_copy.is_none());
++        assert!(resolved.qk_norm.k_input_copy.is_none());
+         assert_eq!(resolved.qk_norm.q_norm.hidden, 128);
+         assert_eq!(resolved.qk_norm.k_norm.hidden, 128);
+         assert_eq!(resolved.qk_norm.q_norm_m_per_token, 16);
+         assert_eq!(resolved.qk_norm.k_norm_m_per_token, 8);
+         assert_eq!(resolved.post_attn.up_gate.n, 6144);
+         assert_eq!(resolved.post_attn.down.k, 3072);
+-        let q_copy = resolved.qk_norm.q_input_copy.as_ref().unwrap();
+-        let k_copy = resolved.qk_norm.k_input_copy.as_ref().unwrap();
+-        assert_eq!(q_copy.input_bytes_per_token, 4096);
+-        assert_eq!(q_copy.output_bytes_per_token, 4096);
+-        assert_eq!(k_copy.input_bytes_per_token, 2048);
+-        assert_eq!(k_copy.output_bytes_per_token, 2048);
+         assert_eq!(total_kv_bytes_per_token(&resolved), 114688);
+     }
+ }

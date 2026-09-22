@@ -1,0 +1,64 @@
+# API-driven variant of vllm-28103: same GT/gate, but the agent must drive
+# optimization through the vibesim_api.py shim (task_file below). Baseline
+# defcc63 = cc26c24 + the committed shim.
+# Ground-truth spec for vLLM PR #28103 (Qwen3 dense, RMSNorm qk_norm redundant input copies).
+# Data sourced from the cached before/after timing_prediction runs under
+# agent-workspaces/w_1471ccd48dec/repo/logs/20260809_3_qwen3_vllm_{before,after}.
+
+issue_id: vllm-28103-api
+framework: vllm
+pr: 28103
+model: Qwen/Qwen3-0.6B
+before_commit: 0e741c12e3dc45093b2ddab8a31310703aa27002
+after_commit: a982f5b5ea4a1932424927ea357b532d0e45caf1
+
+# Reference cached runs (read-only; the agent gets a fresh copy of the BEFORE state).
+reference_runs:
+  before: agent-workspaces/w_1471ccd48dec/repo/logs/20260809_3_qwen3_vllm_before
+  after:  agent-workspaces/w_1471ccd48dec/repo/logs/20260809_3_qwen3_vllm_after
+
+# The scope where the GT bottleneck lives. Prefer --label (robust to structural
+# renumbering); path is the fallback selector.
+harness:
+  baseline_commit: defcc63
+  task_file: agent_task_28103_api.md
+
+gt_scope:
+  label_contains: "unified.qk_norm"
+  path: "iter/1/0/1"
+
+# Objective gate expectations.
+objective_gate:
+  # structural: these leaves are the redundant work the PR removes; after the fix
+  # NO descendant leaf may match this regex.
+  forbidden_leaf_regex: "_input_copy$"
+  required_leaves:
+    - "unified.qk_norm.q_norm"
+    - "unified.qk_norm.k_norm"
+  # metric (GPU-seconds), recorded from the cached runs:
+  rungs:
+    before: { r0_measured: 4.714e-4, r5_hardware_limit: 8.877e-5, r6_segmented_necessary: 1.792e-9 }
+    after:  { r0_measured: 2.727e-4, r5_hardware_limit: 4.438e-5, r6_segmented_necessary: 1.792e-9 }
+  # PASS metric rule: r0 and r5 must land within tolerance of the AFTER value
+  # (fix realized), AND clearly below BEFORE (real change, not noise).
+  tolerance:
+    rel_to_after: 0.25       # |value - after| / after <= 0.25
+    min_drop_from_before: 0.20  # value <= before * (1 - 0.20)
+  # r6 (necessary work) must be ~unchanged: the copies were never necessary work.
+  necessary_unchanged_rel: 0.10
+
+# Ground-truth root cause, for the semantic judge (do NOT show to the agent).
+gt_root_cause: |
+  vLLM's fused RMSNorm kernel used input.view({-1, hidden_size}) assuming a
+  contiguous tensor. The Q and K tensors, split from a combined QKV projection,
+  are non-contiguous strided views. They were protected by an unconditional
+  input.contiguous() in BOTH the Python custom-op wrapper AND the compiled
+  RMSNorm matcher, which materialized a full copy and extra memory traffic
+  before every q_norm / k_norm. The fix computes row base addresses from the
+  explicit tensor strides (supporting rank 2/3/4) so RMSNorm reads the strided
+  input directly, removing the two redundant input copies.
+  Reported: +4.21% throughput, -1.19% TTFT, -4.34% TPOT.
+  In VibeSim terms: the qk_norm worklet's copy_inputs behavior (q_input_copy +
+  k_input_copy leaves) is redundant; a correct fix eliminates those two leaves,
+  roughly halving the qk_norm scope's hardware-limit (r5) cost, while the
+  necessary-work floor (r6) is unchanged.

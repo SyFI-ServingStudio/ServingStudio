@@ -1,0 +1,46 @@
+==== slurm_gpu.sh on cayenne job=779 ====
+CUDA_VISIBLE_DEVICES=0
+allocated GPU UUID(s): GPU-c09878e8-fb6a-ff0c-3c33-05993065d679
+0, GPU-c09878e8-fb6a-ff0c-3c33-05993065d679, 0 MiB
+==== exec: ./run_kimi_single_layer.sh --attn-type mla --moe-backend flashinfer_mxfp4 --split --iters 30 --warmup 8 --point 1,8192 ====
+==== kimi_single_layer: img=lmsysorg/sglang:v0.5.20 gpu="device=GPU-c09878e8-fb6a-ff0c-3c33-05993065d679" args=--attn-type mla --moe-backend flashinfer_mxfp4 --split --iters 30 --warmup 8 --point 1,8192 ====
+--- Wrapper: Applying owner=yilegu, memory=432834647654 bytes, and cpus=28.8 ---
+==============================================================================
+kimi_single_layer_decode v3 (K3/MLA)  experts=56 EP=16 layer_idx=4 iters=30 warmup=8 split=True moe_backend=flashinfer_mxfp4
+torch=2.13.0+cu130  dev=NVIDIA B200
+sglang=0.5.20
+==============================================================================
+[cfg] wrote /tmp/k3_cfg/config.json  experts=56 (EP=16) top_k=16 shared=2 layers=8  moe_backend=flashinfer_mxfp4 hidden_act=situ  attn_type=mla target_layer=4 heads=96 kda_layers=[1, 2, 3, 4, 6, 7, 8] full_attn=[5]
+[moe] flashinfer_mxfp4_moe_precision=default
+[moe] runner_backend=MoeRunnerBackend.FLASHINFER_MXFP4 is_flashinfer_mxfp4=True is_deep_gemm=False
+[boot] tp=1 attn_tp=1 world=1  is_kda_layer(4)=False  attention_arch=1 dtype=torch.bfloat16
+[layer] mxfp4 quant_config=Mxfp4Config quant_format=None
+[layer] UnquantizedLinearMethod from sglang.srt.layers.quantization.unquant
+[layer] patched Mxfp4Config.get_quant_method: LinearBase -> bf16 unquantized fallback
+[rank0]: Traceback (most recent call last):
+[rank0]:   File "/work/kimi_single_layer_decode.py", line 935, in <module>
+[rank0]:     main()
+[rank0]:   File "/work/kimi_single_layer_decode.py", line 846, in main
+[rank0]:     layer = build_layer(cfg, args.layer_idx, moe_backend=args.moe_backend,
+[rank0]:             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/work/kimi_single_layer_decode.py", line 281, in build_layer
+[rank0]:     layer = KimiK3DecoderLayer(config=cfg, layer_idx=layer_idx,
+[rank0]:             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/sgl-workspace/sglang/python/sglang/srt/models/kimi_k3.py", line 2390, in __init__
+[rank0]:     self.self_attn = KimiK3MLAAttention(
+[rank0]:                      ^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/sgl-workspace/sglang/python/sglang/srt/models/kimi_k3.py", line 2079, in __init__
+[rank0]:     super().__init__(
+[rank0]:   File "/sgl-workspace/sglang/python/sglang/srt/models/deepseek_v2.py", line 1885, in __init__
+[rank0]:     self.attn_mqa = RadixAttention(
+[rank0]:                     ^^^^^^^^^^^^^^^
+[rank0]:   File "/sgl-workspace/sglang/python/sglang/srt/layers/radix_attention.py", line 148, in __init__
+[rank0]:     self.quant_method = quant_config.get_quant_method(self, prefix=prefix)
+[rank0]:                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/work/kimi_single_layer_decode.py", line 272, in _gqm_linear_fallback
+[rank0]:     m = _orig_gqm(self, layer, prefix)
+[rank0]:         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/sgl-workspace/sglang/python/sglang/srt/layers/quantization/mxfp4.py", line 362, in get_quant_method
+[rank0]:     raise NotImplementedError("Mxfp4 attention layer is not implemented")
+[rank0]: NotImplementedError: Mxfp4 attention layer is not implemented
+[rank0]:[W922 06:50:27.566905275 ProcessGroupNCCL.cpp:1624] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())

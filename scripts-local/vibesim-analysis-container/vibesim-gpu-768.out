@@ -1,0 +1,32 @@
+==== slurm_gpu.sh on cayenne job=768 ====
+CUDA_VISIBLE_DEVICES=0
+allocated GPU UUID(s): GPU-17dce9e8-fd5a-2fcc-3847-dc31ae451efc
+0, GPU-17dce9e8-fd5a-2fcc-3847-dc31ae451efc, 0 MiB
+==== exec: ./run_kimi_single_layer.sh --point 1,4096 --split ====
+==== kimi_single_layer: img=lmsysorg/sglang:v0.5.20 gpu="device=GPU-17dce9e8-fd5a-2fcc-3847-dc31ae451efc" args=--point 1,4096 --split ====
+--- Wrapper: Applying owner=yilegu, memory=432834647654 bytes, and cpus=28.8 ---
+==============================================================================
+kimi_single_layer_decode v2 (K3/KDA)  experts=56 EP=16 layer_idx=5 iters=100 warmup=20 split=True
+torch=2.13.0+cu130  dev=NVIDIA B200
+sglang=0.5.20
+==============================================================================
+[cfg] wrote /tmp/k3_cfg/config.json  experts=56 (EP=16) top_k=16 shared=2 layers=8
+[boot] tp=1 attn_tp=1 world=1  is_kda_layer(5)=True  dtype=torch.bfloat16
+[layer] KimiK3DecoderLayer(layer_idx=5): self_attn=KimiK3DeltaAttention (KDA=True MLA=False)  mlp=KimiK3MoE (MoE=True)
+[layer] random-init 2.392B float params -> cuda/bf16/eval; conv_weights refreshed dev=cuda:0
+
+---- rung adhoc ----
+[kda] KDAAttnBackend built; conv=(2, 3, 36864)/torch.bfloat16 temporal=(2, 96, 128, 128)/torch.float32 state=13.03MB/slot-set
+/opt/sglang/lib/python3.12/site-packages/triton/language/core.py:2284: UserWarning: tl.make_block_ptr is deprecated. Use TensorDescriptor or tl.make_tensor_descriptor instead.
+  warn("tl.make_block_ptr is deprecated. Use TensorDescriptor or tl.make_tensor_descriptor instead.")
+Using default MoE kernel config. Performance might be sub-optimal! Config file not found at /sgl-workspace/sglang/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_7_1/E=56,N=3072,device_name=NVIDIA_B200.json, you can create them with https://github.com/sgl-project/sglang/tree/main/benchmark/kernels/fused_moe_triton
+Using default MoE kernel config. Performance might be sub-optimal! Config file not found at /sgl-workspace/sglang/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_7_1/E=56,N=3072,device_name=NVIDIA_B200_down.json, you can create them with https://github.com/sgl-project/sglang/tree/main/benchmark/kernels/fused_moe_triton
+[time] B=    1 L=     4096  us/step=  1102.34  us/tok=1102.336  state=13.0MB  peak=4.83GB  finite=True  shape=[1, 7168]  attn=314.7us moe=564.6us norms=36.7us
+
+==============================================================================
+rung            B   seq_len    us/step    us/tok  state_MB  status
+adhoc           1      4096    1102.34  1102.336      13.0  ok  attn=314.7 moe=564.6 norms=36.7
+==============================================================================
+[out] wrote /work/kimi_single_layer/result_20260921_191324.json
+[rank0]:[W922 02:13:57.636258838 ProcessGroupNCCL.cpp:1624] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())
+==== done; json -> /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/kimi_single_layer/result_20260921_191324.json ====

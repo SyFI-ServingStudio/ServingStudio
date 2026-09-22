@@ -1,0 +1,8 @@
+==== slurm_gpu.sh on cayenne job=726 ====
+CUDA_VISIBLE_DEVICES=0
+allocated GPU UUID(s): GPU-c09878e8-fb6a-ff0c-3c33-05993065d679
+0, GPU-c09878e8-fb6a-ff0c-3c33-05993065d679, 0 MiB
+==== exec: ./gpu_check_20469.sh ====
+_HAS_SGL_KERNEL = True
+has causal_conv1d_fwd: True
+conv ops: ['causal_conv1d_update']

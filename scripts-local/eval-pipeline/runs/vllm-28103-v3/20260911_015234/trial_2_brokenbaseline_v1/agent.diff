@@ -1,0 +1,79 @@
+diff --git a/model/work/location_maps/qwen3_dense_vllm_before_strided_unified.json b/model/work/location_maps/qwen3_dense_vllm_before_strided_unified.json
+new file mode 100644
+index 0000000..efc3d24
+--- /dev/null
++++ b/model/work/location_maps/qwen3_dense_vllm_before_strided_unified.json
+@@ -0,0 +1,25 @@
++{
++  "schema_version": 1,
++  "mapping_id": "qwen3-dense-vllm-before-strided-unified-v1",
++  "arch_types": ["qwen3_dense_vllm_before"],
++  "locations": [
++    {"location": "unified.embedding", "semantics": ["embedding"]},
++    {"location": "unified.pre_attn.input_norm", "semantics": ["input_norm"]},
++    {"location": "unified.pre_attn.qkv_proj", "semantics": ["qkv"]},
++    {"location": "unified.qk_norm.q_norm", "semantics": ["q_norm"]},
++    {"location": "unified.qk_norm.k_norm", "semantics": ["k_norm"]},
++    {
++      "location": "unified.attn.attn.kv_cache_append",
++      "semantics": ["kv_cache_append"]
++    },
++    {"location": "unified.attn.attn.prefill", "semantics": ["attn.prefill"]},
++    {"location": "unified.attn.attn.decode", "semantics": ["attn.decode"]},
++    {"location": "unified.post_attn.o_proj", "semantics": ["o"]},
++    {"location": "unified.post_attn.post_norm", "semantics": ["post_norm"]},
++    {"location": "unified.post_attn.up_gate_proj", "semantics": ["gate_up"]},
++    {"location": "unified.post_attn.activation", "semantics": []},
++    {"location": "unified.post_attn.down_proj", "semantics": ["down"]},
++    {"location": "unified.final_norm", "semantics": ["final_norm"]},
++    {"location": "unified.lm_head", "semantics": ["lm_head"]}
++  ]
++}
+diff --git a/simulator/src/arch/qwen3_dense_vllm_before.rs b/simulator/src/arch/qwen3_dense_vllm_before.rs
+index aa88bc3..516a622 100644
+--- a/simulator/src/arch/qwen3_dense_vllm_before.rs
++++ b/simulator/src/arch/qwen3_dense_vllm_before.rs
+@@ -1,7 +1,7 @@
+ //! Qwen3-0.6B dense local architecture matching the vLLM PR-before graph.
+ //!
+-//! The Q/K input copies are fixed by the `BeforeRecipe` type and therefore
+-//! appear as concrete CostTree slots in every model built from this module.
++//! Q/K input copies are derived from the norm capability declared by the
++//! recipe, while Q/K normalization remains in the graph either way.
+ 
+ use crate::arch::model_cfg::ModelCfg;
+ use crate::timing::{BuildError, Dim, PerfApiBridge};
+@@ -11,7 +11,7 @@ use super::qwen3_dense_vllm_common as common;
+ pub struct BeforeRecipe;
+ 
+ impl common::Recipe for BeforeRecipe {
+-    const COPY_INPUTS: bool = true;
++    const NORM_SUPPORTS_STRIDED: bool = true;
+     const LABEL: &'static str = "qwen3_dense_vllm_before";
+ }
+ 
+@@ -66,7 +66,8 @@ mod tests {
+             },
+         );
+         assert_eq!(cfgs.num_layers, 28);
+-        assert_eq!(cfgs.qk_norm.copy_inputs, true);
++        assert!(cfgs.qk_norm.norm_capability.supports_strided_input);
++        assert!(!cfgs.qk_norm.copies_required());
+         assert_eq!(cfgs.lm_head.n, 151936);
+         assert_eq!(cfgs.qk_norm.copy_backends, vec!["triton"]);
+ 
+@@ -80,12 +81,8 @@ mod tests {
+         assert_eq!(resolved.qk_norm.k_norm_m_per_token, 8);
+         assert_eq!(resolved.post_attn.up_gate.n, 6144);
+         assert_eq!(resolved.post_attn.down.k, 3072);
+-        let q_copy = resolved.qk_norm.q_input_copy.as_ref().unwrap();
+-        let k_copy = resolved.qk_norm.k_input_copy.as_ref().unwrap();
+-        assert_eq!(q_copy.input_bytes_per_token, 4096);
+-        assert_eq!(q_copy.output_bytes_per_token, 4096);
+-        assert_eq!(k_copy.input_bytes_per_token, 2048);
+-        assert_eq!(k_copy.output_bytes_per_token, 2048);
++        assert!(resolved.qk_norm.q_input_copy.is_none());
++        assert!(resolved.qk_norm.k_input_copy.is_none());
+         assert_eq!(total_kv_bytes_per_token(&resolved), 114688);
+     }
+ }

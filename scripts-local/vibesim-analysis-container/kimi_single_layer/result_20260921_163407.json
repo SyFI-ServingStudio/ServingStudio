@@ -1,0 +1,30 @@
+{
+  "sglang_version": "0.5.20",
+  "experts": 24,
+  "ep": 16,
+  "layer_idx": 5,
+  "config": {
+    "num_experts": 24,
+    "num_experts_per_token": 16,
+    "num_shared_experts": 2,
+    "moe_intermediate_size": 3072,
+    "routed_expert_hidden_size": 3584,
+    "hidden_size": 7168
+  },
+  "kda": {
+    "num_heads": 96,
+    "head_dim": 128,
+    "short_conv_kernel": 4,
+    "gate_lower_bound": -5.0
+  },
+  "points": [
+    {
+      "B": 1,
+      "seq_len": 4096,
+      "ok": false,
+      "error": "ValueError: Pointer argument cannot be accessed from Triton (cpu tensor?)",
+      "traceback": "Traceback (most recent call last):\n  File \"/work/kimi_single_layer_decode.py\", line 410, in time_point\n    out = call_layer(layer, fb, positions, hidden)\n          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/work/kimi_single_layer_decode.py\", line 356, in call_layer\n    return layer.forward(\n           ^^^^^^^^^^^^^^\n  File \"/sgl-workspace/sglang/python/sglang/srt/models/kimi_k3.py\", line 2623, in forward\n    hidden_states = self._run_self_attn(\n                    ^^^^^^^^^^^^^^^^^^^^\n  File \"/sgl-workspace/sglang/python/sglang/srt/models/kimi_k3.py\", line 2557, in _run_self_attn\n    return self._run_self_attn_inner(\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/sgl-workspace/sglang/python/sglang/srt/models/kimi_k3.py\", line 2580, in _run_self_attn_inner\n    result = self.self_attn(\n             ^^^^^^^^^^^^^^^\n  File \"/opt/sglang/lib/python3.12/site-packages/torch/nn/modules/module.py\", line 1778, in _wrapped_call_impl\n    return self._call_impl(*args, **kwargs)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/sglang/lib/python3.12/site-packages/torch/nn/modules/module.py\", line 1789, in _call_impl\n    return forward_call(*args, **kwargs)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/sgl-workspace/sglang/python/sglang/srt/models/kimi_k3.py\", line 2035, in forward\n    core_attn_out = self.attn(\n                    ^^^^^^^^^^\n  File \"/opt/sglang/lib/python3.12/site-packages/torch/nn/modules/module.py\", line 1778, in _wrapped_call_impl\n    return self._call_impl(*args, **kwargs)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/sglang/lib/python3.12/site-packages/torch/nn/modules/module.py\", line 1789, in _call_impl\n    return forward_call(*args, **kwargs)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/sgl-workspace/sglang/python/sglang/srt/layers/radix_linear_attention.py\", line 142, in forward\n    return get_attn_backend().forward(\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/work/kimi_single_layer_decode.py\", line 318, in forward\n    return self.kda.forward_decode(\n           ^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/sgl-workspace/sglang/python/sglang/srt/layers/attention/linear/kda_backend.py\", line 729, in forward_decode\n    qkv = causal_conv1d_update(\n          ^^^^^^^^^^^^^^^^^^^^^\n  File \"/sgl-workspace/sglang/python/sglang/kernels/ops/mamba/causal_conv1d_triton.py\", line 1147, in causal_conv1d_update\n    _causal_conv1d_update_kernel[grid](\n  File \"/opt/sglang/lib/python3.12/site-packages/triton/runtime/jit.py\", line 370, in <lambda>\n    return lambda *args, **kwargs: self.run(grid=grid, warmup=False, *args, **kwargs)\n                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/sglang/lib/python3.12/site-packages/triton/runtime/jit.py\", line 761, in run\n    kernel.run(grid_0, grid_1, grid_2, stream, kernel.function, kernel.packed_metadata, launch_metadata,\n  File \"/opt/sglang/lib/python3.12/site-packages/triton/backends/nvidia/driver.py\", line 328, in __call__\n    self.launch(gridX, gridY, gridZ, stream, function, self.launch_cooperative_grid, self.launch_pdl,\nValueError: Pointer argument cannot be accessed from Triton (cpu tensor?)\n",
+      "rung": "a_smoke"
+    }
+  ]
+}

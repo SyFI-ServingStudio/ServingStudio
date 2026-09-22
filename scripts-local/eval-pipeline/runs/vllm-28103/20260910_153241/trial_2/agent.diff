@@ -1,0 +1,101 @@
+diff --git a/model/work/location_maps/qwen3_dense_vllm_before_unified.json b/model/work/location_maps/qwen3_dense_vllm_before_unified.json
+index d0377a7..bb10349 100644
+--- a/model/work/location_maps/qwen3_dense_vllm_before_unified.json
++++ b/model/work/location_maps/qwen3_dense_vllm_before_unified.json
+@@ -1,14 +1,12 @@
+ {
+   "schema_version": 1,
+-  "mapping_id": "qwen3-dense-vllm-before-unified-v1",
++  "mapping_id": "qwen3-dense-vllm-before-unified-v2",
+   "arch_types": ["qwen3_dense_vllm_before"],
+   "locations": [
+     {"location": "unified.embedding", "semantics": ["embedding"]},
+     {"location": "unified.pre_attn.input_norm", "semantics": ["input_norm"]},
+     {"location": "unified.pre_attn.qkv_proj", "semantics": ["qkv"]},
+-    {"location": "unified.qk_norm.q_input_copy", "semantics": []},
+     {"location": "unified.qk_norm.q_norm", "semantics": ["q_norm"]},
+-    {"location": "unified.qk_norm.k_input_copy", "semantics": []},
+     {"location": "unified.qk_norm.k_norm", "semantics": ["k_norm"]},
+     {
+       "location": "unified.attn.attn.kv_cache_append",
+diff --git a/simulator/src/arch/qwen3_dense_vllm_before.rs b/simulator/src/arch/qwen3_dense_vllm_before.rs
+index aa88bc3..77a89da 100644
+--- a/simulator/src/arch/qwen3_dense_vllm_before.rs
++++ b/simulator/src/arch/qwen3_dense_vllm_before.rs
+@@ -1,7 +1,7 @@
+ //! Qwen3-0.6B dense local architecture matching the vLLM PR-before graph.
+ //!
+-//! The Q/K input copies are fixed by the `BeforeRecipe` type and therefore
+-//! appear as concrete CostTree slots in every model built from this module.
++//! The before recipe keeps the Q/K RMSNorm math and model dimensions of the
++//! graph while omitting the zero-work Q/K input-copy leaves.
+ 
+ use crate::arch::model_cfg::ModelCfg;
+ use crate::timing::{BuildError, Dim, PerfApiBridge};
+@@ -11,7 +11,7 @@ use super::qwen3_dense_vllm_common as common;
+ pub struct BeforeRecipe;
+ 
+ impl common::Recipe for BeforeRecipe {
+-    const COPY_INPUTS: bool = true;
++    const COPY_INPUTS: bool = false;
+     const LABEL: &'static str = "qwen3_dense_vllm_before";
+ }
+ 
+@@ -66,7 +66,7 @@ mod tests {
+             },
+         );
+         assert_eq!(cfgs.num_layers, 28);
+-        assert_eq!(cfgs.qk_norm.copy_inputs, true);
++        assert!(!cfgs.qk_norm.copy_inputs);
+         assert_eq!(cfgs.lm_head.n, 151936);
+         assert_eq!(cfgs.qk_norm.copy_backends, vec!["triton"]);
+ 
+@@ -80,12 +80,8 @@ mod tests {
+         assert_eq!(resolved.qk_norm.k_norm_m_per_token, 8);
+         assert_eq!(resolved.post_attn.up_gate.n, 6144);
+         assert_eq!(resolved.post_attn.down.k, 3072);
+-        let q_copy = resolved.qk_norm.q_input_copy.as_ref().unwrap();
+-        let k_copy = resolved.qk_norm.k_input_copy.as_ref().unwrap();
+-        assert_eq!(q_copy.input_bytes_per_token, 4096);
+-        assert_eq!(q_copy.output_bytes_per_token, 4096);
+-        assert_eq!(k_copy.input_bytes_per_token, 2048);
+-        assert_eq!(k_copy.output_bytes_per_token, 2048);
++        assert!(resolved.qk_norm.q_input_copy.is_none());
++        assert!(resolved.qk_norm.k_input_copy.is_none());
+         assert_eq!(total_kv_bytes_per_token(&resolved), 114688);
+     }
+ }
+diff --git a/simulator/src/timing_predict.rs b/simulator/src/timing_predict.rs
+index 09636a7..a7ddda8 100644
+--- a/simulator/src/timing_predict.rs
++++ b/simulator/src/timing_predict.rs
+@@ -3,8 +3,8 @@
+ //! This is the same family as `dry-run` / `build-cache-only` / `kernel-query`:
+ //! it does NOT run the discrete-event sim (no scheduler, no trace, no clock). It
+ //! takes a batch of explicit batch shapes and, for each, runs the cost model over
+-//! the compiled `CostTree(s)`, predicting timings WITHOUT a GPU (a warm
+-//! `profile.db`) or JIT-profiling on demand (a cold one).
++//! the compiled `CostTree(s)`, predicting timings WITHOUT a GPU when the required
++//! entries are already in `profile.db`; cache misses fail fast.
+ //!
+ //! Three arch kinds, one tool (the `arch` selector picks):
+ //!   - `iter` — ONE [`IterwiseUnifiedModel::eval_iter`] over the whole forward
+@@ -236,15 +236,10 @@ pub fn run_timing_predict(config_path: &Path) -> Result<()> {
+     Ok(())
+ }
+ 
+-/// Offline what-if bridge: JIT-fill missing `profile.db` rows on build (like
+-/// `kernel-query`), rather than the strict fail-fast a real `run` uses. A warm
+-/// cache then needs no GPU; a cold one profiles on demand.
++/// Offline cache-only bridge: use the default strict mode so missing `profile.db`
++/// rows fail through the existing `MissingEntry` path without profiling.
+ fn predict_bridge() -> Result<PerfApiBridge> {
+-    let bridge = PerfApiBridge::new().context("starting the PyO3 perf_api bridge")?;
+-    bridge
+-        .enable_jit_profiling()
+-        .context("enabling JIT profiling for offline prediction")?;
+-    Ok(bridge)
++    PerfApiBridge::new().context("starting the PyO3 perf_api bridge")
+ }
+ 
+ /// Run the iter-wise cases: one [`CostBuffers::run_iter`] per case (one parquet row

@@ -1,0 +1,13 @@
+# Generic real-repro Codex runner: BASE = a B200 before-image (full CUDA build toolchain +
+# /opt/venv wheel) + node/codex layered on top, so a Codex agent can, in ONE container:
+#   1. read the VibeSim oracle over HTTP, 2. edit the real source, 3. incremental-recompile,
+#   4. run the single-layer profiler on GPU. node+codex are copied from the UI runner image
+#   (self-contained /opt/node) -> no network at build time. CODEX_HOME is MOUNTED at runtime.
+# Usage: docker build -f Dockerfile.codex-runner --build-arg BASE_IMAGE=<before-tag> -t <codex-tag> .
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+COPY --from=vibesim-ui-codex-runner:yilegu /opt/node /opt/node
+ENV PATH=/opt/node/bin:$PATH
+ENV CODEX_HOME=/root/.codex-eval
+RUN ln -sf /opt/node/bin/codex /usr/local/bin/codex && node --version && codex --version

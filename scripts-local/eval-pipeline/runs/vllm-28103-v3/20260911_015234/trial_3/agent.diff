@@ -1,0 +1,68 @@
+diff --git a/model/work/location_maps/qwen3_dense_vllm_before_unified.json b/model/work/location_maps/qwen3_dense_vllm_before_unified.json
+index d0377a7..0548c68 100644
+--- a/model/work/location_maps/qwen3_dense_vllm_before_unified.json
++++ b/model/work/location_maps/qwen3_dense_vllm_before_unified.json
+@@ -6,9 +6,7 @@
+     {"location": "unified.embedding", "semantics": ["embedding"]},
+     {"location": "unified.pre_attn.input_norm", "semantics": ["input_norm"]},
+     {"location": "unified.pre_attn.qkv_proj", "semantics": ["qkv"]},
+-    {"location": "unified.qk_norm.q_input_copy", "semantics": []},
+     {"location": "unified.qk_norm.q_norm", "semantics": ["q_norm"]},
+-    {"location": "unified.qk_norm.k_input_copy", "semantics": []},
+     {"location": "unified.qk_norm.k_norm", "semantics": ["k_norm"]},
+     {
+       "location": "unified.attn.attn.kv_cache_append",
+diff --git a/simulator/src/arch/qwen3_dense_vllm_before.rs b/simulator/src/arch/qwen3_dense_vllm_before.rs
+index 0a22736..7e9a5bd 100644
+--- a/simulator/src/arch/qwen3_dense_vllm_before.rs
++++ b/simulator/src/arch/qwen3_dense_vllm_before.rs
+@@ -1,7 +1,7 @@
+-//! Qwen3-0.6B dense local architecture matching the vLLM PR-before graph.
++//! Qwen3-0.6B dense local architecture with the stable PR-before selector.
+ //!
+-//! The Q/K input copies are fixed by the `BeforeRecipe` type and therefore
+-//! appear as concrete CostTree slots in every model built from this module.
++//! The selected recipe uses stride-aware Q/K normalization, so the strided
++//! Q/K views are consumed directly without derived input-copy CostTree slots.
+ 
+ use crate::arch::model_cfg::ModelCfg;
+ use crate::timing::{BuildError, Dim, PerfApiBridge};
+@@ -11,9 +11,9 @@ use super::qwen3_dense_vllm_common as common;
+ pub struct BeforeRecipe;
+ 
+ impl common::Recipe for BeforeRecipe {
+-    /// Models the pre-PR vLLM RMSNorm kernel: contiguous input only, so
+-    /// the strided Q/K views force derived contiguity copies.
+-    const NORM_SUPPORTS_STRIDED: bool = false;
++    /// Keep the selector and label stable while modeling the stride-aware norm
++    /// capability that removes the redundant Q/K materialization copies.
++    const NORM_SUPPORTS_STRIDED: bool = true;
+     const LABEL: &'static str = "qwen3_dense_vllm_before";
+ }
+ 
+@@ -68,8 +68,8 @@ mod tests {
+             },
+         );
+         assert_eq!(cfgs.num_layers, 28);
+-        assert!(!cfgs.qk_norm.norm_capability.supports_strided_input);
+-        assert!(cfgs.qk_norm.copies_required());
++        assert!(cfgs.qk_norm.norm_capability.supports_strided_input);
++        assert!(!cfgs.qk_norm.copies_required());
+         assert_eq!(cfgs.lm_head.n, 151936);
+         assert_eq!(cfgs.qk_norm.copy_backends, vec!["triton"]);
+ 
+@@ -83,12 +83,8 @@ mod tests {
+         assert_eq!(resolved.qk_norm.k_norm_m_per_token, 8);
+         assert_eq!(resolved.post_attn.up_gate.n, 6144);
+         assert_eq!(resolved.post_attn.down.k, 3072);
+-        let q_copy = resolved.qk_norm.q_input_copy.as_ref().unwrap();
+-        let k_copy = resolved.qk_norm.k_input_copy.as_ref().unwrap();
+-        assert_eq!(q_copy.input_bytes_per_token, 4096);
+-        assert_eq!(q_copy.output_bytes_per_token, 4096);
+-        assert_eq!(k_copy.input_bytes_per_token, 2048);
+-        assert_eq!(k_copy.output_bytes_per_token, 2048);
++        assert!(resolved.qk_norm.q_input_copy.is_none());
++        assert!(resolved.qk_norm.k_input_copy.is_none());
+         assert_eq!(total_kv_bytes_per_token(&resolved), 114688);
+     }
+ }

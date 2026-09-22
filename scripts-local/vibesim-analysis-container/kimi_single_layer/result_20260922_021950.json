@@ -1,0 +1,76 @@
+{
+  "sglang_version": "0.5.20",
+  "moe_backend": "flashinfer_mxfp4",
+  "hidden_act": "situ",
+  "moe_method": {
+    "class": "Mxfp4MoEMethod",
+    "use_flashinfer": true,
+    "use_marlin": false,
+    "_fi_kernel": "trtllm_sm100",
+    "flashinfer_mxfp4_moe_precision": "default"
+  },
+  "experts": 56,
+  "ep": 16,
+  "layer_idx": 5,
+  "attn_type": "kda",
+  "attention_backend": null,
+  "page_size": null,
+  "attn_heads": 12,
+  "cuda_graph": false,
+  "num_attention_heads": 64,
+  "config": {
+    "num_experts": 56,
+    "num_experts_per_token": 16,
+    "num_shared_experts": 2,
+    "moe_intermediate_size": 3072,
+    "routed_expert_hidden_size": 3584,
+    "hidden_size": 7168
+  },
+  "mla": null,
+  "kda": {
+    "num_heads": 12,
+    "head_dim": 128,
+    "short_conv_kernel": 4,
+    "gate_lower_bound": -5.0
+  },
+  "points": [
+    {
+      "B": 32,
+      "seq_len": 8192,
+      "ok": true,
+      "attn_type": "kda",
+      "out_shape": [
+        32,
+        7168
+      ],
+      "finite": true,
+      "us_step": 1345.6640243530273,
+      "us_token": 42.052000761032104,
+      "state_mb": 26.86464,
+      "peak_gb": 3.707416576,
+      "us_attn": 373.1519877910614,
+      "us_moe": 678.2400012016296,
+      "us_norms": 41.728001087903976,
+      "rung": "adhoc"
+    },
+    {
+      "B": 128,
+      "seq_len": 8192,
+      "ok": true,
+      "attn_type": "kda",
+      "out_shape": [
+        128,
+        7168
+      ],
+      "finite": true,
+      "us_step": 1284.4159603118896,
+      "us_token": 10.034499689936638,
+      "state_mb": 105.01632,
+      "peak_gb": 1.716004864,
+      "us_attn": 391.9680118560791,
+      "us_moe": 671.1040139198303,
+      "us_norms": 40.12800008058548,
+      "rung": "adhoc"
+    }
+  ]
+}

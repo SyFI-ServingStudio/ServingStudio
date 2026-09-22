@@ -1,0 +1,206 @@
+==== slurm_gpu.sh on cayenne job=805 ====
+CUDA_VISIBLE_DEVICES=0
+allocated GPU UUID(s): GPU-c09878e8-fb6a-ff0c-3c33-05993065d679
+0, GPU-c09878e8-fb6a-ff0c-3c33-05993065d679, 0 MiB
+==== exec: ./run_kimi_single_layer.sh --point 1,1048576;16,65536;32,8192 --split --attn-type mla --moe-backend flashinfer_mxfp4 --attention-backend flashmla --iters 60 ====
+==== kimi_single_layer: img=lmsysorg/sglang:v0.5.20 gpu="device=GPU-c09878e8-fb6a-ff0c-3c33-05993065d679" args=--point 1,1048576;16,65536;32,8192 --split --attn-type mla --moe-backend flashinfer_mxfp4 --attention-backend flashmla --iters 60 ====
+--- Wrapper: Applying owner=yilegu, memory=432834647654 bytes, and cpus=28.8 ---
+==============================================================================
+kimi_single_layer_decode v3 (K3/MLA)  experts=56 EP=16 layer_idx=4 iters=60 warmup=20 split=True moe_backend=flashinfer_mxfp4 attention_backend=flashmla
+torch=2.13.0+cu130  dev=NVIDIA B200
+sglang=0.5.20
+==============================================================================
+[cfg] wrote /tmp/k3_cfg/config.json  experts=56 (EP=16) top_k=16 shared=2 layers=8  moe_backend=flashinfer_mxfp4 hidden_act=situ  attn_type=mla target_layer=4 heads=96 kda_layers=[1, 2, 3, 4, 6, 7, 8] full_attn=[5]
+FlashMLA only supports a page_size of 64, change page_size to 64.
+[moe] flashinfer_mxfp4_moe_precision=default
+[moe] runner_backend=MoeRunnerBackend.FLASHINFER_MXFP4 is_flashinfer_mxfp4=True is_deep_gemm=False
+[boot] tp=1 attn_tp=1 world=1  is_kda_layer(4)=False  attention_arch=1 dtype=torch.bfloat16
+[layer] mxfp4 quant_config=Mxfp4Config quant_format=None
+[layer] UnquantizedLinearMethod from sglang.srt.layers.quantization.unquant
+[layer] patched Mxfp4Config.get_quant_method: LinearBase/RadixAttention -> bf16 unquantized fallback
+[layer] KimiK3DecoderLayer(layer_idx=4): self_attn=KimiK3MLAAttention (KDA=False MLA=True)  mlp=KimiK3MoE (MoE=True)
+[layer] random-init 0.329B float params -> cuda/bf16/eval (MLA: absorbed kv_b_proj -> w_kc(96, 128, 512) w_vc(96, 512, 128))
+[mxfp4] experts=FusedMoE tensors:
+[mxfp4]   w13_weight                       (56, 6144, 1792)       torch.uint8 <- e2m1 randint
+[mxfp4]   w13_weight_scale                 (56, 6144, 112)        torch.uint8 <- ue8m0 fill 127
+[mxfp4]   w13_weight_bias                  (56, 6144)             torch.bfloat16 <- bias normal
+[mxfp4]   w2_weight                        (56, 3584, 1536)       torch.uint8 <- e2m1 randint
+[mxfp4]   w2_weight_scale                  (56, 3584, 96)         torch.uint8 <- ue8m0 fill 127
+[mxfp4]   w2_weight_bias                   (56, 3584)             torch.bfloat16 <- bias normal
+[mxfp4] quant_method=Mxfp4MoEMethod use_flashinfer=True use_marlin=False _fi_kernel=trtllm_sm100 precision=default
+[mxfp4] quant_method.process_weights_after_loading(experts) OK
+[layer] post_load_merge: front_w=(15928, 7168) fused_front_eligible=True bias_dtype=torch.float32
+[moe] resolved expert method: {'class': 'Mxfp4MoEMethod', 'use_flashinfer': True, 'use_marlin': False, '_fi_kernel': 'trtllm_sm100', 'flashinfer_mxfp4_moe_precision': 'default'}
+
+---- rung adhoc ----
+/sgl-workspace/sglang/python/sglang/srt/layers/attention/flashinfer_mla_backend.py:292: UserWarning: BatchMLAPagedAttentionWrapper: backend='auto' selected 'fa2' on SM100, which is not Blackwell-native and gives poor MLA decode performance. For decode, use flashinfer.mla.trtllm_batch_decode_with_kv_cache_mla (Blackwell-native trtllm-gen); backend='cutlass' is the closest in-wrapper alternative but may be slower than this fallback for decode shapes.
+  self.prefill_wrapper_paged = BatchMLAPagedAttentionWrapper(
+[mla] FlashMLABackend built (attention_backend=flashmla); kv=1.208GB kv_dim=576 num_head=96
+[time] B=1 L=1048576 FAILED: RuntimeError: shape '[-1, 64, 1, 576]' is invalid for input of size 603980352
+Traceback (most recent call last):
+  File "/work/kimi_single_layer_decode.py", line 823, in time_point
+    return out
+               
+  File "/work/kimi_single_layer_decode.py", line 755, in call_layer
+    return layer.forward(
+           ^^^^^^^^^^^^^^
+  File "/sgl-workspace/sglang/python/sglang/srt/models/kimi_k3.py", line 2623, in forward
+    hidden_states = self._run_self_attn(
+                    ^^^^^^^^^^^^^^^^^^^^
+  File "/sgl-workspace/sglang/python/sglang/srt/models/kimi_k3.py", line 2557, in _run_self_attn
+    return self._run_self_attn_inner(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/sgl-workspace/sglang/python/sglang/srt/models/kimi_k3.py", line 2580, in _run_self_attn_inner
+    result = self.self_attn(
+             ^^^^^^^^^^^^^^^
+  File "/opt/sglang/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1778, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/sglang/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1789, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/sgl-workspace/sglang/python/sglang/srt/models/kimi_k3.py", line 2295, in forward
+    return super().forward(
+           ^^^^^^^^^^^^^^^^
+  File "/sgl-workspace/sglang/python/sglang/srt/models/deepseek_v2.py", line 2058, in forward
+    return self.forward_core(s)
+           ^^^^^^^^^^^^^^^^^^^^
+  File "/sgl-workspace/sglang/python/sglang/srt/models/deepseek_v2.py", line 2190, in forward_core
+    return self.forward_absorb_core(*inner_state)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/sgl-workspace/sglang/python/sglang/srt/models/deepseek_common/attention_forward_methods/forward_mla.py", line 761, in forward_absorb_core
+    attn_output = self.attn_mqa(
+                  ^^^^^^^^^^^^^^
+  File "/opt/sglang/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1778, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/sglang/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1789, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/sgl-workspace/sglang/python/sglang/srt/layers/radix_attention.py", line 290, in forward
+    return get_attn_backend().forward(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/sgl-workspace/sglang/python/sglang/srt/layers/attention/base_attn_backend.py", line 265, in forward
+    return self.forward_decode(
+           ^^^^^^^^^^^^^^^^^^^^
+  File "/sgl-workspace/sglang/python/sglang/srt/layers/attention/flashmla_backend.py", line 482, in forward_decode
+    k_cache=k_cache.view(-1, PAGE_SIZE, 1, self.kv_cache_dim),
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+RuntimeError: shape '[-1, 64, 1, 576]' is invalid for input of size 603980352
+
+[mla] FlashMLABackend built (attention_backend=flashmla); kv=1.208GB kv_dim=576 num_head=96
+[time] B=16 L=65536 FAILED: RuntimeError: shape '[-1, 64, 1, 576]' is invalid for input of size 603980352
+Traceback (most recent call last):
+  File "/work/kimi_single_layer_decode.py", line 823, in time_point
+    return out
+               
+  File "/work/kimi_single_layer_decode.py", line 755, in call_layer
+    return layer.forward(
+           ^^^^^^^^^^^^^^
+  File "/sgl-workspace/sglang/python/sglang/srt/models/kimi_k3.py", line 2623, in forward
+    hidden_states = self._run_self_attn(
+                    ^^^^^^^^^^^^^^^^^^^^
+  File "/sgl-workspace/sglang/python/sglang/srt/models/kimi_k3.py", line 2557, in _run_self_attn
+    return self._run_self_attn_inner(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/sgl-workspace/sglang/python/sglang/srt/models/kimi_k3.py", line 2580, in _run_self_attn_inner
+    result = self.self_attn(
+             ^^^^^^^^^^^^^^^
+  File "/opt/sglang/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1778, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/sglang/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1789, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/sgl-workspace/sglang/python/sglang/srt/models/kimi_k3.py", line 2295, in forward
+    return super().forward(
+           ^^^^^^^^^^^^^^^^
+  File "/sgl-workspace/sglang/python/sglang/srt/models/deepseek_v2.py", line 2058, in forward
+    return self.forward_core(s)
+           ^^^^^^^^^^^^^^^^^^^^
+  File "/sgl-workspace/sglang/python/sglang/srt/models/deepseek_v2.py", line 2190, in forward_core
+    return self.forward_absorb_core(*inner_state)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/sgl-workspace/sglang/python/sglang/srt/models/deepseek_common/attention_forward_methods/forward_mla.py", line 761, in forward_absorb_core
+    attn_output = self.attn_mqa(
+                  ^^^^^^^^^^^^^^
+  File "/opt/sglang/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1778, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/sglang/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1789, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/sgl-workspace/sglang/python/sglang/srt/layers/radix_attention.py", line 290, in forward
+    return get_attn_backend().forward(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/sgl-workspace/sglang/python/sglang/srt/layers/attention/base_attn_backend.py", line 265, in forward
+    return self.forward_decode(
+           ^^^^^^^^^^^^^^^^^^^^
+  File "/sgl-workspace/sglang/python/sglang/srt/layers/attention/flashmla_backend.py", line 482, in forward_decode
+    k_cache=k_cache.view(-1, PAGE_SIZE, 1, self.kv_cache_dim),
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+RuntimeError: shape '[-1, 64, 1, 576]' is invalid for input of size 603980352
+
+[mla] FlashMLABackend built (attention_backend=flashmla); kv=0.302GB kv_dim=576 num_head=96
+[time] B=32 L=8192 FAILED: RuntimeError: shape '[-1, 64, 1, 576]' is invalid for input of size 150995520
+Traceback (most recent call last):
+  File "/work/kimi_single_layer_decode.py", line 823, in time_point
+    return out
+               
+  File "/work/kimi_single_layer_decode.py", line 755, in call_layer
+    return layer.forward(
+           ^^^^^^^^^^^^^^
+  File "/sgl-workspace/sglang/python/sglang/srt/models/kimi_k3.py", line 2623, in forward
+    hidden_states = self._run_self_attn(
+                    ^^^^^^^^^^^^^^^^^^^^
+  File "/sgl-workspace/sglang/python/sglang/srt/models/kimi_k3.py", line 2557, in _run_self_attn
+    return self._run_self_attn_inner(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/sgl-workspace/sglang/python/sglang/srt/models/kimi_k3.py", line 2580, in _run_self_attn_inner
+    result = self.self_attn(
+             ^^^^^^^^^^^^^^^
+  File "/opt/sglang/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1778, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/sglang/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1789, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/sgl-workspace/sglang/python/sglang/srt/models/kimi_k3.py", line 2295, in forward
+    return super().forward(
+           ^^^^^^^^^^^^^^^^
+  File "/sgl-workspace/sglang/python/sglang/srt/models/deepseek_v2.py", line 2058, in forward
+    return self.forward_core(s)
+           ^^^^^^^^^^^^^^^^^^^^
+  File "/sgl-workspace/sglang/python/sglang/srt/models/deepseek_v2.py", line 2190, in forward_core
+    return self.forward_absorb_core(*inner_state)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/sgl-workspace/sglang/python/sglang/srt/models/deepseek_common/attention_forward_methods/forward_mla.py", line 761, in forward_absorb_core
+    attn_output = self.attn_mqa(
+                  ^^^^^^^^^^^^^^
+  File "/opt/sglang/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1778, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/sglang/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1789, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/sgl-workspace/sglang/python/sglang/srt/layers/radix_attention.py", line 290, in forward
+    return get_attn_backend().forward(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/sgl-workspace/sglang/python/sglang/srt/layers/attention/base_attn_backend.py", line 265, in forward
+    return self.forward_decode(
+           ^^^^^^^^^^^^^^^^^^^^
+  File "/sgl-workspace/sglang/python/sglang/srt/layers/attention/flashmla_backend.py", line 482, in forward_decode
+    k_cache=k_cache.view(-1, PAGE_SIZE, 1, self.kv_cache_dim),
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+RuntimeError: shape '[-1, 64, 1, 576]' is invalid for input of size 150995520
+
+
+==============================================================================
+rung              B   seq_len    us/step    us/tok     kv_GB  status
+adhoc             1   1048576          -         -         -  FAIL RuntimeError: shape '[-1, 64, 1, 576]' is invalid for input of size 603980352
+adhoc            16     65536          -         -         -  FAIL RuntimeError: shape '[-1, 64, 1, 576]' is invalid for input of size 603980352
+adhoc            32      8192          -         -         -  FAIL RuntimeError: shape '[-1, 64, 1, 576]' is invalid for input of size 150995520
+==============================================================================
+[out] wrote /work/kimi_single_layer/result_20260922_021325.json
+[rank0]:[W922 09:13:58.465091666 ProcessGroupNCCL.cpp:1624] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())
+==== done; json -> /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/kimi_single_layer/result_20260922_021325.json ====

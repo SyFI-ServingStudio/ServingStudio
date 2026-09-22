@@ -1,0 +1,21 @@
+# Kimi-K3 optimizer-loop branch: track the harness sources, case configs, prompts,
+# small result JSONs and slurm .out logs; leave build artifacts / trial dumps /
+# vendored snapshots out of git.
+vibesim-analysis-container/context/
+*.tar
+*.log
+vibesim-analysis-container/iter_opt_eval_*/
+vibesim-analysis-container/repro_eval_*/
+vibesim-analysis-container/_memcache_dir/
+vibesim-analysis-container/k3_src_v0520/
+vibesim-analysis-container/k3_build_ctx/
+vibesim-analysis-container/_before_installed.*
+vibesim-analysis-container/_after_installed.*
+vibesim-analysis-container/baseline_28103_b200/
+vibesim-analysis-container/floor_*/
+vibesim-analysis-container/probe_*/
+vibesim-analysis-container/micro_*/
+vibesim-analysis-container/kernels_*/
+vibesim-analysis-container/sglang_capture_validate/
+__pycache__/
+*.pyc

@@ -1,0 +1,98 @@
+==== slurm_gpu.sh on cayenne job=799 ====
+CUDA_VISIBLE_DEVICES=0
+allocated GPU UUID(s): GPU-17dce9e8-fd5a-2fcc-3847-dc31ae451efc
+0, GPU-17dce9e8-fd5a-2fcc-3847-dc31ae451efc, 0 MiB
+==== exec: ./run_kimi_single_layer.sh --split --attn-type mla --moe-backend flashinfer_mxfp4 ====
+==== kimi_single_layer: img=lmsysorg/sglang:v0.5.20 gpu="device=GPU-17dce9e8-fd5a-2fcc-3847-dc31ae451efc" args=--split --attn-type mla --moe-backend flashinfer_mxfp4 ====
+--- Wrapper: Applying owner=yilegu, memory=432834647654 bytes, and cpus=28.8 ---
+==============================================================================
+kimi_single_layer_decode v3 (K3/MLA)  experts=56 EP=16 layer_idx=4 iters=100 warmup=20 split=True moe_backend=flashinfer_mxfp4
+torch=2.13.0+cu130  dev=NVIDIA B200
+sglang=0.5.20
+==============================================================================
+[cfg] wrote /tmp/k3_cfg/config.json  experts=56 (EP=16) top_k=16 shared=2 layers=8  moe_backend=flashinfer_mxfp4 hidden_act=situ  attn_type=mla target_layer=4 heads=96 kda_layers=[1, 2, 3, 4, 6, 7, 8] full_attn=[5]
+[moe] flashinfer_mxfp4_moe_precision=default
+[moe] runner_backend=MoeRunnerBackend.FLASHINFER_MXFP4 is_flashinfer_mxfp4=True is_deep_gemm=False
+[boot] tp=1 attn_tp=1 world=1  is_kda_layer(4)=False  attention_arch=1 dtype=torch.bfloat16
+[layer] mxfp4 quant_config=Mxfp4Config quant_format=None
+[layer] UnquantizedLinearMethod from sglang.srt.layers.quantization.unquant
+[layer] patched Mxfp4Config.get_quant_method: LinearBase/RadixAttention -> bf16 unquantized fallback
+[layer] KimiK3DecoderLayer(layer_idx=4): self_attn=KimiK3MLAAttention (KDA=False MLA=True)  mlp=KimiK3MoE (MoE=True)
+[layer] random-init 0.329B float params -> cuda/bf16/eval (MLA: absorbed kv_b_proj -> w_kc(96, 128, 512) w_vc(96, 512, 128))
+[mxfp4] experts=FusedMoE tensors:
+[mxfp4]   w13_weight                       (56, 6144, 1792)       torch.uint8 <- e2m1 randint
+[mxfp4]   w13_weight_scale                 (56, 6144, 112)        torch.uint8 <- ue8m0 fill 127
+[mxfp4]   w13_weight_bias                  (56, 6144)             torch.bfloat16 <- bias normal
+[mxfp4]   w2_weight                        (56, 3584, 1536)       torch.uint8 <- e2m1 randint
+[mxfp4]   w2_weight_scale                  (56, 3584, 96)         torch.uint8 <- ue8m0 fill 127
+[mxfp4]   w2_weight_bias                   (56, 3584)             torch.bfloat16 <- bias normal
+[mxfp4] quant_method=Mxfp4MoEMethod use_flashinfer=True use_marlin=False _fi_kernel=trtllm_sm100 precision=default
+[mxfp4] quant_method.process_weights_after_loading(experts) OK
+[moe] resolved expert method: {'class': 'Mxfp4MoEMethod', 'use_flashinfer': True, 'use_marlin': False, '_fi_kernel': 'trtllm_sm100', 'flashinfer_mxfp4_moe_precision': 'default'}
+
+---- rung a_smoke ----
+[mla] TritonAttnBackend built; use_mla=True num_head=96 num_kv_head=96 v_head_dim=512 kv=0.005GB kv_dim=576
+/sgl-workspace/sglang/python/sglang/srt/environ.py:83: UserWarning: Invalid value for SGLANG_DISABLE_LEAN_ATTENTION: "" is not a valid boolean value, using default "False"
+  warnings.warn(
+/sgl-workspace/sglang/python/sglang/srt/environ.py:83: UserWarning: Invalid value for SGLANG_DISABLE_LEAN_ATTENTION: "" is not a valid boolean value, using default "False"
+  warnings.warn(
+[time] B=    1 L=     4096  us/step=  1242.53  us/tok=1242.528  kv=0.005GB  peak=3.93GB  finite=True  shape=[1, 7168]  attn=426.4us moe=622.0us norms=35.5us  floor=0.7us a/floor=632.56x
+
+---- rung b_graphbs ----
+[mla] TritonAttnBackend built; use_mla=True num_head=96 num_kv_head=96 v_head_dim=512 kv=0.009GB kv_dim=576
+[time] B=    1 L=     8192  us/step=  1224.80  us/tok=1224.800  kv=0.009GB  peak=1.77GB  finite=True  shape=[1, 7168]  attn=423.3us moe=617.1us norms=35.6us  floor=1.3us a/floor=314.00x
+[mla] TritonAttnBackend built; use_mla=True num_head=96 num_kv_head=96 v_head_dim=512 kv=0.019GB kv_dim=576
+[time] B=    2 L=     8192  us/step=  1235.33  us/tok= 617.664  kv=0.019GB  peak=1.83GB  finite=True  shape=[2, 7168]  attn=431.5us moe=622.9us norms=35.5us  floor=2.7us a/floor=160.03x
+[mla] TritonAttnBackend built; use_mla=True num_head=96 num_kv_head=96 v_head_dim=512 kv=0.038GB kv_dim=576
+[time] B=    4 L=     8192  us/step=  1223.71  us/tok= 305.928  kv=0.038GB  peak=1.95GB  finite=True  shape=[4, 7168]  attn=430.3us moe=632.2us norms=35.4us  floor=5.4us a/floor=79.79x
+[mla] TritonAttnBackend built; use_mla=True num_head=96 num_kv_head=96 v_head_dim=512 kv=0.075GB kv_dim=576
+[time] B=    8 L=     8192  us/step=  1227.01  us/tok= 153.376  kv=0.075GB  peak=2.19GB  finite=True  shape=[8, 7168]  attn=526.7us moe=629.1us norms=35.4us  floor=10.8us a/floor=48.83x
+[mla] TritonAttnBackend built; use_mla=True num_head=96 num_kv_head=96 v_head_dim=512 kv=0.151GB kv_dim=576
+[time] B=   16 L=     8192  us/step=  1228.10  us/tok=  76.756  kv=0.151GB  peak=2.67GB  finite=True  shape=[16, 7168]  attn=953.5us moe=627.1us norms=36.0us  floor=21.6us a/floor=44.20x
+[mla] TritonAttnBackend built; use_mla=True num_head=96 num_kv_head=96 v_head_dim=512 kv=0.226GB kv_dim=576
+[time] B=   24 L=     8192  us/step=  1307.94  us/tok=  54.497  kv=0.226GB  peak=3.16GB  finite=True  shape=[24, 7168]  attn=1066.4us moe=631.2us norms=35.6us  floor=32.4us a/floor=32.96x
+[mla] TritonAttnBackend built; use_mla=True num_head=96 num_kv_head=96 v_head_dim=512 kv=0.302GB kv_dim=576
+[time] B=   32 L=     8192  us/step=  1368.48  us/tok=  42.765  kv=0.302GB  peak=3.64GB  finite=True  shape=[32, 7168]  attn=1106.2us moe=627.2us norms=35.6us  floor=43.1us a/floor=25.64x
+[mla] TritonAttnBackend built; use_mla=True num_head=96 num_kv_head=96 v_head_dim=512 kv=0.377GB kv_dim=576
+[time] B=   40 L=     8192  us/step=  1415.52  us/tok=  35.388  kv=0.377GB  peak=4.12GB  finite=True  shape=[40, 7168]  attn=1124.9us moe=627.1us norms=36.0us  floor=53.9us a/floor=20.86x
+[mla] TritonAttnBackend built; use_mla=True num_head=96 num_kv_head=96 v_head_dim=512 kv=0.453GB kv_dim=576
+[time] B=   48 L=     8192  us/step=  1581.28  us/tok=  32.943  kv=0.453GB  peak=4.61GB  finite=True  shape=[48, 7168]  attn=1264.9us moe=631.2us norms=35.8us  floor=64.7us a/floor=19.55x
+
+---- rung c_ctxsweep ----
+[mla] TritonAttnBackend built; use_mla=True num_head=96 num_kv_head=96 v_head_dim=512 kv=0.009GB kv_dim=576
+[time] B=    1 L=     8192  us/step=  1234.98  us/tok=1234.976  kv=0.009GB  peak=4.59GB  finite=True  shape=[1, 7168]  attn=435.7us moe=621.9us norms=35.6us  floor=1.3us a/floor=323.19x
+[mla] TritonAttnBackend built; use_mla=True num_head=96 num_kv_head=96 v_head_dim=512 kv=0.075GB kv_dim=576
+[time] B=    1 L=    65536  us/step=  1236.06  us/tok=1236.064  kv=0.075GB  peak=1.84GB  finite=True  shape=[1, 7168]  attn=551.4us moe=628.4us norms=35.4us  floor=10.8us a/floor=51.12x
+[mla] TritonAttnBackend built; use_mla=True num_head=96 num_kv_head=96 v_head_dim=512 kv=0.302GB kv_dim=576
+[time] B=    1 L=   262144  us/step=  2042.24  us/tok=2042.240  kv=0.302GB  peak=2.07GB  finite=True  shape=[1, 7168]  attn=1878.5us moe=621.2us norms=36.1us  floor=43.1us a/floor=43.54x
+[mla] TritonAttnBackend built; use_mla=True num_head=96 num_kv_head=96 v_head_dim=512 kv=1.208GB kv_dim=576
+[time] B=    1 L=  1048576  us/step=  6485.12  us/tok=6485.120  kv=1.208GB  peak=2.98GB  finite=True  shape=[1, 7168]  attn=6322.6us moe=624.7us norms=35.8us  floor=172.6us a/floor=36.64x
+
+---- rung d_longctx ----
+[mla] TritonAttnBackend built; use_mla=True num_head=96 num_kv_head=96 v_head_dim=512 kv=1.208GB kv_dim=576
+[time] B=   16 L=    65536  us/step=  6974.75  us/tok= 435.922  kv=1.208GB  peak=3.74GB  finite=True  shape=[16, 7168]  attn=6764.7us moe=635.3us norms=37.0us  floor=172.6us a/floor=39.20x
+[mla] TritonAttnBackend built; use_mla=True num_head=96 num_kv_head=96 v_head_dim=512 kv=1.208GB kv_dim=576
+[time] B=    4 L=   262144  us/step=  7348.67  us/tok=1837.168  kv=1.208GB  peak=3.74GB  finite=True  shape=[4, 7168]  attn=7164.3us moe=638.9us norms=36.2us  floor=172.6us a/floor=41.52x
+
+==============================================================================
+rung              B   seq_len    us/step    us/tok     kv_GB  status
+a_smoke           1      4096    1242.53  1242.528     0.005  ok  attn=426.4 moe=622.0 norms=35.5 floor=0.7 a/floor=632.56x
+b_graphbs         1      8192    1224.80  1224.800     0.009  ok  attn=423.3 moe=617.1 norms=35.6 floor=1.3 a/floor=314.00x
+b_graphbs         2      8192    1235.33   617.664     0.019  ok  attn=431.5 moe=622.9 norms=35.5 floor=2.7 a/floor=160.03x
+b_graphbs         4      8192    1223.71   305.928     0.038  ok  attn=430.3 moe=632.2 norms=35.4 floor=5.4 a/floor=79.79x
+b_graphbs         8      8192    1227.01   153.376     0.075  ok  attn=526.7 moe=629.1 norms=35.4 floor=10.8 a/floor=48.83x
+b_graphbs        16      8192    1228.10    76.756     0.151  ok  attn=953.5 moe=627.1 norms=36.0 floor=21.6 a/floor=44.20x
+b_graphbs        24      8192    1307.94    54.497     0.226  ok  attn=1066.4 moe=631.2 norms=35.6 floor=32.4 a/floor=32.96x
+b_graphbs        32      8192    1368.48    42.765     0.302  ok  attn=1106.2 moe=627.2 norms=35.6 floor=43.1 a/floor=25.64x
+b_graphbs        40      8192    1415.52    35.388     0.377  ok  attn=1124.9 moe=627.1 norms=36.0 floor=53.9 a/floor=20.86x
+b_graphbs        48      8192    1581.28    32.943     0.453  ok  attn=1264.9 moe=631.2 norms=35.8 floor=64.7 a/floor=19.55x
+c_ctxsweep        1      8192    1234.98  1234.976     0.009  ok  attn=435.7 moe=621.9 norms=35.6 floor=1.3 a/floor=323.19x
+c_ctxsweep        1     65536    1236.06  1236.064     0.075  ok  attn=551.4 moe=628.4 norms=35.4 floor=10.8 a/floor=51.12x
+c_ctxsweep        1    262144    2042.24  2042.240     0.302  ok  attn=1878.5 moe=621.2 norms=36.1 floor=43.1 a/floor=43.54x
+c_ctxsweep        1   1048576    6485.12  6485.120     1.208  ok  attn=6322.6 moe=624.7 norms=35.8 floor=172.6 a/floor=36.64x
+d_longctx        16     65536    6974.75   435.922     1.208  ok  attn=6764.7 moe=635.3 norms=37.0 floor=172.6 a/floor=39.20x
+d_longctx         4    262144    7348.67  1837.168     1.208  ok  attn=7164.3 moe=638.9 norms=36.2 floor=172.6 a/floor=41.52x
+==============================================================================
+[out] wrote /work/kimi_single_layer/result_20260922_010950.json
+[rank0]:[W922 08:10:41.852520353 ProcessGroupNCCL.cpp:1624] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())
+==== done; json -> /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/kimi_single_layer/result_20260922_010950.json ====

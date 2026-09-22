@@ -1,0 +1,88 @@
+{
+  "trial": 3,
+  "wid": "w_5961c414f17a",
+  "issue": "vllm-17973-v3",
+  "ts": 1789122792.2868373,
+  "baseline_commit": "446afb57f84e8148cb4c3d6e0ea9910d464bed25",
+  "conversation_id": "335408b090b2",
+  "agent_seconds": 2153.0,
+  "agent_final": "Completed the cache-only optimization on branch `optimize-qwen25vl-mrope-redundant-work`.\n\nDiagnosis: the removable overhead was `unified.mrope` in case 0 (350-token vision prefill). Its three legacy elementwise proxy leaves were `rot_pos_emb` (1,296 tokens), `get_window_index` (324), and `old_cu_seqlens` (28). They had empty necessary-work semantics and modeled obsolete device-side materialization, while the required cumulative-sequence work remained in `cu_window_seqlens` and `cu_seqlens`. The required `unified.post_attn.activation` SwiGLU computation was preserved.\n\nFix: commit `3c4e89f` removes those three proxy ops from the BEFORE worklet and retains the four H2D transfer leaves. Commit `22115ed` updates the live location map to exact mapping `qwen2-5-vl-mrope-before-unified-v2` with 17 locations and 14 semantic rows, preserving both cumulative mRoPE mappings. Files: [worklet](simulator/src/worklet/qwen2_5_vl_mrope_local.rs), [arch wiring](simulator/src/arch/qwen2_5_vl_mrope_common.rs), [location map](model/work/location_maps/qwen2_5_vl_mrope_before_unified.json).\n\nEvidence, all simulated predictions on one B200 using the warm cache:\n\n- Before resource `p_1ab1919604e74826ac0cb063ffed2054`, archived at `logs/eval_before_run_baseline/prediction.meta.json`; after resource `p_0ce334623cac40a0bc228edae3d209c4`, at `logs/eval_before_run/prediction.meta.json` (`pred.overview`).\n- Case-0 mRoPE R0 fell from `20.231303409673274 us` to `16.20162697508931 us`, derived from the exact cost-tree leaves (`pred.casev0.operationv0.cost-tree`).\n- Case-0 mRoPE R5 fell from `78.773984375 ns` to `26.258 ns`, derived from the exact leaf ladders (`pred.casev0.optimality-kernel-ladder`).\n- Before leaves: the three legacy elementwise proxies plus four H2D leaves. After leaves: only `rotary_pos_emb`, `window_index`, `cu_window_seqlens`, and `cu_seqlens` (`pred.casev0.operationv0.cost-tree`).\n- The cumulative necessary floor stayed `14 ps` (13 ps plus 1 ps), and whole-case R6/R7 stayed `0.8731360487079111 ms` / `0.8715154518471112 ms` (`pred.casev0.optimality-breakdown`). Case 0 total fell from `3.804338216781616 ms` to `3.8003084659576416 ms`; decode case 1 remained `2.605762720108032 ms` with unchanged R5/R6/R7.\n- Final Analyzer attribution is healthy: `necessary_work_available=true`, mapping id `qwen2-5-vl-mrope-before-unified-v2`, and no caveats (`pred.casev0.optimality-kernel-ladder`).\n\nCache proof: the changed model reported `0 / 1438` profile specs missing across 17 kernels with `CUDA_VISIBLE_DEVICES` empty. No profiling, GPU, or `--profile` was used. Validation passed: 4/4 worklet tests, 3/3 BEFORE arch tests, release build, 8 focused Qwen model-work tests, exact map assertion, and `git diff main..HEAD --check`. `cargo fmt --check` was unavailable because `cargo-fmt` is not installed. Pre-existing unrelated worktree changes and the uncommitted recovery files were preserved.",
+  "gate": {
+    "pass": true,
+    "checks": [
+      {
+        "name": "structural.no_forbidden_leaves",
+        "pass": true,
+        "detail": "forbidden matches=[] in ['unified.mrope.rotary_pos_emb', 'unified.mrope.window_index', 'unified.mrope.cu_window_seqlens', 'unified.mrope.cu_seqlens']"
+      },
+      {
+        "name": "structural.required_leaves_present",
+        "pass": true,
+        "detail": "required=['unified.mrope.rotary_pos_emb', 'unified.mrope.window_index', 'unified.mrope.cu_window_seqlens', 'unified.mrope.cu_seqlens'] leaves=['unified.mrope.rotary_pos_emb', 'unified.mrope.window_index', 'unified.mrope.cu_window_seqlens', 'unified.mrope.cu_seqlens']"
+      },
+      {
+        "name": "structural.leaves_exact",
+        "pass": true,
+        "detail": "expected=['unified.mrope.cu_seqlens', 'unified.mrope.cu_window_seqlens', 'unified.mrope.rotary_pos_emb', 'unified.mrope.window_index'] got=['unified.mrope.cu_seqlens', 'unified.mrope.cu_window_seqlens', 'unified.mrope.rotary_pos_emb', 'unified.mrope.window_index']"
+      },
+      {
+        "name": "metric.r0_measured.near_after",
+        "pass": true,
+        "detail": "val=1.6201e-05 after=1.6201e-05 rel=0.000<= 0.1"
+      },
+      {
+        "name": "metric.r0_measured.below_before",
+        "pass": true,
+        "detail": "val=1.6201e-05 <= before*0.85=1.7196e-05"
+      },
+      {
+        "name": "metric.r5_hardware_limit.near_after",
+        "pass": true,
+        "detail": "val=2.6258e-08 after=2.6258e-08 rel=0.000<= 0.1"
+      },
+      {
+        "name": "metric.r5_hardware_limit.below_before",
+        "pass": true,
+        "detail": "val=2.6258e-08 <= before*0.85=6.6958e-08"
+      },
+      {
+        "name": "necessary.unchanged",
+        "pass": true,
+        "detail": "val=1.4000e-11 before=1.4000e-11 rel<= 0.1"
+      }
+    ],
+    "predict_rc": 0,
+    "analyze_rc": 0,
+    "scoped_leaves": [
+      "unified.mrope.rotary_pos_emb",
+      "unified.mrope.window_index",
+      "unified.mrope.cu_window_seqlens",
+      "unified.mrope.cu_seqlens"
+    ]
+  },
+  "judge": {
+    "matches_root_cause": true,
+    "identified_operator": "unified.mrope",
+    "same_effect_fix": true,
+    "score": 1.0,
+    "reasoning": "The agent identified the same redundant mRoPE preparation work and removed its three legacy proxy leaves while retaining the four H2D transfers, cumulative necessary work, and decoder computation.",
+    "_conversation_id": "868cb011d3c0"
+  },
+  "trajectory": {
+    "conversation_id": "335408b090b2",
+    "events_scanned": 363,
+    "hard_fail": false,
+    "n_hard": 0,
+    "n_soft": 1,
+    "flags": [
+      {
+        "category": "softness.read_after_arch",
+        "severity": "soft",
+        "ts": "2026-09-11T10:56:55Z",
+        "event": "codex.tool_call",
+        "excerpt": "$ /bin/bash -lc \"sed -n '1,240p' model/work/location_maps/qwen2_5_vl_mrope_after_unified.json && sed -n '1,220p' model/work/location_maps/qwen2_5_vl_mrop"
+      }
+    ]
+  },
+  "correct": true
+}

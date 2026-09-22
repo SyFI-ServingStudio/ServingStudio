@@ -1,0 +1,67 @@
+# Ground-truth spec: SGLang PR #30947 — fused Triton draft top-k=1 sampling.
+#
+# Before: the speculative-decoding draft_topk1 step runs on the eager torch
+# backend — a chain of small kernel launches ~27x above the operator's hardware
+# limit (R0=95.3us vs R5=3.5us). After: one fused Triton kernel; R0 drops 2.45x
+# to 38.9us. Unlike vllm-28103, the cost-tree LEAF SET DOES NOT CHANGE — this is
+# a kernel-efficiency (R0 -> R5) fix, so the gate is metric-based: R0 near-after
+# and well below before, while R5/R6 (hardware limit / necessary work) stay put.
+#
+# Sim ground truth: simulator/src/arch/qwen2_dense_sglang_before.rs
+#   const DRAFT_TOPK1_BACKEND: "torch"  ->  "triton"
+# v3 SEALED variant: after arch removed. Eval workspace: w_31e2e24aa68d.
+# Source workspace: w_68f6afe40d6d (cached logs 20260824_sglang30947_predict_*).
+
+issue_id: sglang-30947-v3
+source_workspace: w_68f6afe40d6d
+arch_before: qwen2_dense_sglang_before
+arch_after: qwen2_dense_sglang_after
+
+gt_scope:
+  label_contains: "unified.draft_topk1"
+  path: "iter/4"
+
+harness:
+  baseline_commit: 3f37f38
+  # this repo's own analyze predates `optimality-scoped`; pin the newer binary
+  analyze_bin: /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/agent-workspaces/w_45893bc43b51/repo/target/release/analyze
+  task_file: agent_task_30947.md
+
+objective_gate:
+  # no leaves vanish for this issue; the set must stay exactly this
+  forbidden_leaf_regex: null
+  required_leaves:
+    - unified.draft_topk1
+  expected_leaves_exact:
+    - unified.draft_topk1
+  metric_rungs: [r0_measured]          # only R0 moves for a kernel-efficiency fix
+  unchanged_rungs: [r5_hardware_limit] # hw limit must NOT move (same math, same bytes)
+  rungs:
+    before:
+      r0_measured: 9.529e-05
+      r5_hardware_limit: 3.49761e-06
+      r6_segmented_necessary: 3.49761e-06
+    after:
+      r0_measured: 3.8891e-05
+      r5_hardware_limit: 3.49761e-06
+      r6_segmented_necessary: 3.49761e-06
+  tolerance:
+    rel_to_after: 0.25          # R0 must land within ±25% of 3.889e-5
+    min_drop_from_before: 0.30  # and be ≥30% below 9.529e-5 (GT drop is 59%)
+  necessary_unchanged_rel: 0.10
+
+gt_root_cause: |
+  SGLang PR #30947: with speculative decoding at draft top-k=1, the draft
+  sampling step was implemented as a sequence of eager torch operations —
+  many tiny kernel launches whose combined measured time ran ~27x above the
+  operator's hardware roofline (launch/dispatch overhead dominated; the actual
+  math is trivial). The fix fuses the whole draft top-k=1 step into a single
+  Triton kernel. In the simulator this is the qwen2_dense_sglang recipe's
+  DRAFT_TOPK1_BACKEND switching from "torch" (eager chain) to "triton" (fused),
+  which cuts the unified.draft_topk1 leaf's measured cost ~2.45x (95.3us ->
+  38.9us per iteration scope) while the hardware limit and necessary work are
+  unchanged — same semantics, same FLOPs/bytes, fewer launches. A correct
+  rediscovery identifies the draft_topk1 operator as running far above its
+  hardware limit due to unfused eager execution and swaps/fuses its backend;
+  it does NOT change what the draft step computes, and does NOT touch the
+  transformer layers, lm_head, or norms.

@@ -1,0 +1,75 @@
+{
+  "trial": 2,
+  "wid": "w_31e2e24aa68d",
+  "issue": "sglang-30947-v3",
+  "ts": 1789118699.4834483,
+  "baseline_commit": "3f37f3836600fb9a0df6d270e6e420123a885a4f",
+  "conversation_id": "fee9738608d0",
+  "agent_seconds": 1251.6,
+  "agent_final": "Implemented and committed as `2767f564a5eb389e76808508876cae565055c8ee`.\n\n**Diagnosis.** The actionable eager outlier was `unified.draft_topk1`: baseline aggregate R0 was `9.529063478112222e-5` GPU-s versus R5/R6 `3.49761e-6` GPU-s, a 27.2445x ratio and `9.17930247811222e-5` GPU-s gap. Its Torch path performs eager argmax, probability/position bookkeeping, and materializes the 3-step chain; the existing Triton path uses split partial-argmax/finalize kernels. The raw ratio leader `kv_cache_append` has no alternate B200 rows in the warm cache, so it was not eligible for a cache-only backend change.\n\n**Fix.** Changed `BeforeRecipe::DRAFT_TOPK1_BACKEND` from `torch` to `triton` in [qwen2_dense_sglang_before.rs](/workspace/simulator/src/arch/qwen2_dense_sglang_before.rs:11), with matching documentation and focused test updates. The CostTree topology, request-count input, model dimensions, semantics, R5, R6, and R7 logic are unchanged.\n\n**Evidence.** In `us GPU-s`, selected-operator R0 changed as follows: case 0 `21.826155 -> 8.341209`, case 1 `28.839327 -> 12.263332`, case 2 `21.826155 -> 8.341209`, case 3 `22.798996 -> 9.946287`. R5/R6 remained respectively `0.152070/0.152070`, `2.433120/2.433120`, `0.152070/0.152070`, and `0.760350/0.760350`. Baseline rows: `pred.casev0.optimality-kernel-ladder`, `pred.casev1.optimality-kernel-ladder`, `pred.casev2.optimality-kernel-ladder`, `pred.casev3.optimality-kernel-ladder`; after rows use the same exact case citations from resource `p_c5968004628d4c20b73233283252f2ad`.\n\nWhole-iteration scope R5/R6/R7 also stayed identical in all four cases; the scope waterfall citations are `pred.casev0.optimality-breakdown`, `pred.casev1.optimality-breakdown`, `pred.casev2.optimality-breakdown`, and `pred.casev3.optimality-breakdown`. Analyzer comparison reported the CostTree structural projection unchanged (`pred.casev0.operationv0.cost-tree`).\n\nBaseline used `logs/eval_before_run/`; after used the byte-equivalent isolated config `tmp/fee9738608d0/after.json` and `logs/eval_after_run/` to preserve both Analyzer resources. Both runs used CUDA hidden and the warm cache; `profiling/profile.db` remained 14,905,344 bytes with the same timestamp. Focused CPU tests passed: `CUDA_VISIBLE_DEVICES='' uv run cargo test -p simulator qwen2_dense_sglang_common --lib` (4 passed). Rustfmt was unavailable; `git diff --check` passed.",
+  "gate": {
+    "pass": true,
+    "checks": [
+      {
+        "name": "structural.required_leaves_present",
+        "pass": true,
+        "detail": "required=['unified.draft_topk1'] leaves=['unified.draft_topk1']"
+      },
+      {
+        "name": "structural.leaves_exact",
+        "pass": true,
+        "detail": "expected=['unified.draft_topk1'] got=['unified.draft_topk1']"
+      },
+      {
+        "name": "metric.r0_measured.near_after",
+        "pass": true,
+        "detail": "val=3.8891e-05 after=3.8891e-05 rel=0.000<= 0.25"
+      },
+      {
+        "name": "metric.r0_measured.below_before",
+        "pass": true,
+        "detail": "val=3.8891e-05 <= before*0.7=6.6703e-05"
+      },
+      {
+        "name": "necessary.unchanged",
+        "pass": true,
+        "detail": "val=3.4976e-06 before=3.4976e-06 rel<= 0.1"
+      },
+      {
+        "name": "unchanged.r5_hardware_limit",
+        "pass": true,
+        "detail": "val=3.4976e-06 before=3.4976e-06 rel<= 0.1"
+      }
+    ],
+    "predict_rc": 0,
+    "analyze_rc": 0,
+    "scoped_leaves": [
+      "unified.draft_topk1"
+    ]
+  },
+  "judge": {
+    "matches_root_cause": true,
+    "identified_operator": "unified.draft_topk1",
+    "same_effect_fix": true,
+    "score": 1.0,
+    "reasoning": "The agent independently identified the exact draft top-k=1 outlier and the same eager, unfused tiny-launch overhead. Switching DRAFT_TOPK1_BACKEND from torch to triton preserves the computation while reducing launch overhead, matching the ground-truth fix.",
+    "_conversation_id": "cfe087a2d079"
+  },
+  "trajectory": {
+    "conversation_id": "fee9738608d0",
+    "events_scanned": 193,
+    "hard_fail": false,
+    "n_hard": 0,
+    "n_soft": 1,
+    "flags": [
+      {
+        "category": "softness.read_after_arch",
+        "severity": "soft",
+        "ts": "2026-09-11T09:30:40Z",
+        "event": "codex.tool_call",
+        "excerpt": "$ /bin/bash -lc \"sed -n '1,150p' simulator/src/arch/qwen3_dense_vllm_before.rs && sed -n '1,100p' simulator/src/arch/qwen3_dense_vllm_after.rs && rg -n \\\"split Triton|after|draft_topk1|eager\\\" simulator"
+      }
+    ]
+  },
+  "correct": true
+}

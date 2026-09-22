@@ -1,0 +1,48 @@
+==== slurm_gpu.sh on cayenne job=851 ====
+CUDA_VISIBLE_DEVICES=0
+allocated GPU UUID(s): GPU-c09878e8-fb6a-ff0c-3c33-05993065d679
+0, GPU-c09878e8-fb6a-ff0c-3c33-05993065d679, 0 MiB
+==== exec: ./run_kimi_single_layer.sh --point 32,8192;128,8192 --split --attn-type kda --moe-backend flashinfer_mxfp4 --attn-heads 12 --mamba-ssm-dtype bfloat16 --experts 112 --ep 8 --cuda-graph --iters 60 ====
+==== kimi_single_layer: img=lmsysorg/sglang:v0.5.20 gpu="device=GPU-c09878e8-fb6a-ff0c-3c33-05993065d679" args=--point 32,8192;128,8192 --split --attn-type kda --moe-backend flashinfer_mxfp4 --attn-heads 12 --mamba-ssm-dtype bfloat16 --experts 112 --ep 8 --cuda-graph --iters 60 ====
+--- Wrapper: Applying owner=yilegu, memory=432834647654 bytes, and cpus=28.8 ---
+==============================================================================
+kimi_single_layer_decode v3 (K3/KDA)  experts=112 EP=8 layer_idx=5 iters=60 warmup=20 split=True moe_backend=flashinfer_mxfp4 attention_backend=n/a page_size=1 attn_heads=12 cuda_graph=True kv_cache_dtype=bf16 mamba_ssm_dtype=bfloat16
+torch=2.13.0+cu130  dev=NVIDIA B200
+sglang=0.5.20
+==============================================================================
+[cfg] wrote /tmp/k3_cfg/config.json  experts=112 (EP=8) top_k=16 shared=2 layers=8  moe_backend=flashinfer_mxfp4 hidden_act=situ  attn_type=kda target_layer=5 mla_heads=64 kda_heads=12 kda_layers=[1, 2, 3, 4, 5, 6, 7, 8] full_attn=[]
+[moe] flashinfer_mxfp4_moe_precision=default
+[moe] runner_backend=MoeRunnerBackend.FLASHINFER_MXFP4 is_flashinfer_mxfp4=True is_deep_gemm=False
+[boot] tp=1 attn_tp=1 world=1  is_kda_layer(5)=True  attention_arch=1 dtype=torch.bfloat16
+[layer] mxfp4 quant_config=Mxfp4Config quant_format=None
+[layer] UnquantizedLinearMethod from sglang.srt.layers.quantization.unquant
+[layer] patched Mxfp4Config.get_quant_method: LinearBase/RadixAttention -> bf16 unquantized fallback
+[layer] KimiK3DecoderLayer(layer_idx=5): self_attn=KimiK3DeltaAttention (KDA=True MLA=False)  mlp=KimiK3MoE (MoE=True)
+[layer] float params=0.232B (fp32 kept: 0.02M)
+[layer] random-init 0.232B float params -> cuda/bf16/eval; conv_weights refreshed dev=cuda:0
+[mxfp4] experts=FusedMoE tensors:
+[mxfp4]   w13_weight                       (112, 6144, 1792)      torch.uint8 <- e2m1 randint
+[mxfp4]   w13_weight_scale                 (112, 6144, 112)       torch.uint8 <- ue8m0 fill 127
+[mxfp4]   w13_weight_bias                  (112, 6144)            torch.bfloat16 <- bias normal
+[mxfp4]   w2_weight                        (112, 3584, 1536)      torch.uint8 <- e2m1 randint
+[mxfp4]   w2_weight_scale                  (112, 3584, 96)        torch.uint8 <- ue8m0 fill 127
+[mxfp4]   w2_weight_bias                   (112, 3584)            torch.bfloat16 <- bias normal
+[mxfp4] quant_method=Mxfp4MoEMethod use_flashinfer=True use_marlin=False _fi_kernel=trtllm_sm100 precision=default
+[mxfp4] quant_method.process_weights_after_loading(experts) OK
+[layer] post_load_merge: front_w=(15984, 7168) fused_front_eligible=True bias_dtype=torch.float32 bfa_w=False kda_fused_decode_ready=True
+[moe] resolved expert method: {'class': 'Mxfp4MoEMethod', 'use_flashinfer': True, 'use_marlin': False, '_fi_kernel': 'trtllm_sm100', 'flashinfer_mxfp4_moe_precision': 'default'}
+
+---- rung adhoc ----
+[kda] KDAAttnBackend built; conv=(33, 3, 4608)/torch.bfloat16 temporal=(33, 12, 128, 128)/torch.float32 state=26.86MB/slot-set
+[time] B=   32 L=     8192  us/step=  1113.28  us/tok=  34.790  state=26.9MB  peak=6.95GB  finite=True  shape=[32, 7168]  GRAPH us/step=302.3 (x3.68 vs eager, meta_prep=43.6us finite=True)  attn=191.6us moe=668.0us norms=40.9us
+[kda] KDAAttnBackend built; conv=(129, 3, 4608)/torch.bfloat16 temporal=(129, 12, 128, 128)/torch.float32 state=105.02MB/slot-set
+[time] B=  128 L=     8192  us/step=   998.78  us/tok=   7.803  state=105.0MB  peak=2.70GB  finite=True  shape=[128, 7168]  GRAPH us/step=558.5 (x1.79 vs eager, meta_prep=40.8us finite=True)  attn=173.6us moe=642.9us norms=39.0us
+
+==============================================================================
+rung              B   seq_len    us/step    us/tok  state_MB  status
+adhoc            32      8192    1113.28    34.790    26.865  ok  attn=191.6 moe=668.0 norms=40.9  graph=302.3us (x3.68) meta=43.6
+adhoc           128      8192     998.78     7.803   105.016  ok  attn=173.6 moe=642.9 norms=39.0  graph=558.5us (x1.79) meta=40.8
+==============================================================================
+[out] wrote /work/kimi_single_layer/result_20260922_111355.json
+[rank0]:[W922 18:14:43.878896418 ProcessGroupNCCL.cpp:1624] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())
+==== done; json -> /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/kimi_single_layer/result_20260922_111355.json ====

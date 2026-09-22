@@ -1,0 +1,75 @@
+# Ground-truth spec: vLLM PR #17973 — optimized Qwen2.5-VL mRoPE preparation.
+#
+# Before: the legacy mRoPE path emits three proxy elementwise leaves
+# (rot_pos_emb, get_window_index, old_cu_seqlens) modeling eager host-driven
+# position preparation, plus the four H2D transfers. After: the proxy leaves
+# are GONE (preparation optimized away); only the four h2d_copy leaves remain.
+# Structural fix like 28103, with metric backup: scoped R0 −20%, R5 −67%,
+# necessary floor (R6=1.4e-11) unchanged. NB the real PR's headline win was
+# host-side launch overhead the GPU-time ladder barely sees — the sim delta is
+# small in absolute terms, so tolerances are tight (deterministic re-sim).
+#
+# Sim ground truth: qwen2_5_vl_mrope_before.rs vs _after.rs (before-only proxy
+# leaves removed from the mrope worklet).
+# v3 SEALED: after arch + after worklet recipe removed. Eval ws: w_5961c414f17a.
+# Source workspace: w_e3c7eebe2924
+# (cached pair logs/vllm-17973-predict-cataloged-v19/{before,after}).
+
+issue_id: vllm-17973-v3
+source_workspace: w_e3c7eebe2924
+arch_before: qwen2_5_vl_mrope_before
+arch_after: qwen2_5_vl_mrope_after
+
+gt_scope:
+  label_contains: "unified.mrope"
+  path: "iter/0"
+
+harness:
+  baseline_commit: 446afb5
+  analyze_bin: /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/agent-workspaces/w_45893bc43b51/repo/target/release/analyze
+  task_file: agent_task_17973.md
+
+objective_gate:
+  # the three proxy preparation leaves must vanish
+  forbidden_leaf_regex: "mrope\\.(rot_pos_emb|get_window_index|old_cu_seqlens)$"
+  required_leaves:
+    - unified.mrope.rotary_pos_emb
+    - unified.mrope.window_index
+    - unified.mrope.cu_window_seqlens
+    - unified.mrope.cu_seqlens
+  expected_leaves_exact:
+    - unified.mrope.rotary_pos_emb
+    - unified.mrope.window_index
+    - unified.mrope.cu_window_seqlens
+    - unified.mrope.cu_seqlens
+  metric_rungs: [r0_measured, r5_hardware_limit]
+  rungs:
+    before:
+      r0_measured: 2.0231e-05
+      r5_hardware_limit: 7.8773984375e-08
+      r6_segmented_necessary: 1.4e-11
+    after:
+      r0_measured: 1.6201e-05
+      r5_hardware_limit: 2.6258e-08
+      r6_segmented_necessary: 1.4e-11
+  tolerance:
+    rel_to_after: 0.10          # deterministic re-sim; before is +24.9% on R0
+    min_drop_from_before: 0.15  # GT drop: R0 −20%, R5 −67%
+  necessary_unchanged_rel: 0.10
+
+gt_root_cause: |
+  vLLM PR #17973: Qwen2.5-VL's multimodal rotary position embedding (mRoPE)
+  preparation ran as eager host-driven work every step — computing rotary
+  position embeddings, window indices, and cumulative sequence lengths with a
+  chain of small operations (hundreds of tiny launches) before copying the
+  results to the GPU. The fix restructures/caches this preparation so the
+  redundant per-step computation disappears; only the four host-to-device
+  transfers of the prepared tensors remain. In the simulator the before arch
+  models the legacy path as three proxy elementwise leaves
+  (unified.mrope.rot_pos_emb, .get_window_index, .old_cu_seqlens) that a
+  correct fix removes from the mrope worklet while keeping the four h2d_copy
+  leaves and all decoder work unchanged (scoped R0 drops ~20%, hardware limit
+  ~67%, necessary floor unchanged). A correct rediscovery identifies the mrope
+  preparation leaves as unnecessary work (measured cost with a near-zero
+  necessary floor) and removes their emission; it does NOT touch the language
+  decoder layers, attention, or the H2D transfers.

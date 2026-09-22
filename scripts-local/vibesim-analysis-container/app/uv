@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Minimal offline 'uv' shim for the analysis container.
+#
+# The analyze binary computes the R6/R7 necessary-work floor by spawning
+#   `uv run python -m model.work.floors`
+# (and similar `uv run --project DIR python -m ...`). Real uv would try to
+# resolve/sync a project env (needs network + a 9GB torch venv). model.work only
+# needs numpy, which is installed system-wide, so we translate:
+#   uv run [--project X ...] python[3] -m MOD [args]  ->  python3 -m MOD [args]
+# by execing python3 with everything after the python/python3 token.
+set -euo pipefail
+argv=("$@")
+n=${#argv[@]}
+i=0
+while [ $i -lt "$n" ]; do
+  case "${argv[$i]:-}" in
+    python|python3) i=$((i + 1)); break ;;
+  esac
+  i=$((i + 1))
+done
+if [ "$i" -ge "$n" ]; then
+  echo "uv-shim: no python interpreter token in: $*" >&2
+  exit 2
+fi
+# The analyze binary sets PYTHONHOME/PYTHONPATH/VIRTUAL_ENV for its PyO3-embedded
+# interpreter; those point the labeler's python away from system site-packages
+# (where numpy lives). Clear them so `python3 -m model.work.floors` finds numpy.
+unset PYTHONHOME PYTHONPATH PYTHONSTARTUP VIRTUAL_ENV PYTHONEXECUTABLE
+exec python3 "${argv[@]:$i}"

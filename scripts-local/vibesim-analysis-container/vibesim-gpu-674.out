@@ -1,0 +1,14 @@
+==== slurm_gpu.sh on cayenne job=674 ====
+CUDA_VISIBLE_DEVICES=0
+allocated GPU UUID(s): GPU-0ea1b726-ae19-842c-29f2-3933b438b01f
+0, GPU-0ea1b726-ae19-842c-29f2-3933b438b01f, 0 MiB
+==== exec: ./validate_sglang_capture.sh ====
+==== sglang capture validation: img=lmsysorg/sglang:latest target=model.layers.0.input_layernorm gpu="device=GPU-0ea1b726-ae19-842c-29f2-3933b438b01f" ====
+--- Wrapper: Applying owner=yilegu, memory=432834647654 bytes, and cpus=28.8 ---
+==================== CAPTURE (golden) ====================
+Traceback (most recent call last):
+AssertionError: 'Scheduler' object has no attribute 'ep_install'
+==================== REPLAY (correctness + timing) ====================
+Traceback (most recent call last):
+AssertionError: 'Scheduler' object has no attribute 'ep_replay'
+==== done -> /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/sglang_capture_validate ====

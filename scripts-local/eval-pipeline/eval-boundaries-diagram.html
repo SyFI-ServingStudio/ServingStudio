@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VibeSim optimization eval — system boundaries</title>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --paper: #f5f5f5; --ink: #2d3142; --muted: #4f5d75; --soft: #7a8399;
+    --accent: #eb6c36; --link: #2e5aa8; --rule: rgba(45,49,66,0.12);
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: var(--paper); color: var(--ink);
+    font-family: 'Geist', sans-serif;
+    padding: 48px 32px 40px;
+  }
+  .wrap { max-width: 920px; margin: 0 auto; }
+  .eyebrow {
+    font-family: 'Geist Mono', monospace; font-size: 8px; font-weight: 500;
+    letter-spacing: 0.18em; text-transform: uppercase; color: var(--soft);
+    margin-bottom: 8px;
+  }
+  h1 {
+    font-family: 'Instrument Serif', serif; font-weight: 400;
+    font-size: 1.75rem; line-height: 1.2; margin-bottom: 8px;
+  }
+  .subtitle { font-size: 12px; color: var(--muted); margin-bottom: 28px; max-width: 660px; }
+  svg { display: block; width: 100%; height: auto; }
+  .cards {
+    display: grid; grid-template-columns: 1.1fr 1fr 0.9fr; gap: 16px;
+    margin-top: 28px;
+  }
+  .card {
+    background: #ffffff; border: 1px solid var(--rule); border-radius: 6px;
+    padding: 1.25rem;
+  }
+  .card .eyebrow { margin-bottom: 8px; }
+  .card-header { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+  .card-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+  .dot-coral { background: var(--accent); }
+  .dot-ink { background: var(--ink); }
+  .dot-link { background: var(--link); }
+  .card h3 { font-size: 12px; font-weight: 600; }
+  .card p { font-size: 11px; line-height: 1.55; color: var(--muted); }
+  .card code { font-family: 'Geist Mono', monospace; font-size: 9.5px; color: var(--ink); }
+  footer {
+    margin-top: 32px; padding-top: 12px; border-top: 1px solid var(--rule);
+    font-family: 'Geist Mono', monospace; font-size: 8px; letter-spacing: 0.1em;
+    text-transform: uppercase; color: var(--soft);
+    display: flex; justify-content: space-between;
+  }
+  @media (max-width: 720px) { .cards { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <p class="eyebrow">Eval pipeline · system boundaries · technical view</p>
+  <h1>Where each piece runs</h1>
+  <p class="subtitle">The eval harness lives <em>outside</em> VibeSim (untracked <code
+  style="font-family:'Geist Mono',monospace;font-size:10px">scripts-local/</code>, never visible to the
+  agent). VibeSim contributes the backend, the analyzer, and the sandboxed agent runtime. They meet at
+  one shared, bind-mounted workspace repo.</p>
+
+  <svg viewBox="0 0 840 416" role="img" aria-labelledby="evalzoom-title evalzoom-desc" xmlns="http://www.w3.org/2000/svg">
+    <title id="evalzoom-title">Eval system boundaries: harness outside VibeSim, VibeSim services, no-GPU agent sandbox, shared repo</title>
+    <desc id="evalzoom-desc">Architecture diagram with three trust zones. The eval harness zone on the host holds the trial driver, the LLM judge client, and the focal objective gate. The VibeSim services zone holds the conversation backend on port 8766 and the analyzer on port 8788. The agent sandbox zone is a Docker container with no GPU running the luna agent. All paths converge on a shared workspace repository on the host filesystem, bind-mounted into the sandbox; the gate re-simulates it from a pinned config.</desc>
+    <defs>
+      <pattern id="dots2" width="22" height="22" patternUnits="userSpaceOnUse">
+        <circle cx="11" cy="11" r="0.8" fill="rgba(45,49,66,0.10)"/>
+      </pattern>
+      <marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#4f5d75"/></marker>
+      <marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#eb6c36"/></marker>
+      <marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#2e5aa8"/></marker>
+    </defs>
+
+    <!-- background -->
+    <rect width="100%" height="100%" fill="#f5f5f5"/>
+    <rect width="100%" height="100%" fill="url(#dots2)" opacity="0.55"/>
+
+    <!-- ═══ zones (before arrows and nodes) ═══ -->
+    <!-- Zone A: eval harness (outside VibeSim) -->
+    <rect x="40" y="44" width="192" height="304" rx="8" fill="rgba(45,49,66,0.02)" stroke="rgba(45,49,66,0.10)" stroke-width="0.8"/>
+    <rect x="48" y="48" width="152" height="12" rx="2" fill="#f5f5f5"/>
+    <text x="124" y="57" fill="rgba(45,49,66,0.45)" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.12em">EVAL HARNESS · OUTSIDE VIBESIM</text>
+
+    <!-- Zone B: VibeSim services -->
+    <rect x="304" y="44" width="192" height="208" rx="8" fill="rgba(45,49,66,0.02)" stroke="rgba(45,49,66,0.10)" stroke-width="0.8"/>
+    <rect x="352" y="48" width="96" height="12" rx="2" fill="#f5f5f5"/>
+    <text x="400" y="57" fill="rgba(45,49,66,0.45)" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.12em">VIBESIM SERVICES</text>
+
+    <!-- Zone C: agent sandbox (dashed boundary, no GPU) -->
+    <rect x="568" y="44" width="192" height="112" rx="8" fill="rgba(45,49,66,0.02)" stroke="rgba(45,49,66,0.30)" stroke-width="0.8" stroke-dasharray="4,4"/>
+    <rect x="580" y="48" width="168" height="12" rx="2" fill="#f5f5f5"/>
+    <text x="664" y="57" fill="rgba(45,49,66,0.45)" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.12em">VIBESIM AGENT CTR · NO-GPU</text>
+
+    <!-- ═══ connectors (before nodes) ═══ -->
+    <!-- run_trial -> backend (REST, link) -->
+    <line x1="208" y1="104" x2="328" y2="104" stroke="#2e5aa8" stroke-width="1.2" marker-end="url(#arrow-link)"/>
+    <rect x="240" y="84" width="56" height="12" rx="2" fill="#f5f5f5"/>
+    <text x="268" y="93" fill="#2e5aa8" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">REST :8766</text>
+
+    <!-- judge -> backend (REST, link dashed, enters backend bottom) -->
+    <path d="M 208,200 H 372 Q 380,200 380,192 V 136" fill="none" stroke="#2e5aa8" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#arrow-link)"/>
+    <rect x="258" y="180" width="64" height="12" rx="2" fill="#f5f5f5"/>
+    <text x="290" y="189" fill="#2e5aa8" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">REST · JUDGE</text>
+
+    <!-- backend -> agent (docker exec, muted) -->
+    <line x1="472" y1="92" x2="592" y2="92" stroke="#4f5d75" stroke-width="1" marker-end="url(#arrow)"/>
+    <rect x="502" y="72" width="60" height="12" rx="2" fill="#f5f5f5"/>
+    <text x="532" y="81" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">DOCKER EXEC</text>
+
+    <!-- agent -> analyzer (MCP over HTTP, link dashed) -->
+    <path d="M 592,116 H 488 Q 480,116 480,124 V 192 Q 480,200 476,200" fill="none" stroke="#2e5aa8" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#arrow-link)"/>
+    <rect x="488" y="152" width="64" height="12" rx="2" fill="#f5f5f5"/>
+    <text x="520" y="161" fill="#2e5aa8" font-size="8" font-family="'Geist Mono', monospace" letter-spacing="0.06em" text-anchor="middle">MCP EVIDENCE</text>
+
+    <!-- agent -> repo (bind-mounted edit + commit, muted) -->
+    <line x1="688" y1="132" x2="688" y2="264" stroke="#4f5d75" stroke-width="1" marker-end="url(#arrow)"/>
+    <rect x="696" y="190" width="68" height="12" rx="2" fill="#f5f5f5"/>
+    <text x="730" y="199" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">EDIT+COMMIT</text>
+
+    <!-- gate -> repo (pinned re-sim, FOCAL accent) -->
+    <line x1="208" y1="296" x2="588" y2="296" stroke="#eb6c36" stroke-width="1.4" marker-end="url(#arrow-accent)"/>
+    <rect x="366" y="276" width="68" height="12" rx="2" fill="#f5f5f5"/>
+    <text x="400" y="285" fill="#eb6c36" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">PINNED RE-SIM</text>
+
+    <!-- ═══ nodes ═══ -->
+    <!-- run_trial.py -->
+    <rect x="64" y="76" width="144" height="56" rx="6" fill="#f5f5f5"/>
+    <rect x="64" y="76" width="144" height="56" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+    <rect x="72" y="82" width="24" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.40)" stroke-width="0.8"/>
+    <text x="84" y="91" fill="rgba(45,49,66,0.8)" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">PY</text>
+    <text x="136" y="106" fill="#2d3142" font-size="11" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">run_trial.py</text>
+    <text x="136" y="120" fill="#4f5d75" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle">reset → agent → gate → judge</text>
+
+    <!-- judge.py -->
+    <rect x="64" y="172" width="144" height="56" rx="6" fill="#f5f5f5"/>
+    <rect x="64" y="172" width="144" height="56" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+    <rect x="72" y="178" width="24" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.40)" stroke-width="0.8"/>
+    <text x="84" y="187" fill="rgba(45,49,66,0.8)" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">PY</text>
+    <text x="136" y="202" fill="#2d3142" font-size="11" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">judge.py</text>
+    <text x="136" y="216" fill="#4f5d75" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle">report vs GT · luna verdict</text>
+
+    <!-- objective gate — FOCAL -->
+    <rect x="64" y="268" width="144" height="56" rx="6" fill="#f5f5f5"/>
+    <rect x="64" y="268" width="144" height="56" rx="6" fill="rgba(235,108,54,0.08)" stroke="#eb6c36" stroke-width="1.2"/>
+    <rect x="72" y="274" width="28" height="12" rx="2" fill="transparent" stroke="rgba(235,108,54,0.50)" stroke-width="0.8"/>
+    <text x="86" y="283" fill="#eb6c36" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">GATE</text>
+    <text x="136" y="298" fill="#2d3142" font-size="11" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Objective gate</text>
+    <text x="136" y="312" fill="#4f5d75" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle">uv launcher · analyze scoped</text>
+
+    <!-- backend :8766 -->
+    <rect x="328" y="76" width="144" height="56" rx="6" fill="#f5f5f5"/>
+    <rect x="328" y="76" width="144" height="56" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+    <rect x="336" y="82" width="24" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.40)" stroke-width="0.8"/>
+    <text x="348" y="91" fill="rgba(45,49,66,0.8)" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">API</text>
+    <text x="400" y="106" fill="#2d3142" font-size="11" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Backend :8766</text>
+    <text x="400" y="120" fill="#4f5d75" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle">uvicorn @ 172.17.0.1 · convs</text>
+
+    <!-- analyzer :8788 -->
+    <rect x="328" y="172" width="144" height="56" rx="6" fill="#f5f5f5"/>
+    <rect x="328" y="172" width="144" height="56" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+    <rect x="336" y="178" width="24" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.40)" stroke-width="0.8"/>
+    <text x="348" y="187" fill="rgba(45,49,66,0.8)" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">API</text>
+    <text x="400" y="202" fill="#2d3142" font-size="11" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Analyzer :8788</text>
+    <text x="400" y="216" fill="#4f5d75" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle">analyze serve · /api/v1</text>
+
+    <!-- codex agent -->
+    <rect x="592" y="76" width="144" height="56" rx="6" fill="#f5f5f5"/>
+    <rect x="592" y="76" width="144" height="56" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+    <rect x="600" y="82" width="24" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.40)" stroke-width="0.8"/>
+    <text x="612" y="91" fill="rgba(45,49,66,0.8)" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">LLM</text>
+    <text x="664" y="106" fill="#2d3142" font-size="11" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Codex agent</text>
+    <text x="664" y="120" fill="#4f5d75" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle">gpt-5.6-luna @ max · orch+impl</text>
+
+    <!-- shared workspace repo (store) -->
+    <rect x="592" y="268" width="144" height="56" rx="6" fill="#f5f5f5"/>
+    <rect x="592" y="268" width="144" height="56" rx="6" fill="rgba(45,49,66,0.05)" stroke="#4f5d75" stroke-width="1"/>
+    <rect x="600" y="274" width="20" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.40)" stroke-width="0.8"/>
+    <text x="610" y="283" fill="rgba(45,49,66,0.8)" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">FS</text>
+    <text x="664" y="298" fill="#2d3142" font-size="11" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Workspace repo</text>
+    <text x="664" y="310" fill="#4f5d75" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle">w_45893… · bind = /workspace</text>
+    <text x="664" y="320" fill="#7a8399" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle">before.json · profile.db · src</text>
+
+    <!-- ═══ legend ═══ -->
+    <line x1="30" y1="368" x2="810" y2="368" stroke="rgba(45,49,66,0.10)" stroke-width="0.8"/>
+    <g font-family="'Geist Mono', monospace" font-size="7" fill="#4f5d75">
+      <text x="30" y="392" font-size="8" letter-spacing="0.14em">LEGEND</text>
+      <line x1="110" y1="389" x2="146" y2="389" stroke="#2e5aa8" stroke-width="1.2" marker-end="url(#arrow-link)"/>
+      <text x="154" y="392">HTTP / REST</text>
+      <line x1="250" y1="389" x2="286" y2="389" stroke="#4f5d75" stroke-width="1" marker-end="url(#arrow)"/>
+      <text x="294" y="392">EXEC / FS WRITE</text>
+      <line x1="410" y1="389" x2="446" y2="389" stroke="#2e5aa8" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#arrow-link)"/>
+      <text x="454" y="392">SECONDARY HTTP</text>
+      <line x1="590" y1="389" x2="626" y2="389" stroke="#eb6c36" stroke-width="1.4" marker-end="url(#arrow-accent)"/>
+      <text x="634" y="392">GATE RE-SIM (FOCAL)</text>
+    </g>
+  </svg>
+
+  <div class="cards">
+    <div class="card">
+      <p class="eyebrow">Trust boundary</p>
+      <div class="card-header"><span class="card-dot dot-ink"></span><h3>What the agent can reach</h3></div>
+      <p>The sandbox sees exactly three things: the bind-mounted repo at <code>/workspace</code>, the
+      analyzer's evidence API over MCP, and its own toolchain. Launched with
+      <code>CODEX_DOCKER_GPUS=""</code> — no GPU device exists inside. It never sees the issue spec,
+      the ground truth, the gate code, or <code>scripts-local/</code>.</p>
+    </div>
+    <div class="card">
+      <p class="eyebrow">Inside vs outside</p>
+      <div class="card-header"><span class="card-dot dot-link"></span><h3>VibeSim's role</h3></div>
+      <p>VibeSim supplies the runtime: the backend (:8766) manages conversations and docker-execs the
+      agent; the analyzer (:8788) serves cost-tree evidence. The eval harness — trial driver, gate
+      logic, judge client, GT spec — is separate host code that only talks to VibeSim over REST.</p>
+    </div>
+    <div class="card">
+      <p class="eyebrow">Shared state</p>
+      <div class="card-header"><span class="card-dot dot-coral"></span><h3>One repo, two views</h3></div>
+      <p>Agent (in-container) and gate (host) operate on the same working tree. The agent commits on a
+      branch; the gate re-simulates that tree from the <em>pinned</em> <code>before.json</code> +
+      warm <code>profile.db</code>, cache-only. <code>run_trial.py</code> git-resets it between trials.</p>
+    </div>
+  </div>
+
+  <footer>
+    <span>vibesim · eval-pipeline · boundaries</span>
+    <span>companion to eval-pipeline-diagram.html · 2026-09-10</span>
+  </footer>
+</div>
+</body>
+</html>

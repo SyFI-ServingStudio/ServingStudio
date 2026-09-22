@@ -1,0 +1,157 @@
+{
+  "sglang_version": "0.5.20",
+  "moe_backend": "deep_gemm",
+  "hidden_act": "situ",
+  "moe_method": {
+    "class": "Mxfp4MoEMethod",
+    "use_flashinfer": false,
+    "use_marlin": false,
+    "_fi_kernel": null,
+    "flashinfer_mxfp4_moe_precision": "default"
+  },
+  "experts": 56,
+  "ep": 16,
+  "layer_idx": 5,
+  "config": {
+    "num_experts": 56,
+    "num_experts_per_token": 16,
+    "num_shared_experts": 2,
+    "moe_intermediate_size": 3072,
+    "routed_expert_hidden_size": 3584,
+    "hidden_size": 7168
+  },
+  "kda": {
+    "num_heads": 96,
+    "head_dim": 128,
+    "short_conv_kernel": 4,
+    "gate_lower_bound": -5.0
+  },
+  "points": [
+    {
+      "B": 1,
+      "seq_len": 4096,
+      "ok": true,
+      "out_shape": [
+        1,
+        7168
+      ],
+      "finite": true,
+      "us_step": 1148.2559442520142,
+      "us_token": 1148.2559442520142,
+      "state_mb": 13.02528,
+      "peak_gb": 18.318261248,
+      "us_attn": 340.4160141944885,
+      "us_moe": 583.9040279388428,
+      "us_norms": 34.912001341581345,
+      "rung": "b_ctxindep"
+    },
+    {
+      "B": 1,
+      "seq_len": 1048576,
+      "ok": true,
+      "out_shape": [
+        1,
+        7168
+      ],
+      "finite": true,
+      "us_step": 1133.6640119552612,
+      "us_token": 1133.6640119552612,
+      "state_mb": 13.02528,
+      "peak_gb": 2.358630912,
+      "us_attn": 340.2880132198334,
+      "us_moe": 588.9919996261597,
+      "us_norms": 36.959998309612274,
+      "rung": "b_ctxindep"
+    },
+    {
+      "B": 128,
+      "seq_len": 8192,
+      "ok": true,
+      "out_shape": [
+        128,
+        7168
+      ],
+      "finite": true,
+      "us_step": 1183.840036392212,
+      "us_token": 9.248750284314156,
+      "state_mb": 840.13056,
+      "peak_gb": 3.7821312,
+      "us_attn": 517.4720287322998,
+      "us_moe": 626.3359785079956,
+      "us_norms": 36.86400130391121,
+      "rung": "c_sweep"
+    },
+    {
+      "B": 256,
+      "seq_len": 8192,
+      "ok": true,
+      "out_shape": [
+        256,
+        7168
+      ],
+      "finite": true,
+      "us_step": 1211.7760181427002,
+      "us_token": 4.733500070869923,
+      "state_mb": 1673.74848,
+      "peak_gb": 6.248160768,
+      "us_attn": 819.487988948822,
+      "us_moe": 624.0000128746033,
+      "us_norms": 37.248000502586365,
+      "rung": "c_sweep"
+    },
+    {
+      "B": 512,
+      "seq_len": 8192,
+      "ok": true,
+      "out_shape": [
+        512,
+        7168
+      ],
+      "finite": true,
+      "us_step": 2130.1119327545166,
+      "us_token": 4.160374868661165,
+      "state_mb": 3340.98432,
+      "peak_gb": 11.199757824,
+      "us_attn": 1524.9279737472534,
+      "us_moe": 633.0559849739075,
+      "us_norms": 35.64799949526787,
+      "rung": "c_sweep"
+    },
+    {
+      "B": 1024,
+      "seq_len": 8192,
+      "ok": true,
+      "out_shape": [
+        1024,
+        7168
+      ],
+      "finite": true,
+      "us_step": 4031.8398475646973,
+      "us_token": 3.9373436011373997,
+      "state_mb": 6675.456,
+      "peak_gb": 21.096439296,
+      "us_attn": 3043.776035308838,
+      "us_moe": 1041.375994682312,
+      "us_norms": 38.975998759269714,
+      "rung": "c_sweep"
+    },
+    {
+      "B": 2048,
+      "seq_len": 8192,
+      "ok": true,
+      "out_shape": [
+        2048,
+        7168
+      ],
+      "finite": true,
+      "us_step": 8531.328201293945,
+      "us_token": 4.165687598288059,
+      "state_mb": 13344.39936,
+      "peak_gb": 35.8685568,
+      "us_attn": 6814.047813415527,
+      "us_moe": 1888.319969177246,
+      "us_norms": 44.064000248909,
+      "rung": "c_sweep"
+    }
+  ]
+}

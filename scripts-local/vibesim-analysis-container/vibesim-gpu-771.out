@@ -1,0 +1,22 @@
+==== slurm_gpu.sh on cayenne job=771 ====
+CUDA_VISIBLE_DEVICES=0
+allocated GPU UUID(s): GPU-c09878e8-fb6a-ff0c-3c33-05993065d679
+0, GPU-c09878e8-fb6a-ff0c-3c33-05993065d679, 0 MiB
+==== exec: ./run_kimi_single_layer.sh --moe-backend flashinfer_mxfp4 --point 1,4096 --split --json-out /work/kimi_single_layer/result_mxfp4_smoke.json ====
+==== kimi_single_layer: img=lmsysorg/sglang:v0.5.20 gpu="device=GPU-c09878e8-fb6a-ff0c-3c33-05993065d679" args=--moe-backend flashinfer_mxfp4 --point 1,4096 --split --json-out /work/kimi_single_layer/result_mxfp4_smoke.json ====
+--- Wrapper: Applying owner=yilegu, memory=432834647654 bytes, and cpus=28.8 ---
+==============================================================================
+kimi_single_layer_decode v2 (K3/KDA)  experts=56 EP=16 layer_idx=5 iters=100 warmup=20 split=True moe_backend=flashinfer_mxfp4
+torch=2.13.0+cu130  dev=NVIDIA B200
+sglang=0.5.20
+==============================================================================
+[cfg] wrote /tmp/k3_cfg/config.json  experts=56 (EP=16) top_k=16 shared=2 layers=8  moe_backend=flashinfer_mxfp4 hidden_act=situ
+Traceback (most recent call last):
+  File "/work/kimi_single_layer_decode.py", line 672, in <module>
+    main()
+  File "/work/kimi_single_layer_decode.py", line 600, in main
+    sa, mc, cfg = bootstrap(cfg_dir, moe_backend=args.moe_backend)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/work/kimi_single_layer_decode.py", line 159, in bootstrap
+    initialize_moe_config(sa)
+TypeError: initialize_moe_config() takes 0 positional arguments but 1 was given

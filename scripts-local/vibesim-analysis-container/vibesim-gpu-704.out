@@ -1,0 +1,18 @@
+==== slurm_gpu.sh on cayenne job=704 ====
+CUDA_VISIBLE_DEVICES=0
+allocated GPU UUID(s): GPU-c88e489a-0693-2c29-a1e3-30952377f742
+0, GPU-c88e489a-0693-2c29-a1e3-30952377f742, 0 MiB
+==== exec: ./probe_32296_stock.sh ====
+==== 32296 stock probe: img=lmsysorg/sglang:latest target=sglang.jit_kernel.per_token_group_quant_8bit:per_token_group_quant_8bit quant=mxfp8 gpu="device=GPU-c88e489a-0693-2c29-a1e3-30952377f742" ====
+--- Wrapper: Applying owner=yilegu, memory=432834647654 bytes, and cpus=28.8 ---
+/usr/local/lib/python3.12/dist-packages/torchao/quantization/quant_api.py:1731: SyntaxWarning: invalid escape sequence '\.'
+  """Configuration class for applying different quantization configs to modules or parameters based on their fully qualified names (FQNs).
+-------------------- CAPTURE (mxfp8, group-quant should fire) --------------------
+[2026-09-21 11:10:48] Failed to call rpc ep_time: function 'sglang.jit_kernel.per_token_group_quant_8bit:per_token_group_quant_8bit' never fired during the forward
+Traceback (most recent call last):
+    assert recv_req.success, recv_req.message
+AssertionError: function 'sglang.jit_kernel.per_token_group_quant_8bit:per_token_group_quant_8bit' never fired during the forward
+-------------------- REPLAY (isolated latency sanity) --------------------
+Traceback (most recent call last):
+AssertionError: [Errno 2] No such file or directory: '/raid/yilegu/eval_goldens/probe_32296_stock.pt'
+==== done -> /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/probe_32296_stock ====

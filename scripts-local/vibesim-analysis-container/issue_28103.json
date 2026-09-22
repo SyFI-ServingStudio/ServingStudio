@@ -1,0 +1,25 @@
+{
+  "_note": "PRIVATE eval answer-key for vllm-28103. targets = the modules whose redundant-copy work the PR removes; NEVER exposed to the agent. Baselines are extract_and_profile.py REPLAY-mode measurements on B200 GPU3 (validated 2026-09-19): before-image 14.4us, after-image 8.1us, both err=0.0.",
+  "case": "28103",
+  "model_snap": "/raid/yilegu/models/hub/models--Qwen--Qwen3-0.6B/snapshots/c1899de289a04d12100db370d81485cdf75e47ca",
+  "targets": ["model.layers.0.self_attn.q_norm", "model.layers.0.self_attn.k_norm"],
+  "before_image": "rga-local/vllm-pr-28103:b200-before",
+  "after_image": "rga-local/vllm-pr-28103:b200-after",
+  "codex_image": "rga-local/vllm-pr-28103:b200-codex",
+  "before_us": 14.4,
+  "after_us": 8.1,
+  "recover_pass": 0.70,
+  "err_max": 0.05,
+  "tokens": 8,
+  "iters": 3000,
+  "gpu": "3",
+  "render": {
+    "METRIC": "per-step decode latency",
+    "FRAMEWORK": "vllm",
+    "CHECKOUT": "/workspace/vllm",
+    "MODEL_NAME": "Qwen3-0.6B",
+    "WORKLOAD": "short-prompt decode (a batch of a few tokens per decode step) — the regime this deployment actually runs",
+    "TOKENS": "8",
+    "REBUILD_CMD": "python3 setup.py build_ext --inplace && cp -a vllm/. /opt/venv/lib/python3.12/site-packages/vllm/ && (cd /tmp && python3 -c \"from vllm import LLM, SamplingParams; l=LLM(model='/raid/yilegu/models/hub/models--Qwen--Qwen3-0.6B/snapshots/c1899de289a04d12100db370d81485cdf75e47ca', enforce_eager=True, max_model_len=2048, gpu_memory_utilization=0.5); l.generate(['hi'], SamplingParams(max_tokens=4)); print('ENGINE_SMOKE_OK')\")"
+  }
+}

@@ -1,0 +1,39 @@
+{
+  "issue": "sglang-30947-v3",
+  "k": 3,
+  "wid": "w_31e2e24aa68d",
+  "ts": "20260911_020344",
+  "variant": "v3-sealed",
+  "gate_pass_rate": "3/3",
+  "vetted_correct_rate": "3/3",
+  "judge_match_rate": "3/3",
+  "trials": [
+    {
+      "trial": 1,
+      "conversation": "454d8bd03b6f",
+      "correct": true,
+      "judge": true,
+      "baseline": "3f37f3836",
+      "hack_hard_flags": 0,
+      "agent_seconds": 1192.2
+    },
+    {
+      "trial": 2,
+      "conversation": "fee9738608d0",
+      "correct": true,
+      "judge": true,
+      "baseline": "3f37f3836",
+      "hack_hard_flags": 0,
+      "agent_seconds": 1251.6
+    },
+    {
+      "trial": 3,
+      "conversation": "7e4c84f90c21",
+      "correct": true,
+      "judge": true,
+      "baseline": "3f37f3836",
+      "hack_hard_flags": 0,
+      "agent_seconds": 1359.1
+    }
+  ]
+}

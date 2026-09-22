@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VibeSim optimization eval — step-by-step flow</title>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --paper: #f5f5f5; --ink: #2d3142; --muted: #4f5d75; --soft: #7a8399;
+    --accent: #eb6c36; --rule: rgba(45,49,66,0.12);
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: var(--paper); color: var(--ink);
+    font-family: 'Geist', sans-serif;
+    padding: 48px 32px 40px;
+  }
+  .wrap { max-width: 800px; margin: 0 auto; }
+  .eyebrow {
+    font-family: 'Geist Mono', monospace; font-size: 8px; font-weight: 500;
+    letter-spacing: 0.18em; text-transform: uppercase; color: var(--soft);
+    margin-bottom: 8px;
+  }
+  h1 {
+    font-family: 'Instrument Serif', serif; font-weight: 400;
+    font-size: 1.75rem; line-height: 1.2; margin-bottom: 8px;
+  }
+  .subtitle { font-size: 12px; color: var(--muted); margin-bottom: 28px; max-width: 620px; }
+  svg { display: block; width: 100%; height: auto; }
+  footer {
+    margin-top: 32px; padding-top: 12px; border-top: 1px solid var(--rule);
+    font-family: 'Geist Mono', monospace; font-size: 8px; letter-spacing: 0.1em;
+    text-transform: uppercase; color: var(--soft);
+    display: flex; justify-content: space-between;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <p class="eyebrow">Eval pipeline · one trial, start to score · vLLM #28103</p>
+  <h1>How a trial actually runs</h1>
+  <p class="subtitle">The numbered path one trial takes: the sealed state it starts from, what the agent
+  is told, what it does, and how the two-layer evaluation decides. Loops ×k, then aggregates.
+  Components are the ones from the sequence and boundary diagrams.</p>
+
+  <svg viewBox="0 0 760 920" role="img" aria-labelledby="evalflow-title evalflow-desc" xmlns="http://www.w3.org/2000/svg">
+    <title id="evalflow-title">Eval trial flowchart: sealed reset, instruct, agent work, objective gate decision, judge, record, repeat k times</title>
+    <desc id="evalflow-desc">Top-down flowchart. A trial starts by resetting the repo to a sealed before-state, instructs the agent with a spoiler-free task, the agent finds and removes redundant work in a no-GPU container, then the objective gate re-simulates from a pinned config and a decision checks that redundant leaves are gone, measured cost matches the real fix, and necessary work is unchanged. Pass or fail, an LLM judge scores the diagnosis, the trial is recorded, and the loop repeats k times before writing the summary.</desc>
+    <defs>
+      <pattern id="dots3" width="22" height="22" patternUnits="userSpaceOnUse">
+        <circle cx="11" cy="11" r="0.8" fill="rgba(45,49,66,0.10)"/>
+      </pattern>
+      <marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#4f5d75"/></marker>
+      <marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#eb6c36"/></marker>
+    </defs>
+
+    <!-- background -->
+    <rect width="100%" height="100%" fill="#f5f5f5"/>
+    <rect width="100%" height="100%" fill="url(#dots3)" opacity="0.55"/>
+
+    <!-- ═══ connectors (before nodes) ═══ -->
+    <line x1="320" y1="80"  x2="320" y2="112" stroke="#4f5d75" stroke-width="1" marker-end="url(#arrow)"/>
+    <line x1="320" y1="176" x2="320" y2="208" stroke="#4f5d75" stroke-width="1" marker-end="url(#arrow)"/>
+    <line x1="320" y1="272" x2="320" y2="304" stroke="#4f5d75" stroke-width="1" marker-end="url(#arrow)"/>
+    <line x1="320" y1="368" x2="320" y2="400" stroke="#4f5d75" stroke-width="1" marker-end="url(#arrow)"/>
+    <line x1="320" y1="464" x2="320" y2="496" stroke="#4f5d75" stroke-width="1" marker-end="url(#arrow)"/>
+
+    <!-- decision NO branch: diamond bottom -> merge dot -->
+    <line x1="320" y1="584" x2="320" y2="604" stroke="#4f5d75" stroke-width="1"/>
+    <rect x="332" y="586" width="32" height="12" rx="2" fill="#f5f5f5"/>
+    <text x="348" y="595" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">FAIL</text>
+
+    <!-- decision YES branch (accent happy path): diamond right -> around -> merge dot -->
+    <path d="M 440,540 H 504 Q 512,540 512,548 V 600 Q 512,608 504,608 H 328" fill="none" stroke="#eb6c36" stroke-width="1.2"/>
+    <rect x="452" y="520" width="36" height="12" rx="2" fill="#f5f5f5"/>
+    <text x="470" y="529" fill="#eb6c36" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">PASS</text>
+
+    <!-- merge dot -> judge -->
+    <circle cx="320" cy="608" r="4" fill="#2d3142"/>
+    <line x1="320" y1="612" x2="320" y2="636" stroke="#4f5d75" stroke-width="1" marker-end="url(#arrow)"/>
+
+    <line x1="320" y1="700" x2="320" y2="732" stroke="#4f5d75" stroke-width="1" marker-end="url(#arrow)"/>
+    <line x1="320" y1="796" x2="320" y2="832" stroke="#4f5d75" stroke-width="1" marker-end="url(#arrow)"/>
+    <rect x="332" y="806" width="88" height="12" rx="2" fill="#f5f5f5"/>
+    <text x="376" y="815" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">AFTER k TRIALS</text>
+
+    <!-- loop back: record -> trial start (dashed) -->
+    <path d="M 480,764 H 648 Q 656,764 656,756 V 70 Q 656,62 648,62 H 424" fill="none" stroke="#4f5d75" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#arrow)"/>
+    <rect x="664" y="394" width="72" height="12" rx="2" fill="#f5f5f5"/>
+    <text x="700" y="403" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">NEXT · i&lt;k</text>
+
+    <!-- ═══ nodes ═══ -->
+    <!-- START oval -->
+    <rect x="220" y="44" width="200" height="36" rx="18" fill="#f5f5f5"/>
+    <rect x="220" y="44" width="200" height="36" rx="18" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+    <text x="320" y="66" fill="#2d3142" font-size="11" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Trial start · i ≤ k</text>
+
+    <!-- Step 1: reset -->
+    <rect x="160" y="112" width="320" height="64" rx="6" fill="#f5f5f5"/>
+    <rect x="160" y="112" width="320" height="64" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+    <rect x="168" y="120" width="16" height="16" rx="8" fill="rgba(45,49,66,0.12)"/>
+    <text x="176" y="131" fill="#2d3142" font-size="8" font-weight="600" font-family="'Geist Mono', monospace" text-anchor="middle">1</text>
+    <text x="320" y="132" fill="#2d3142" font-size="11" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Reset to sealed before-state</text>
+    <text x="320" y="150" fill="#4f5d75" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle">main @ 55de3a6 · COPY_INPUTS = true · spoilers stripped</text>
+    <text x="320" y="164" fill="#7a8399" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle">warm profile.db · prebuilt analyze · agent branches deleted</text>
+
+    <!-- Step 2: instruct -->
+    <rect x="160" y="208" width="320" height="64" rx="6" fill="#f5f5f5"/>
+    <rect x="160" y="208" width="320" height="64" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+    <rect x="168" y="216" width="16" height="16" rx="8" fill="rgba(45,49,66,0.12)"/>
+    <text x="176" y="227" fill="#2d3142" font-size="8" font-weight="600" font-family="'Geist Mono', monospace" text-anchor="middle">2</text>
+    <text x="320" y="228" fill="#2d3142" font-size="11" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Instruct the agent — no spoilers</text>
+    <text x="320" y="246" fill="#4f5d75" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle">agent_task.md → POST :8766 · fresh luna@max conversation</text>
+    <text x="320" y="260" fill="#7a8399" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle">"remove the largest unnecessary work · cache-only · keep R6/R7"</text>
+
+    <!-- Step 3: agent works -->
+    <rect x="160" y="304" width="320" height="64" rx="6" fill="#f5f5f5"/>
+    <rect x="160" y="304" width="320" height="64" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+    <rect x="168" y="312" width="16" height="16" rx="8" fill="rgba(45,49,66,0.12)"/>
+    <text x="176" y="323" fill="#2d3142" font-size="8" font-weight="600" font-family="'Geist Mono', monospace" text-anchor="middle">3</text>
+    <text x="320" y="324" fill="#2d3142" font-size="11" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Agent works (no-GPU container)</text>
+    <text x="320" y="342" fill="#4f5d75" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle">timing-predict baseline → optimality ladder → rank subtrees</text>
+    <text x="320" y="356" fill="#7a8399" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle">finds R0/R5 ≫ R6 ≈ 0 scope → edits before arch → commits branch</text>
+
+    <!-- Step 4: objective gate — FOCAL -->
+    <rect x="160" y="400" width="320" height="64" rx="6" fill="#f5f5f5"/>
+    <rect x="160" y="400" width="320" height="64" rx="6" fill="rgba(235,108,54,0.08)" stroke="#eb6c36" stroke-width="1.2"/>
+    <rect x="168" y="408" width="16" height="16" rx="8" fill="rgba(235,108,54,0.20)"/>
+    <text x="176" y="419" fill="#eb6c36" font-size="8" font-weight="600" font-family="'Geist Mono', monospace" text-anchor="middle">4</text>
+    <text x="320" y="420" fill="#2d3142" font-size="11" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Objective gate re-simulates</text>
+    <text x="320" y="438" fill="#4f5d75" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle">host runs PINNED eval-configs/before.json · cache-only, no GPU</text>
+    <text x="320" y="452" fill="#7a8399" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle">analyze optimality-scoped --path iter/1/0/1 → rungs + leaf list</text>
+
+    <!-- decision diamond -->
+    <polygon points="320,496 440,540 320,584 200,540" fill="#f5f5f5"/>
+    <polygon points="320,496 440,540 320,584 200,540" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+    <text x="320" y="536" fill="#2d3142" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle">leaves clean · R0/R5 ≈ after</text>
+    <text x="320" y="550" fill="#2d3142" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle">R6 unchanged ?</text>
+
+    <!-- Step 5: judge -->
+    <rect x="160" y="636" width="320" height="64" rx="6" fill="#f5f5f5"/>
+    <rect x="160" y="636" width="320" height="64" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+    <rect x="168" y="644" width="16" height="16" rx="8" fill="rgba(45,49,66,0.12)"/>
+    <text x="176" y="655" fill="#2d3142" font-size="8" font-weight="600" font-family="'Geist Mono', monospace" text-anchor="middle">5</text>
+    <text x="320" y="656" fill="#2d3142" font-size="11" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">LLM judge scores the diagnosis</text>
+    <text x="320" y="674" fill="#4f5d75" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle">separate luna conv: agent report vs GT root cause (blind)</text>
+    <text x="320" y="688" fill="#7a8399" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle">→ matches_root_cause · same_effect_fix · score 0–1</text>
+
+    <!-- Step 6: record -->
+    <rect x="160" y="732" width="320" height="64" rx="6" fill="#f5f5f5"/>
+    <rect x="160" y="732" width="320" height="64" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+    <rect x="168" y="740" width="16" height="16" rx="8" fill="rgba(45,49,66,0.12)"/>
+    <text x="176" y="751" fill="#2d3142" font-size="8" font-weight="600" font-family="'Geist Mono', monospace" text-anchor="middle">6</text>
+    <text x="320" y="752" fill="#2d3142" font-size="11" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Record the trial</text>
+    <text x="320" y="770" fill="#4f5d75" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle">trial.json — correct := gate.pass (judge is advisory)</text>
+    <text x="320" y="784" fill="#7a8399" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle">agent.diff vs baseline · scoped_report.json archived</text>
+
+    <!-- END oval -->
+    <rect x="180" y="832" width="280" height="36" rx="18" fill="#f5f5f5"/>
+    <rect x="180" y="832" width="280" height="36" rx="18" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+    <text x="320" y="854" fill="#2d3142" font-size="11" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">summary.json · gate + judge rates</text>
+
+    <!-- ═══ legend ═══ -->
+    <line x1="30" y1="888" x2="730" y2="888" stroke="rgba(45,49,66,0.10)" stroke-width="0.8"/>
+    <g font-family="'Geist Mono', monospace" font-size="7" fill="#4f5d75">
+      <text x="30" y="908" font-size="8" letter-spacing="0.14em">LEGEND</text>
+      <rect x="110" y="898" width="28" height="12" rx="6" fill="none" stroke="#2d3142" stroke-width="1"/>
+      <text x="146" y="908">START / END</text>
+      <rect x="240" y="898" width="28" height="12" rx="2" fill="none" stroke="#2d3142" stroke-width="1"/>
+      <text x="276" y="908">STEP</text>
+      <polygon points="344,898 358,904 344,910 330,904" fill="none" stroke="#2d3142" stroke-width="1"/>
+      <text x="366" y="908">GATE DECISION</text>
+      <line x1="480" y1="904" x2="512" y2="904" stroke="#eb6c36" stroke-width="1.2"/>
+      <text x="520" y="908">PASS PATH (FOCAL)</text>
+      <line x1="640" y1="904" x2="672" y2="904" stroke="#4f5d75" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#arrow)"/>
+      <text x="680" y="908">×k LOOP</text>
+    </g>
+  </svg>
+
+  <footer>
+    <span>vibesim · eval-pipeline · trial flow</span>
+    <span>companion: sequence + boundaries diagrams · 2026-09-10</span>
+  </footer>
+</div>
+</body>
+</html>

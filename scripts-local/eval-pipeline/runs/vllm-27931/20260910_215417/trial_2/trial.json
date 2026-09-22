@@ -1,0 +1,75 @@
+{
+  "trial": 2,
+  "wid": "w_1a73838d022f",
+  "issue": "vllm-27931",
+  "ts": 1789108000.0346801,
+  "baseline_commit": "01bba521c9fff9492cf985db42efc692e8028dc3",
+  "conversation_id": "352cac2acbe9",
+  "agent_seconds": 1479.8,
+  "agent_final": "Completed on branch `codex/optimize-llama3-vllm-before`, commit `8febebf`.\n\nDiagnosis: the highest-ratio `lm_head` candidate was about 325x above R5, but its warm B200 alternatives did not improve. Attention prefill was about 7.3x above R5, but only `fa2` was cache-covered. The actionable cache-only target was `unified.pre_attn.input_norm` (`rms_norm_vllm`). Its Analyzer scope was R0 827.309 us vs R5 528.515 us: 1.565x and a 298.793 us gap. `pred.casev0.optimality-kernel-ladder`\n\nFix: [simulator/src/arch/llama3_dense_vllm_before.rs](simulator/src/arch/llama3_dense_vllm_before.rs:11) now uses the existing cached `vllm_after` RMSNorm dispatch, vec8, and large block cap 256 instead of `vllm_before`, vec1, and cap 1024. Threshold 256, small cap 1024, model topology, FLOPs, bytes, R6, and R7 semantics remain unchanged.\n\nEvidence: the exact target leaf fell from 38.872 us to 17.605 us, a 54.7% reduction, with identical 83,886,080 FLOPs and 67,117,056 bytes. `pred.casev0.operationv0.cost-tree` The target Analyzer scope became R0 806.042 us, R5 528.515 us, and R6 0.0000032768 us; R5/R6 were unchanged. Aggregate R5/R6/R7 also remained 30.000194 ms / 27.433689 ms / 27.366567 ms. `pred.casev0.optimality-kernel-ladder`\n\nTotal simulated prediction time changed from 61.007729 ms to 60.986462 ms. `pred.overview` The exact 14-leaf cost-tree structure and every non-target leaf were unchanged. `pred.casev0.operationv0.cost-tree`\n\nValidation was cache-only with `CUDA_VISIBLE_DEVICES=`. Both coverage probes reported 0 missing of 1,442 specs, and `profiling/profile.db` remained unchanged. Results: [baseline artifacts](logs/eval_before_run/) and [after artifacts](logs/eval_after_run/). Focused release tests passed: 3 passed, 0 failed. `git diff --check` passed. `cargo fmt --check` could not run because `rustfmt` was unavailable in the environment.",
+  "gate": {
+    "pass": true,
+    "checks": [
+      {
+        "name": "structural.required_leaves_present",
+        "pass": true,
+        "detail": "required=['unified.pre_attn.input_norm'] leaves=['unified.pre_attn.input_norm']"
+      },
+      {
+        "name": "structural.leaves_exact",
+        "pass": true,
+        "detail": "expected=['unified.pre_attn.input_norm'] got=['unified.pre_attn.input_norm']"
+      },
+      {
+        "name": "metric.r0_measured.near_after",
+        "pass": true,
+        "detail": "val=1.7605e-05 after=1.7605e-05 rel=0.000<= 0.25"
+      },
+      {
+        "name": "metric.r0_measured.below_before",
+        "pass": true,
+        "detail": "val=1.7605e-05 <= before*0.7=2.7210e-05"
+      },
+      {
+        "name": "necessary.unchanged",
+        "pass": true,
+        "detail": "val=3.2768e-08 before=3.2768e-08 rel<= 0.1"
+      },
+      {
+        "name": "unchanged.r5_hardware_limit",
+        "pass": true,
+        "detail": "val=8.3896e-06 before=8.3896e-06 rel<= 0.1"
+      }
+    ],
+    "predict_rc": 0,
+    "analyze_rc": 0,
+    "scoped_leaves": [
+      "unified.pre_attn.input_norm"
+    ]
+  },
+  "judge": {
+    "matches_root_cause": true,
+    "identified_operator": "standalone pre-attention input RMSNorm (unified.pre_attn.input_norm / rms_norm_vllm)",
+    "same_effect_fix": true,
+    "score": 1.0,
+    "reasoning": "The report identified the standalone input RMSNorm and implemented the exact vllm_before vec1/cap1024 to vllm_after vec8/cap256 change, preserving the computation and model structure.",
+    "_conversation_id": "176e4b5bb844"
+  },
+  "trajectory": {
+    "conversation_id": "352cac2acbe9",
+    "events_scanned": 199,
+    "hard_fail": false,
+    "n_hard": 0,
+    "n_soft": 1,
+    "flags": [
+      {
+        "category": "softness.read_after_arch",
+        "severity": "soft",
+        "ts": "2026-09-11T06:34:21Z",
+        "event": "codex.tool_call",
+        "excerpt": "r/src/arch/llama3_dense_vllm_common.rs; sed -n '1,120p' simulator/src/arch/llama3_dense_vllm_before.rs; sed -n '1,120p' simulator/src/arch/llama3_dense_vllm_after.rs\""
+      }
+    ]
+  },
+  "correct": true
+}

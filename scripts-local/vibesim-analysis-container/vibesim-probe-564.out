@@ -1,0 +1,7 @@
+==== slurm_gpu.sh on cayenne job=564 ====
+CUDA_VISIBLE_DEVICES=0
+allocated GPU UUID(s): GPU-623e9206-cf90-1c4b-a44a-1d64759092d7
+0, GPU-623e9206-cf90-1c4b-a44a-1d64759092d7, 0 MiB
+==== exec: bash -c echo PROBE_OK; echo "DOCKER_GPU_ARG=$DOCKER_GPU_ARG" ====
+PROBE_OK
+DOCKER_GPU_ARG="device=GPU-623e9206-cf90-1c4b-a44a-1d64759092d7"

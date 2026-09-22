@@ -1,0 +1,23 @@
+{
+  "issue": "vllm-28103-api",
+  "k": 1,
+  "wid": "w_45893bc43b51",
+  "ts": "20260917_190128",
+  "gate_pass_rate": "0/1",
+  "judge_match_rate": "0/1",
+  "trials": [
+    {
+      "trial": 1,
+      "correct": false,
+      "gate_leaves": [
+        "unified.qk_norm.q_input_copy",
+        "unified.qk_norm.q_norm",
+        "unified.qk_norm.k_input_copy",
+        "unified.qk_norm.k_norm"
+      ],
+      "judge_match": null,
+      "agent_seconds": 26.2,
+      "agent_error": null
+    }
+  ]
+}

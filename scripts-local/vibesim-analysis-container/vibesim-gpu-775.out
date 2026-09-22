@@ -1,0 +1,65 @@
+==== slurm_gpu.sh on cayenne job=775 ====
+CUDA_VISIBLE_DEVICES=0
+allocated GPU UUID(s): GPU-c09878e8-fb6a-ff0c-3c33-05993065d679
+0, GPU-c09878e8-fb6a-ff0c-3c33-05993065d679, 0 MiB
+==== exec: ./run_kimi_single_layer.sh --moe-backend flashinfer_mxfp4 --split --only b_ctxindep,c_sweep --json-out /work/kimi_single_layer/result_mxfp4_sweep.json ====
+==== kimi_single_layer: img=lmsysorg/sglang:v0.5.20 gpu="device=GPU-c09878e8-fb6a-ff0c-3c33-05993065d679" args=--moe-backend flashinfer_mxfp4 --split --only b_ctxindep,c_sweep --json-out /work/kimi_single_layer/result_mxfp4_sweep.json ====
+--- Wrapper: Applying owner=yilegu, memory=432834647654 bytes, and cpus=28.8 ---
+==============================================================================
+kimi_single_layer_decode v2 (K3/KDA)  experts=56 EP=16 layer_idx=5 iters=100 warmup=20 split=True moe_backend=flashinfer_mxfp4
+torch=2.13.0+cu130  dev=NVIDIA B200
+sglang=0.5.20
+==============================================================================
+[cfg] wrote /tmp/k3_cfg/config.json  experts=56 (EP=16) top_k=16 shared=2 layers=8  moe_backend=flashinfer_mxfp4 hidden_act=situ
+[moe] flashinfer_mxfp4_moe_precision=default
+[moe] runner_backend=MoeRunnerBackend.FLASHINFER_MXFP4 is_flashinfer_mxfp4=True is_deep_gemm=False
+[boot] tp=1 attn_tp=1 world=1  is_kda_layer(5)=True  dtype=torch.bfloat16
+[layer] mxfp4 quant_config=Mxfp4Config quant_format=None
+[layer] UnquantizedLinearMethod from sglang.srt.layers.quantization.unquant
+[layer] patched Mxfp4Config.get_quant_method: LinearBase -> bf16 unquantized fallback
+[layer] KimiK3DecoderLayer(layer_idx=5): self_attn=KimiK3DeltaAttention (KDA=True MLA=False)  mlp=KimiK3MoE (MoE=True)
+[layer] random-init 0.543B float params -> cuda/bf16/eval; conv_weights refreshed dev=cuda:0
+[mxfp4] experts=FusedMoE tensors:
+[mxfp4]   w13_weight                       (56, 6144, 1792)       torch.uint8 <- e2m1 randint
+[mxfp4]   w13_weight_scale                 (56, 6144, 112)        torch.uint8 <- ue8m0 fill 127
+[mxfp4]   w13_weight_bias                  (56, 6144)             torch.bfloat16 <- bias normal
+[mxfp4]   w2_weight                        (56, 3584, 1536)       torch.uint8 <- e2m1 randint
+[mxfp4]   w2_weight_scale                  (56, 3584, 96)         torch.uint8 <- ue8m0 fill 127
+[mxfp4]   w2_weight_bias                   (56, 3584)             torch.bfloat16 <- bias normal
+[mxfp4] quant_method=Mxfp4MoEMethod use_flashinfer=True use_marlin=False _fi_kernel=trtllm_sm100 precision=default
+[mxfp4] quant_method.process_weights_after_loading(experts) OK
+[moe] resolved expert method: {'class': 'Mxfp4MoEMethod', 'use_flashinfer': True, 'use_marlin': False, '_fi_kernel': 'trtllm_sm100', 'flashinfer_mxfp4_moe_precision': 'default'}
+
+---- rung b_ctxindep ----
+[kda] KDAAttnBackend built; conv=(2, 3, 36864)/torch.bfloat16 temporal=(2, 96, 128, 128)/torch.float32 state=13.03MB/slot-set
+/opt/sglang/lib/python3.12/site-packages/triton/language/core.py:2284: UserWarning: tl.make_block_ptr is deprecated. Use TensorDescriptor or tl.make_tensor_descriptor instead.
+  warn("tl.make_block_ptr is deprecated. Use TensorDescriptor or tl.make_tensor_descriptor instead.")
+[time] B=    1 L=     4096  us/step=  1146.72  us/tok=1146.720  state=13.0MB  peak=4.33GB  finite=True  shape=[1, 7168]  attn=332.0us moe=604.4us norms=36.2us
+[kda] KDAAttnBackend built; conv=(2, 3, 36864)/torch.bfloat16 temporal=(2, 96, 128, 128)/torch.float32 state=13.03MB/slot-set
+[time] B=    1 L=  1048576  us/step=  1140.35  us/tok=1140.352  state=13.0MB  peak=2.14GB  finite=True  shape=[1, 7168]  attn=330.1us moe=600.6us norms=35.6us
+
+---- rung c_sweep ----
+[kda] KDAAttnBackend built; conv=(129, 3, 36864)/torch.bfloat16 temporal=(129, 96, 128, 128)/torch.float32 state=840.13MB/slot-set
+[time] B=  128 L=     8192  us/step=  1164.77  us/tok=   9.100  state=840.1MB  peak=3.78GB  finite=True  shape=[128, 7168]  attn=517.6us moe=629.1us norms=35.3us
+[kda] KDAAttnBackend built; conv=(257, 3, 36864)/torch.bfloat16 temporal=(257, 96, 128, 128)/torch.float32 state=1673.75MB/slot-set
+[time] B=  256 L=     8192  us/step=  1192.16  us/tok=   4.657  state=1673.7MB  peak=6.25GB  finite=True  shape=[256, 7168]  attn=817.3us moe=609.7us norms=35.4us
+[kda] KDAAttnBackend built; conv=(513, 3, 36864)/torch.bfloat16 temporal=(513, 96, 128, 128)/torch.float32 state=3340.98MB/slot-set
+[time] B=  512 L=     8192  us/step=  2154.78  us/tok=   4.209  state=3341.0MB  peak=11.20GB  finite=True  shape=[512, 7168]  attn=1519.0us moe=661.5us norms=35.5us
+[kda] KDAAttnBackend built; conv=(1025, 3, 36864)/torch.bfloat16 temporal=(1025, 96, 128, 128)/torch.float32 state=6675.46MB/slot-set
+[time] B= 1024 L=     8192  us/step=  4084.35  us/tok=   3.989  state=6675.5MB  peak=21.10GB  finite=True  shape=[1024, 7168]  attn=3038.4us moe=1047.9us norms=38.9us
+[kda] KDAAttnBackend built; conv=(2049, 3, 36864)/torch.bfloat16 temporal=(2049, 96, 128, 128)/torch.float32 state=13344.40MB/slot-set
+[time] B= 2048 L=     8192  us/step=  8511.84  us/tok=   4.156  state=13344.4MB  peak=37.54GB  finite=True  shape=[2048, 7168]  attn=6830.4us moe=1843.3us norms=42.1us
+
+==============================================================================
+rung            B   seq_len    us/step    us/tok  state_MB  status
+b_ctxindep      1      4096    1146.72  1146.720      13.0  ok  attn=332.0 moe=604.4 norms=36.2
+b_ctxindep      1   1048576    1140.35  1140.352      13.0  ok  attn=330.1 moe=600.6 norms=35.6
+c_sweep       128      8192    1164.77     9.100     840.1  ok  attn=517.6 moe=629.1 norms=35.3
+c_sweep       256      8192    1192.16     4.657    1673.7  ok  attn=817.3 moe=609.7 norms=35.4
+c_sweep       512      8192    2154.78     4.209    3341.0  ok  attn=1519.0 moe=661.5 norms=35.5
+c_sweep      1024      8192    4084.35     3.989    6675.5  ok  attn=3038.4 moe=1047.9 norms=38.9
+c_sweep      2048      8192    8511.84     4.156   13344.4  ok  attn=6830.4 moe=1843.3 norms=42.1
+==============================================================================
+[out] wrote /work/kimi_single_layer/result_mxfp4_sweep.json
+[rank0]:[W922 05:40:30.384948027 ProcessGroupNCCL.cpp:1624] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())
+==== done; json -> /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/kimi_single_layer/result_20260921_223947.json ====

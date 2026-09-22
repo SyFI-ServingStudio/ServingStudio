@@ -1,0 +1,14 @@
+==== slurm_gpu.sh on cayenne job=724 ====
+CUDA_VISIBLE_DEVICES=0
+allocated GPU UUID(s): GPU-c09878e8-fb6a-ff0c-3c33-05993065d679
+0, GPU-c09878e8-fb6a-ff0c-3c33-05993065d679, 0 MiB
+==== exec: ./probe_20469.sh ====
+==== 20469 GATE: capture causal_conv1d_fn on BEFORE, inspect x contiguity + seq_lens_cpu ====
+--- Wrapper: Applying owner=yilegu, memory=432834647654 bytes, and cpus=28.8 ---
+-------------------- CAPTURE (tokens=8192) --------------------
+CAPTURE target=sglang.srt.layers.attention.mamba.causal_conv1d:causal_conv1d_fn kind=function latency=310.014us/call inputs=[{'shape': [6144, 8192], 'stride': [1, 6144], 'dtype': 'torch.bfloat16', 'contiguous': False}, {'shape': [6144, 4], 'stride': [4, 1], 'dtype': 'torch.bfloat16', 'contiguous': True}]
+JSON {"latency_us": 310.0140075683594, "input_meta": [{"shape": [6144, 8192], "stride": [1, 6144], "dtype": "torch.bfloat16", "contiguous": false}, {"shape": [6144, 4], "stride": [4, 1], "dtype": "torch.bfloat16", "contiguous": true}], "golden_path": "/raid/yilegu/eval_goldens/probe_20469_conv.pt", "target": "sglang.srt.layers.attention.mamba.causal_conv1d:causal_conv1d_fn", "kind": "function", "framework": "sglang", "tokens": 8192}
+-------------------- GOLDEN INSPECT --------------------
+==== GATE done. If WIN_CAN_MANIFEST=True, running floor measurement ====
+==== NULL-BY-CONSTRUCTION: win cannot manifest (x contiguous or seq_lens_cpu absent) -- floor is vacuous ====
+==== probe_20469 done -> /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/probe_20469 ====

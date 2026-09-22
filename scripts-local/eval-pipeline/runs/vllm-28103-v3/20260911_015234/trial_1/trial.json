@@ -1,0 +1,73 @@
+{
+  "trial": 1,
+  "wid": "w_af3858cf8529",
+  "issue": "vllm-28103-v3",
+  "ts": 1789124048.295702,
+  "baseline_commit": "94e90ed6e532dd26787e9b232c31a810b4680ba1",
+  "conversation_id": "4dec33e56cd1",
+  "agent_seconds": 1283.6,
+  "agent_final": "Completed on branch `opt/qwen3-qk-norm-strided`, commit `89786001cc5348672508d67db7ebb9dc91ff0205`.\n\nDiagnosis: `unified.qk_norm` was the largest removable gap. Its before scope had R0 `0.00047138` GPU-s versus R6/R7 `0.000000001792` GPU-s; its leaves were `q_input_copy`, `q_norm`, `k_input_copy`, `k_norm`. The copy leaves had empty necessary-work semantics, while `q_norm` and `k_norm` were retained. See `tmp/4dec33e56cd1/before_snapshot/reports/optimality_scoped_label_unified_qk_norm_qknormlocalworklet_local_1_gpu_qo_num_qo_head_e6287c8359c2.json` and `pred.casev0.operationv0.cost-tree` / `pred.casev1.operationv0.cost-tree`.\n\nFix: enabled stride-aware RMSNorm in [qwen3_dense_vllm_before.rs](/workspace/simulator/src/arch/qwen3_dense_vllm_before.rs:18), so Q/K strided views are consumed directly and only the redundant materialization copies disappear. Q/K norm operations, shapes, and head multipliers are unchanged. Removed the two now-unemitted copy rows from `model/work/location_maps/qwen3_dense_vllm_before_unified.json`; made [timing_predict.rs](/workspace/simulator/src/timing_predict.rs:244) strictly cache-only by keeping JIT disabled.\n\nEvidence from the after Analyzer prediction:\n- QK scope R0: `0.00027274799999999996` GPU-s; R5: `0.0000443842525` GPU-s; R6/R7: `0.000000001792` GPU-s, unchanged. `pred.casev0.optimality-kernel-ladder` `pred.casev1.optimality-kernel-ladder`\n- After leaves: only `unified.qk_norm.q_norm` and `unified.qk_norm.k_norm`, confirmed by `pred.casev0.operationv0.cost-tree` and `pred.casev1.operationv0.cost-tree`.\n- Case totals fell from 4.0667128563/1.7964478731 ms to 3.9521832466/1.7123689651 ms. After breakdown: `logs/eval_before_run/reports/iter_breakdown.ans`.\n\nThe rerun used `TMPDIR=/workspace/tmp/4dec33e56cd1 CUDA_VISIBLE_DEVICES= uv run python -m launcher timing-predict eval-configs/before.json` with no `--profile`. A deliberate cache-miss probe exited 1 with `missing profile entry` and did not profile: `logs/eval_cache_miss_probe/stdout.log`. Focused tests, release build, JSON parsing, and `git diff --check` passed; `cargo fmt --check` was unavailable because rustfmt is not installed.",
+  "gate": {
+    "pass": true,
+    "checks": [
+      {
+        "name": "structural.no_forbidden_leaves",
+        "pass": true,
+        "detail": "forbidden matches=[] in ['unified.qk_norm.q_norm', 'unified.qk_norm.k_norm']"
+      },
+      {
+        "name": "structural.required_leaves_present",
+        "pass": true,
+        "detail": "required=['unified.qk_norm.q_norm', 'unified.qk_norm.k_norm'] leaves=['unified.qk_norm.q_norm', 'unified.qk_norm.k_norm']"
+      },
+      {
+        "name": "metric.r0_measured.near_after",
+        "pass": true,
+        "detail": "val=2.7275e-04 after=2.7270e-04 rel=0.000<= 0.25"
+      },
+      {
+        "name": "metric.r0_measured.below_before",
+        "pass": true,
+        "detail": "val=2.7275e-04 <= before*0.8=3.7712e-04"
+      },
+      {
+        "name": "metric.r5_hardware_limit.near_after",
+        "pass": true,
+        "detail": "val=4.4384e-05 after=4.4380e-05 rel=0.000<= 0.25"
+      },
+      {
+        "name": "metric.r5_hardware_limit.below_before",
+        "pass": true,
+        "detail": "val=4.4384e-05 <= before*0.8=7.1016e-05"
+      },
+      {
+        "name": "necessary.unchanged",
+        "pass": true,
+        "detail": "val=1.7920e-09 before=1.7920e-09 rel<= 0.1"
+      }
+    ],
+    "predict_rc": 0,
+    "analyze_rc": 0,
+    "scoped_leaves": [
+      "unified.qk_norm.q_norm",
+      "unified.qk_norm.k_norm"
+    ]
+  },
+  "judge": {
+    "matches_root_cause": true,
+    "identified_operator": "unified.qk_norm (q_input_copy + k_input_copy)",
+    "same_effect_fix": true,
+    "score": 1.0,
+    "reasoning": "The agent identified the same redundant q/k RMSNorm input materialization caused by strided Q/K views. Its implemented stride-aware path removes both copies while retaining q_norm and k_norm, matching the ground-truth effect.",
+    "_conversation_id": "09c22c08c2da"
+  },
+  "trajectory": {
+    "conversation_id": "4dec33e56cd1",
+    "events_scanned": 214,
+    "hard_fail": false,
+    "n_hard": 0,
+    "n_soft": 0,
+    "flags": []
+  },
+  "correct": true
+}

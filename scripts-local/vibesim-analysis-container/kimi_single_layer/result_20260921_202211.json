@@ -1,0 +1,148 @@
+{
+  "sglang_version": "0.5.20",
+  "experts": 56,
+  "ep": 16,
+  "layer_idx": 5,
+  "config": {
+    "num_experts": 56,
+    "num_experts_per_token": 16,
+    "num_shared_experts": 2,
+    "moe_intermediate_size": 3072,
+    "routed_expert_hidden_size": 3584,
+    "hidden_size": 7168
+  },
+  "kda": {
+    "num_heads": 96,
+    "head_dim": 128,
+    "short_conv_kernel": 4,
+    "gate_lower_bound": -5.0
+  },
+  "points": [
+    {
+      "B": 1,
+      "seq_len": 4096,
+      "ok": true,
+      "out_shape": [
+        1,
+        7168
+      ],
+      "finite": true,
+      "us_step": 1112.44797706604,
+      "us_token": 1112.44797706604,
+      "state_mb": 13.02528,
+      "peak_gb": 4.832672256,
+      "us_attn": 309.6640110015869,
+      "us_moe": 576.8319964408875,
+      "us_norms": 37.59999945759773,
+      "rung": "b_ctxindep"
+    },
+    {
+      "B": 1,
+      "seq_len": 1048576,
+      "ok": true,
+      "out_shape": [
+        1,
+        7168
+      ],
+      "finite": true,
+      "us_step": 1097.1839427947998,
+      "us_token": 1097.1839427947998,
+      "state_mb": 13.02528,
+      "peak_gb": 4.857798144,
+      "us_attn": 310.7520043849945,
+      "us_moe": 574.6560096740723,
+      "us_norms": 37.59999945759773,
+      "rung": "b_ctxindep"
+    },
+    {
+      "B": 128,
+      "seq_len": 8192,
+      "ok": true,
+      "out_shape": [
+        128,
+        7168
+      ],
+      "finite": true,
+      "us_step": 1281.2800407409668,
+      "us_token": 10.010000318288803,
+      "state_mb": 840.13056,
+      "peak_gb": 6.497771008,
+      "us_attn": 477.4720072746277,
+      "us_moe": 783.4240198135376,
+      "us_norms": 38.27200084924698,
+      "rung": "c_sweep"
+    },
+    {
+      "B": 256,
+      "seq_len": 8192,
+      "ok": true,
+      "out_shape": [
+        256,
+        7168
+      ],
+      "finite": true,
+      "us_step": 1976.7359495162964,
+      "us_token": 7.721624802798033,
+      "state_mb": 1673.74848,
+      "peak_gb": 8.963800576,
+      "us_attn": 868.7040209770203,
+      "us_moe": 1202.720046043396,
+      "us_norms": 38.40000182390213,
+      "rung": "c_sweep"
+    },
+    {
+      "B": 512,
+      "seq_len": 8192,
+      "ok": true,
+      "out_shape": [
+        512,
+        7168
+      ],
+      "finite": true,
+      "us_step": 3534.111976623535,
+      "us_token": 6.902562454342842,
+      "state_mb": 3340.98432,
+      "peak_gb": 13.915397632,
+      "us_attn": 1663.0719900131226,
+      "us_moe": 1945.855975151062,
+      "us_norms": 38.43199834227562,
+      "rung": "c_sweep"
+    },
+    {
+      "B": 1024,
+      "seq_len": 8192,
+      "ok": true,
+      "out_shape": [
+        1024,
+        7168
+      ],
+      "finite": true,
+      "us_step": 6635.776042938232,
+      "us_token": 6.480250041931868,
+      "state_mb": 6675.456,
+      "peak_gb": 23.812079104,
+      "us_attn": 3379.6160221099854,
+      "us_moe": 3390.687942504883,
+      "us_norms": 41.120000183582306,
+      "rung": "c_sweep"
+    },
+    {
+      "B": 2048,
+      "seq_len": 8192,
+      "ok": true,
+      "out_shape": [
+        2048,
+        7168
+      ],
+      "finite": true,
+      "us_step": 12850.624084472656,
+      "us_token": 6.274718791246414,
+      "state_mb": 13344.39936,
+      "peak_gb": 40.257945088,
+      "us_attn": 6818.175792694092,
+      "us_moe": 6273.280143737793,
+      "us_norms": 44.38399896025658,
+      "rung": "c_sweep"
+    }
+  ]
+}

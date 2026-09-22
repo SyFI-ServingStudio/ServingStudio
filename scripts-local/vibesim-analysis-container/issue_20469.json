@@ -1,0 +1,14 @@
+{
+  "_note": "Floor-measurement config for sglang-pr-20469 (Triton causal_conv1d skips a .contiguous() copy for NON-contiguous conv input). PR is ONE commit (db995fba->87549f8f) touching only causal_conv1d.py (runtime) + test/run_eval.py (test); the CALLER (GDN linear_attention layer) is identical in both variants, so build_case_20469.sh's single-.py swap is faithful. The win manifests ONLY when the captured x is non-contiguous (x.stride(-1)!=1) AND seq_lens_cpu is in kwargs: BEFORE (sgl_kernel, _USE_TRITON=False) forces x.contiguous() then causal_conv1d_fwd; AFTER routes to the Triton kernel that accepts arbitrary strides (no copy). If capture shows x contiguous or seq_lens_cpu absent, the case is a NULL-by-construction (both paths identical). Model Qwen3.5-0.8B is a hybrid GDN model (layer_types has linear_attention w/ linear_conv_kernel_dim=4) so causal_conv1d_fn fires every linear_attention layer during prefill. bf16, no quant. Large token count to reach the 'large prefill' regime where the copy cost is material.",
+  "case": "20469",
+  "framework": "sglang",
+  "model_snap": "/raid/hf/hub/models--Qwen--Qwen3.5-0.8B/snapshots/2fc06364715b967f1860aea9cf38778875588b17",
+  "targets": ["sglang.srt.layers.attention.mamba.causal_conv1d:causal_conv1d_fn"],
+  "before_image": "rga-local/sglang-pr-20469:b200-before",
+  "after_image": "rga-local/sglang-pr-20469:b200-after",
+  "sglang_quant": "",
+  "tokens": 8192,
+  "iters": 3000,
+  "err_max": 0.05,
+  "render": { "FRAMEWORK": "sglang" }
+}

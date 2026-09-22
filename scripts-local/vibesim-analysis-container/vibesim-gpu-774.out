@@ -1,0 +1,45 @@
+==== slurm_gpu.sh on cayenne job=774 ====
+CUDA_VISIBLE_DEVICES=0
+allocated GPU UUID(s): GPU-c09878e8-fb6a-ff0c-3c33-05993065d679
+0, GPU-c09878e8-fb6a-ff0c-3c33-05993065d679, 0 MiB
+==== exec: ./run_kimi_single_layer.sh --moe-backend flashinfer_mxfp4 --point 1,4096 --split --json-out /work/kimi_single_layer/result_mxfp4_smoke.json ====
+==== kimi_single_layer: img=lmsysorg/sglang:v0.5.20 gpu="device=GPU-c09878e8-fb6a-ff0c-3c33-05993065d679" args=--moe-backend flashinfer_mxfp4 --point 1,4096 --split --json-out /work/kimi_single_layer/result_mxfp4_smoke.json ====
+--- Wrapper: Applying owner=yilegu, memory=432834647654 bytes, and cpus=28.8 ---
+==============================================================================
+kimi_single_layer_decode v2 (K3/KDA)  experts=56 EP=16 layer_idx=5 iters=100 warmup=20 split=True moe_backend=flashinfer_mxfp4
+torch=2.13.0+cu130  dev=NVIDIA B200
+sglang=0.5.20
+==============================================================================
+[cfg] wrote /tmp/k3_cfg/config.json  experts=56 (EP=16) top_k=16 shared=2 layers=8  moe_backend=flashinfer_mxfp4 hidden_act=situ
+[moe] flashinfer_mxfp4_moe_precision=default
+[moe] runner_backend=MoeRunnerBackend.FLASHINFER_MXFP4 is_flashinfer_mxfp4=True is_deep_gemm=False
+[boot] tp=1 attn_tp=1 world=1  is_kda_layer(5)=True  dtype=torch.bfloat16
+[layer] mxfp4 quant_config=Mxfp4Config quant_format=None
+[layer] UnquantizedLinearMethod from sglang.srt.layers.quantization.unquant
+[layer] patched Mxfp4Config.get_quant_method: LinearBase -> bf16 unquantized fallback
+[layer] KimiK3DecoderLayer(layer_idx=5): self_attn=KimiK3DeltaAttention (KDA=True MLA=False)  mlp=KimiK3MoE (MoE=True)
+[layer] random-init 0.543B float params -> cuda/bf16/eval; conv_weights refreshed dev=cuda:0
+[mxfp4] experts=FusedMoE tensors:
+[mxfp4]   w13_weight                       (56, 6144, 1792)       torch.uint8 <- e2m1 randint
+[mxfp4]   w13_weight_scale                 (56, 6144, 112)        torch.uint8 <- ue8m0 fill 127
+[mxfp4]   w13_weight_bias                  (56, 6144)             torch.bfloat16 <- bias normal
+[mxfp4]   w2_weight                        (56, 3584, 1536)       torch.uint8 <- e2m1 randint
+[mxfp4]   w2_weight_scale                  (56, 3584, 96)         torch.uint8 <- ue8m0 fill 127
+[mxfp4]   w2_weight_bias                   (56, 3584)             torch.bfloat16 <- bias normal
+[mxfp4] quant_method=Mxfp4MoEMethod use_flashinfer=True use_marlin=False _fi_kernel=trtllm_sm100 precision=default
+[mxfp4] quant_method.process_weights_after_loading(experts) OK
+[moe] resolved expert method: {'class': 'Mxfp4MoEMethod', 'use_flashinfer': True, 'use_marlin': False, '_fi_kernel': 'trtllm_sm100', 'flashinfer_mxfp4_moe_precision': 'default'}
+
+---- rung adhoc ----
+[kda] KDAAttnBackend built; conv=(2, 3, 36864)/torch.bfloat16 temporal=(2, 96, 128, 128)/torch.float32 state=13.03MB/slot-set
+/opt/sglang/lib/python3.12/site-packages/triton/language/core.py:2284: UserWarning: tl.make_block_ptr is deprecated. Use TensorDescriptor or tl.make_tensor_descriptor instead.
+  warn("tl.make_block_ptr is deprecated. Use TensorDescriptor or tl.make_tensor_descriptor instead.")
+[time] B=    1 L=     4096  us/step=  1192.06  us/tok=1192.064  state=13.0MB  peak=4.33GB  finite=True  shape=[1, 7168]  attn=335.2us moe=615.7us norms=35.7us
+
+==============================================================================
+rung            B   seq_len    us/step    us/tok  state_MB  status
+adhoc           1      4096    1192.06  1192.064      13.0  ok  attn=335.2 moe=615.7 norms=35.7
+==============================================================================
+[out] wrote /work/kimi_single_layer/result_mxfp4_smoke.json
+[rank0]:[W922 05:39:22.965270267 ProcessGroupNCCL.cpp:1624] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())
+==== done; json -> /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/kimi_single_layer/result_20260921_223847.json ====

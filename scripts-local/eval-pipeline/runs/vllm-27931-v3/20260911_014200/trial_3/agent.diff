@@ -1,0 +1,39 @@
+diff --git a/simulator/src/arch/llama3_dense_vllm_before.rs b/simulator/src/arch/llama3_dense_vllm_before.rs
+index 2e89ba7..9a52d26 100644
+--- a/simulator/src/arch/llama3_dense_vllm_before.rs
++++ b/simulator/src/arch/llama3_dense_vllm_before.rs
+@@ -9,10 +9,10 @@ pub struct BeforeRecipe;
+ 
+ impl common::Recipe for BeforeRecipe {
+     const BACKEND: &'static str = "vllm_cuda";
+-    const VEC_SIZE: u32 = 1;
++    const VEC_SIZE: u32 = 8;
+     const BLOCK_SIZE_THRESHOLD: u32 = 256;
+     const BLOCK_SIZE_SMALL_CAP: u32 = 1024;
+-    const BLOCK_SIZE_LARGE_CAP: u32 = 1024;
++    const BLOCK_SIZE_LARGE_CAP: u32 = 256;
+     const LABEL: &'static str = "llama3_dense_vllm_before";
+ }
+ 
+@@ -66,10 +66,10 @@ mod tests {
+         assert_eq!(cfgs.attn.backends, vec!["fa2"]);
+         assert_eq!(cfgs.attn.kv_cache_append_backends, vec!["torch"]);
+         assert_eq!(cfgs.input_norm.backends, vec!["vllm_cuda"]);
+-        assert_eq!(cfgs.input_norm.vec_size, 1);
++        assert_eq!(cfgs.input_norm.vec_size, 8);
+         assert_eq!(cfgs.input_norm.block_size_threshold, 256);
+         assert_eq!(cfgs.input_norm.block_size_small_cap, 1024);
+-        assert_eq!(cfgs.input_norm.block_size_large_cap, 1024);
++        assert_eq!(cfgs.input_norm.block_size_large_cap, 256);
+         assert_eq!(cfgs.input_norm.hidden, 4096);
+         assert_eq!(cfgs.residual_pre_norm.backends, vec!["vllm_external"]);
+         assert_eq!(cfgs.post_attn.residual_norm_backends, vec!["vllm_external"]);
+@@ -226,7 +226,7 @@ mod tests {
+         };
+         assert_eq!(
+             before_dispatch.iter().map(fields).collect::<Vec<_>>(),
+-            vec![(255, 1024, 1), (256, 1024, 1), (4096, 1024, 1)]
++            vec![(255, 512, 8), (256, 256, 8), (4096, 256, 8)]
+         );
+     }
+ }

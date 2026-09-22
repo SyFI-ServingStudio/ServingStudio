@@ -1,0 +1,75 @@
+{
+  "trial": 1,
+  "wid": "w_31e2e24aa68d",
+  "issue": "sglang-30947-v3",
+  "ts": 1789117424.82191,
+  "baseline_commit": "3f37f3836600fb9a0df6d270e6e420123a885a4f",
+  "conversation_id": "454d8bd03b6f",
+  "agent_seconds": 1192.2,
+  "agent_final": "Completed on branch `codex/qwen2-sglang-draft-topk1-triton`, commit `abf3853`.\n\nDiagnosis: `unified.draft_topk1` used eager Torch postprocessing (`argmax` plus intermediate/list concatenation). In case 0, simulated R0 was 21.826 \u00b5s versus R5/R6/R7 0.15207 \u00b5s, or 143.527x over the roofline, with a 21.674 \u00b5s gap (`pred.casev0.optimality-kernel-ladder`). The raw KV-append outlier had no cached B200 efficient backend, so it was not eligible under the no-GPU constraint.\n\nFix: changed [`qwen2_dense_sglang_before.rs`](simulator/src/arch/qwen2_dense_sglang_before.rs:11) from `torch` to the warm B200 `triton` backend. Triton uses the fused reduction/postprocessing path. Comments and the focused topology expectation were updated; model semantics, necessary work, hardware limits, and leaf topology were unchanged.\n\nEvidence: after resource `p_c2aca581465149a5aebdfc107fe24d8e` ran cache-only with `CUDA_VISIBLE_DEVICES=''` and completed four cases in [`logs/eval_after_run`](logs/eval_after_run/prediction.meta.json).\n\n- Case 0: R0 21.826 -> 8.341 \u00b5s; R5/R6/R7 remain 0.15207 \u00b5s; ratio 143.527x -> 54.851x (`pred.casev0.optimality-kernel-ladder`).\n- Case 1: R0 28.839 -> 12.263 \u00b5s; ratio 11.853x -> 5.040x (`pred.casev1.optimality-kernel-ladder`).\n- Case 2: R0 21.826 -> 8.341 \u00b5s; ratio 143.527x -> 54.851x (`pred.casev2.optimality-kernel-ladder`).\n- Case 3: R0 22.799 -> 9.946 \u00b5s; ratio 29.985x -> 13.081x (`pred.casev3.optimality-kernel-ladder`).\n\nThe case-0 full-scope R5, segmented R6, and fused R7 floors are unchanged at 36.3632, 35.8050, and 29.5450 \u00b5s respectively (`pred.casev0.optimality-breakdown`). Analyzer cost-tree reads show the same 14 leaves; only the draft backend changes (`pred.casev0.operationv0.cost-tree`).\n\nValidation passed: `cargo test -p simulator qwen2_dense_sglang_common` (4/4) and `git diff --check`. `rustfmt` was unavailable. The remaining gap is the measured Triton dispatch overhead; no unprofiled backend or artificial roofline clamp was introduced.",
+  "gate": {
+    "pass": true,
+    "checks": [
+      {
+        "name": "structural.required_leaves_present",
+        "pass": true,
+        "detail": "required=['unified.draft_topk1'] leaves=['unified.draft_topk1']"
+      },
+      {
+        "name": "structural.leaves_exact",
+        "pass": true,
+        "detail": "expected=['unified.draft_topk1'] got=['unified.draft_topk1']"
+      },
+      {
+        "name": "metric.r0_measured.near_after",
+        "pass": true,
+        "detail": "val=3.8891e-05 after=3.8891e-05 rel=0.000<= 0.25"
+      },
+      {
+        "name": "metric.r0_measured.below_before",
+        "pass": true,
+        "detail": "val=3.8891e-05 <= before*0.7=6.6703e-05"
+      },
+      {
+        "name": "necessary.unchanged",
+        "pass": true,
+        "detail": "val=3.4976e-06 before=3.4976e-06 rel<= 0.1"
+      },
+      {
+        "name": "unchanged.r5_hardware_limit",
+        "pass": true,
+        "detail": "val=3.4976e-06 before=3.4976e-06 rel<= 0.1"
+      }
+    ],
+    "predict_rc": 0,
+    "analyze_rc": 0,
+    "scoped_leaves": [
+      "unified.draft_topk1"
+    ]
+  },
+  "judge": {
+    "matches_root_cause": true,
+    "identified_operator": "unified.draft_topk1",
+    "same_effect_fix": true,
+    "score": 1.0,
+    "reasoning": "The report independently identifies the draft top-k=1 eager multi-launch bottleneck and changes that operator from Torch to a fused Triton backend while preserving its computation and semantics.",
+    "_conversation_id": "ed2c416b8263"
+  },
+  "trajectory": {
+    "conversation_id": "454d8bd03b6f",
+    "events_scanned": 186,
+    "hard_fail": false,
+    "n_hard": 0,
+    "n_soft": 1,
+    "flags": [
+      {
+        "category": "softness.read_after_arch",
+        "severity": "soft",
+        "ts": "2026-09-11T09:11:10Z",
+        "event": "codex.tool_call",
+        "excerpt": "/src/arch/qwen2_dense_sglang_before.rs; sed -n '1,120p' simulator/src/arch/qwen3_dense_vllm_before.rs; sed -n '1,120p' simulator/src/arch/qwen3_dense_vllm_after.rs\""
+      }
+    ]
+  },
+  "correct": true
+}

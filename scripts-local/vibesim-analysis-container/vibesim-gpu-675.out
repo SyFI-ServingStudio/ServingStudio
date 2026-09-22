@@ -1,0 +1,19 @@
+==== slurm_gpu.sh on cayenne job=675 ====
+CUDA_VISIBLE_DEVICES=0
+allocated GPU UUID(s): GPU-0ea1b726-ae19-842c-29f2-3933b438b01f
+0, GPU-0ea1b726-ae19-842c-29f2-3933b438b01f, 0 MiB
+==== exec: ./validate_sglang_capture.sh ====
+==== sglang capture validation: img=lmsysorg/sglang:latest target=model.layers.0.input_layernorm gpu="device=GPU-0ea1b726-ae19-842c-29f2-3933b438b01f" ====
+--- Wrapper: Applying owner=yilegu, memory=432834647654 bytes, and cpus=28.8 ---
+/usr/local/lib/python3.12/dist-packages/torchao/quantization/quant_api.py:1731: SyntaxWarning: invalid escape sequence '\.'
+  """Configuration class for applying different quantization configs to modules or parameters based on their fully qualified names (FQNs).
+appended ep patch to /sgl-workspace/sglang/python/sglang/srt/managers/scheduler.py
+==================== CAPTURE (golden) ====================
+CAPTURE target=model.layers.0.input_layernorm kind=module latency=9.723us/call inputs=[{'shape': [8, 1024], 'stride': [1024, 1], 'dtype': 'torch.bfloat16', 'contiguous': True}]
+saved golden -> /raid/yilegu/eval_goldens/sglang_mech_input_layernorm.pt
+JSON {"latency_us": 9.723360061645508, "input_meta": [{"shape": [8, 1024], "stride": [1024, 1], "dtype": "torch.bfloat16", "contiguous": true}], "golden_path": "/raid/yilegu/eval_goldens/sglang_mech_input_layernorm.pt", "target": "model.layers.0.input_layernorm", "kind": "module", "framework": "sglang", "tokens": 8}
+==================== REPLAY (correctness + timing) ====================
+REPLAY target=model.layers.0.input_layernorm kind=module latency=10.094us/call
+CHECK {"max_abs_err": 0.0, "nan": false, "pass": true}
+JSON {"latency_us": 10.093610763549805, "correctness": {"max_abs_err": 0.0, "nan": false, "pass": true}, "target": "model.layers.0.input_layernorm", "kind": "module", "framework": "sglang", "tokens": 8}
+==== done -> /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/sglang_capture_validate ====

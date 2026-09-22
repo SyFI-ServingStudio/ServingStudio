@@ -1,0 +1,91 @@
+# syntax=docker/dockerfile:1.7
+
+ARG CUDA_VERSION=12.9.1
+ARG BUILD_BASE_IMAGE=nvidia/cuda:${CUDA_VERSION}-devel-ubuntu20.04
+FROM ${BUILD_BASE_IMAGE}
+
+ARG CUDA_VERSION
+ARG PYTHON_VERSION=3.12
+
+ARG SOURCE_REPOSITORY
+ARG SOURCE_COMMIT
+ARG CASE_ID
+ARG CASE_VARIANT
+ARG FRAMEWORK
+ARG PR_NUMBER
+ARG PR_URL
+ARG PROJECT_REPOSITORY
+ARG TARGET_PLATFORM=linux/amd64
+
+ARG GPU_ARCHITECTURES
+ARG MAX_JOBS=2
+ARG NVCC_THREADS=8
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    UV_HTTP_TIMEOUT=500 \
+    UV_INDEX_STRATEGY=unsafe-best-match \
+    UV_LINK_MODE=copy \
+    VIRTUAL_ENV=/opt/venv \
+    PATH=/opt/venv/bin:/root/.local/bin:${PATH} \
+    TORCH_CUDA_ARCH_LIST=${GPU_ARCHITECTURES} \
+    MAX_JOBS=${MAX_JOBS} \
+    NVCC_THREADS=${NVCC_THREADS} \
+    VLLM_TARGET_DEVICE=cuda \
+    VLLM_DOCKER_BUILD_CONTEXT=1
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+# Mirror the selected upstream Dockerfile's Ubuntu 20.04, GCC 10, uv-managed
+# Python 3.12, CUDA requirements, and native wheel-build flow.
+RUN echo 'tzdata tzdata/Areas select Etc' | debconf-set-selections \
+    && echo 'tzdata tzdata/Zones/Etc select UTC' | debconf-set-selections \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential ccache curl git python3-pip software-properties-common sudo tzdata \
+    && apt-get install -y --no-install-recommends gcc-10 g++-10 \
+    && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-10 110 \
+        --slave /usr/bin/g++ g++ /usr/bin/g++-10 \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl -LsSf https://astral.sh/uv/install.sh | sh \
+    && uv venv /opt/venv --python "${PYTHON_VERSION}" \
+    && ln -sf /opt/venv/bin/python3 /usr/local/bin/python3 \
+    && ln -sf /opt/venv/bin/pip /usr/local/bin/pip
+
+WORKDIR /workspace/vllm
+
+RUN test -n "${SOURCE_REPOSITORY}" \
+    && [[ "${SOURCE_COMMIT}" =~ ^[0-9a-f]{40}$ ]] \
+    && git init . \
+    && git remote add origin "${SOURCE_REPOSITORY}" \
+    && git fetch --depth=1 origin "${SOURCE_COMMIT}" \
+    && git checkout --detach FETCH_HEAD \
+    && test "$(git rev-parse HEAD)" = "${SOURCE_COMMIT}"
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --python /opt/venv/bin/python3 -r requirements/cuda.txt \
+      --extra-index-url "https://download.pytorch.org/whl/cu$(echo "${CUDA_VERSION}" | cut -d. -f1,2 | tr -d '.')" \
+    && uv pip install --python /opt/venv/bin/python3 -r requirements/build.txt \
+      --extra-index-url "https://download.pytorch.org/whl/cu$(echo "${CUDA_VERSION}" | cut -d. -f1,2 | tr -d '.')"
+
+RUN --mount=type=cache,target=/root/.cache/ccache \
+    --mount=type=cache,target=/root/.cache/uv \
+    rm -rf .deps \
+    && mkdir -p .deps dist \
+    && python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38 \
+    && uv pip install --python /opt/venv/bin/python3 dist/*.whl \
+    && (cd /tmp && python3 -c 'import pathlib, vllm; root = pathlib.Path(vllm.__file__).resolve(); assert str(root).startswith("/opt/venv/"); print(root)')
+
+LABEL org.opencontainers.image.source="${PROJECT_REPOSITORY}" \
+      org.opencontainers.image.url="${PR_URL}" \
+      org.opencontainers.image.revision="${SOURCE_COMMIT}" \
+      org.opencontainers.image.version="${CASE_ID}-${CASE_VARIANT}" \
+      io.roofline-agent.case-id="${CASE_ID}" \
+      io.roofline-agent.framework="${FRAMEWORK}" \
+      io.roofline-agent.pr="${PR_NUMBER}" \
+      io.roofline-agent.variant="${CASE_VARIANT}" \
+      io.roofline-agent.upstream-repository="${SOURCE_REPOSITORY}" \
+      io.roofline-agent.platform="${TARGET_PLATFORM}" \
+      io.roofline-agent.cuda="${CUDA_VERSION}" \
+      io.roofline-agent.gpu-architectures="${GPU_ARCHITECTURES}"
+
+CMD ["python3", "-c", "import vllm; print(vllm.__version__)"]

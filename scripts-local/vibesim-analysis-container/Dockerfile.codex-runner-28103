@@ -1,0 +1,18 @@
+# Combined real-repro runner for case vllm-28103.
+# Base = the B200 before-image (full vLLM CUDA build toolchain: nvcc, cmake cache, ccache,
+# /opt/venv wheel). We layer node + codex on top so a Codex agent can, inside ONE container:
+#   1. read the VibeSim diagnosis oracle over HTTP,
+#   2. edit the real vLLM kernel + wrapper in /workspace/vllm,
+#   3. incremental-recompile (`python setup.py build_ext --inplace`, ~110s),
+#   4. run the single-layer profiler / bench on GPU 3.
+# node+codex are copied wholesale from the working UI runner image (self-contained /opt/node,
+# node v20.18.1 + @openai/codex 0.144.0) -> no npm/network needed at build time.
+# CODEX_HOME (config.toml + auth.json + models_cache.json) is MOUNTED at runtime, never baked.
+FROM rga-local/vllm-pr-28103:b200-before
+
+COPY --from=vibesim-ui-codex-runner:yilegu /opt/node /opt/node
+ENV PATH=/opt/node/bin:$PATH
+
+# codex writes rollout/session state under CODEX_HOME; default to a writable mount point.
+ENV CODEX_HOME=/root/.codex-eval
+RUN ln -sf /opt/node/bin/codex /usr/local/bin/codex && node --version && codex --version

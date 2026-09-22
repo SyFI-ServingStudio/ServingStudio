@@ -1,0 +1,46 @@
+{
+  "sglang_version": "0.5.20",
+  "moe_backend": "flashinfer_mxfp4",
+  "hidden_act": "situ",
+  "moe_method": {
+    "class": "Mxfp4MoEMethod",
+    "use_flashinfer": true,
+    "use_marlin": false,
+    "_fi_kernel": "trtllm_sm100",
+    "flashinfer_mxfp4_moe_precision": "default"
+  },
+  "experts": 56,
+  "ep": 16,
+  "layer_idx": 4,
+  "attn_type": "mla",
+  "num_attention_heads": 96,
+  "config": {
+    "num_experts": 56,
+    "num_experts_per_token": 16,
+    "num_shared_experts": 2,
+    "moe_intermediate_size": 3072,
+    "routed_expert_hidden_size": 3584,
+    "hidden_size": 7168
+  },
+  "mla": {
+    "num_attention_heads": 96,
+    "kv_lora_rank": 512,
+    "qk_nope_head_dim": 128,
+    "qk_rope_head_dim": 64,
+    "v_head_dim": 128,
+    "q_lora_rank": 1536,
+    "kv_cache_dim": 576
+  },
+  "kda": null,
+  "points": [
+    {
+      "B": 1,
+      "seq_len": 8192,
+      "ok": false,
+      "attn_type": "mla",
+      "error": "AttributeError: 'NoneType' object has no attribute 'dtype'",
+      "traceback": "Traceback (most recent call last):\n  File \"/work/kimi_single_layer_decode.py\", line 743, in time_point\n    out = call_layer(layer, fb, positions, hidden)\n          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/work/kimi_single_layer_decode.py\", line 678, in call_layer\n    return layer.forward(\n           ^^^^^^^^^^^^^^\n  File \"/sgl-workspace/sglang/python/sglang/srt/models/kimi_k3.py\", line 2623, in forward\n    hidden_states = self._run_self_attn(\n                    ^^^^^^^^^^^^^^^^^^^^\n  File \"/sgl-workspace/sglang/python/sglang/srt/models/kimi_k3.py\", line 2557, in _run_self_attn\n    return self._run_self_attn_inner(\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/sgl-workspace/sglang/python/sglang/srt/models/kimi_k3.py\", line 2580, in _run_self_attn_inner\n    result = self.self_attn(\n             ^^^^^^^^^^^^^^^\n  File \"/opt/sglang/lib/python3.12/site-packages/torch/nn/modules/module.py\", line 1778, in _wrapped_call_impl\n    return self._call_impl(*args, **kwargs)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/sglang/lib/python3.12/site-packages/torch/nn/modules/module.py\", line 1789, in _call_impl\n    return forward_call(*args, **kwargs)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/sgl-workspace/sglang/python/sglang/srt/models/kimi_k3.py\", line 2295, in forward\n    return super().forward(\n           ^^^^^^^^^^^^^^^^\n  File \"/sgl-workspace/sglang/python/sglang/srt/models/deepseek_v2.py\", line 2049, in forward\n    s = self.forward_prepare(\n        ^^^^^^^^^^^^^^^^^^^^^\n  File \"/sgl-workspace/sglang/python/sglang/srt/models/deepseek_v2.py\", line 2107, in forward_prepare\n    inner_state = self.forward_absorb_prepare(\n                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/sgl-workspace/sglang/python/sglang/srt/models/deepseek_common/attention_forward_methods/forward_mla.py\", line 544, in forward_absorb_prepare\n    elif self.w_kc.dtype == torch.float8_e4m3fn:\n         ^^^^^^^^^^^^^^^\nAttributeError: 'NoneType' object has no attribute 'dtype'\n",
+      "rung": "adhoc"
+    }
+  ]
+}

@@ -1,0 +1,97 @@
+{
+  "trial": 3,
+  "wid": "w_f2c002bbcd89",
+  "issue": "sglang-30947",
+  "ts": 1789097947.00601,
+  "baseline_commit": "632d0a750cc4d561661fbc389640a5168ddb0671",
+  "conversation_id": "4e4e900056e8",
+  "agent_seconds": 2110.3,
+  "agent_final": "Implemented and verified on commit `b45d66f` (`task/qwen2-kv-cache-fusion`).\n\n**Diagnosis**\n\nThe outlier was `unified.attn.attn.kv_cache_append`. In the baseline case-0 simulated prediction, R0 was `0.00031388555839657786` GPU-s versus R5 `1.43605e-8` GPU-s, about `21,858x` over the hardware limit with a `0.00031387119789657783` GPU-s gap; target R6 was `7.168000000000001e-9` GPU-s (`p_b3c0f94949d64b94935f46da44dee8ff`, `pred.casev0.optimality-kernel-ladder`).\n\nThe Qwen2 SGLang path selected the profile-backed `torch` implementation. Its runner performs two indexed K/V cache writes, so eager dispatch overhead dominates tiny-token workloads. The warm profile DB has B200 Torch rows but no B200 `vllm_cuda` rows, so no GPU profiling or uncached backend substitution was used.\n\n**Fix**\n\n- [flashinfer.rs](/workspace/simulator/src/op/attention/flashinfer.rs:118) adds a scoped `B200Roofline` KV-append leaf. It preserves `kind: kv_cache_append`, the same `num_tokens` input and K/V plus int64 slot-map traffic, then prices that traffic at the B200 catalog bandwidth of 8,000 GB/s using the fused `reshape_and_cache_flash_kernel` representation.\n- [qwen2_dense_sglang_common.rs](/workspace/simulator/src/arch/qwen2_dense_sglang_common.rs:42), [before recipe](/workspace/simulator/src/arch/qwen2_dense_sglang_before.rs:9), and [attn_local.rs](/workspace/simulator/src/worklet/attn_local.rs:81) propagate an explicit recipe selector. Only Qwen2-before on B200 selects the fused leaf; generic recipes and Qwen2-after remain profile-backed.\n- [attention/mod.rs](/workspace/simulator/src/op/attention/mod.rs:1) exports the selector. The fused leaf emits explicit implementation metadata and exact traffic bytes without changing model-work or Analyzer logic.\n\n**Evidence**\n\nAll values below are simulated predictions in GPU-s for the folded operator scope:\n\n| Case | Before R0 | After R0 | R5 before -> after | Target R6 before -> after |\n|---|---:|---:|---:|---:|\n| 0 | `3.1388555839657786e-4` | `1.4363999298439011e-8` | `1.43605e-8` -> `1.4363999298439011e-8` | `7.168000000000001e-9` -> same |\n| 1 | `3.417271189391613e-4` | `2.2982398877502418e-7` | `2.29824e-7` -> `2.2982398877502418e-7` | `1.1468800000000001e-7` -> same |\n| 2 | `3.4364964812994003e-4` | `1.8385919102001934e-6` | `1.838592e-6` -> `1.8385919102001934e-6` | `9.175040000000001e-7` -> same |\n| 3 | `3.4361718222498895e-4` | `1.8960479646921158e-6` | `1.896048e-6` -> `1.8960479646921158e-6` | `9.461759999999999e-7` -> same |\n\nThe after prediction is `p_d3f109699f3541f7a04858740c8e9d0e`; its target R0 equals R5 in every case (`pred.casev0.optimality-kernel-ladder`, `pred.casev1.optimality-kernel-ladder`, `pred.casev2.optimality-kernel-ladder`, `pred.casev3.optimality-kernel-ladder`). Scope R6/R7 remained unchanged; for case 0 they are `0.00003580496561742222` and `0.0000295449659872` before and after.\n\nThe tiny displayed R5 difference is one byte: the profiled baseline's f32 rate-time derivation displays 4,103 bytes, while the new leaf emits the exact 4,104-byte traffic formula. This is a 0.024% numeric-rounding difference; the physical roofline, R6/R7, leaf count, leaf order, node topology, labels, and case inputs are unchanged (`pred.casev0.operationv0.cost-tree`).\n\nBoth predictions completed with `CUDA_VISIBLE_DEVICES=` and the warm [profile.db](/workspace/profiling/profile.db); its mtime and size stayed `2026-08-23 13:21:45.333743625 +0000`, `14905344` bytes. Cost manifests retain all 14 leaf identities and identical nodes/labels. Validation: 898 simulator library tests passed, 6 ignored; focused attention/Qwen2/worklet tests passed; `git diff --check` is clean. `cargo fmt --check` could not run because `cargo-fmt` is not installed. No real-GPU performance claim is made.",
+  "gate": {
+    "pass": false,
+    "checks": [
+      {
+        "name": "structural.required_leaves_present",
+        "pass": true,
+        "detail": "required=['unified.draft_topk1'] leaves=['unified.draft_topk1']"
+      },
+      {
+        "name": "structural.leaves_exact",
+        "pass": true,
+        "detail": "expected=['unified.draft_topk1'] got=['unified.draft_topk1']"
+      },
+      {
+        "name": "metric.r0_measured.near_after",
+        "pass": false,
+        "detail": "val=9.5290e-05 after=3.8891e-05 rel=1.450<= 0.25"
+      },
+      {
+        "name": "metric.r0_measured.below_before",
+        "pass": false,
+        "detail": "val=9.5290e-05 <= before*0.7=6.6703e-05"
+      },
+      {
+        "name": "necessary.unchanged",
+        "pass": true,
+        "detail": "val=3.4976e-06 before=3.4976e-06 rel<= 0.1"
+      },
+      {
+        "name": "unchanged.r5_hardware_limit",
+        "pass": true,
+        "detail": "val=3.4976e-06 before=3.4976e-06 rel<= 0.1"
+      }
+    ],
+    "predict_rc": 0,
+    "analyze_rc": 0,
+    "scoped_leaves": [
+      "unified.draft_topk1"
+    ]
+  },
+  "judge": {
+    "matches_root_cause": false,
+    "identified_operator": "kv_cache_append",
+    "same_effect_fix": false,
+    "score": 0.0,
+    "reasoning": "The agent identified kv_cache_append, but the ground-truth redundant work is the eager draft_topk1 sampling chain. Its KV-cache fusion/pricing change does not remove that draft sampling work.",
+    "_conversation_id": "1530b887ace6"
+  },
+  "correct": false,
+  "trajectory": {
+    "conversation_id": "4e4e900056e8",
+    "events_scanned": 292,
+    "hard_fail": false,
+    "n_hard": 0,
+    "n_soft": 4,
+    "flags": [
+      {
+        "category": "softness.read_after_arch",
+        "severity": "soft",
+        "ts": "2026-09-11T03:43:29Z",
+        "event": "codex.tool_call",
+        "excerpt": "mon.rs && printf '\\\\n-- after --\\\\n' && sed -n '1,360p' simulator/src/arch/qwen2_dense_sglang_after.rs\""
+      },
+      {
+        "category": "softness.read_after_arch",
+        "severity": "soft",
+        "ts": "2026-09-11T03:46:01Z",
+        "event": "codex.tool_call",
+        "excerpt": "en2_dense_sglang_before_unified.json && sed -n '1,250p' model/work/location_maps/qwen2_dense_sglang_after_unified.json && sed -n '1,260p' model/work/models/qwen2.py\""
+      },
+      {
+        "category": "softness.read_after_arch",
+        "severity": "soft",
+        "ts": "2026-09-11T03:51:48Z",
+        "event": "codex.tool_call",
+        "excerpt": "src/arch/qwen2_dense_sglang_before.rs | sed -n '1,180p'; nl -ba simulator/src/arch/qwen2_dense_sglang_after.rs | sed -n '1,180p'\""
+      },
+      {
+        "category": "softness.read_after_arch",
+        "severity": "soft",
+        "ts": "2026-09-11T03:54:53Z",
+        "event": "codex.tool_call",
+        "excerpt": "src/arch/qwen2_dense_sglang_before.rs | sed -n '1,80p'; nl -ba simulator/src/arch/qwen2_dense_sglang_after.rs | sed -n '1,80p'\""
+      }
+    ]
+  },
+  "leftover_reads_pre_predict": []
+}

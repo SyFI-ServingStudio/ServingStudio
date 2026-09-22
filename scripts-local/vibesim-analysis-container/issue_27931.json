@@ -1,0 +1,12 @@
+{
+  "_note": "Floor-measurement config for vllm-27931 (rms_norm scalar->vec8). Shelved as a NULL: the per-module gap sits below the measured launch floor (before~=after). Kept so measure_floor.sh can DEMONSTRATE the per-case floor determination (contrast with 28103, which resolves). No answer-key targets / recover_pass because it is not a runnable eval case.",
+  "case": "27931",
+  "framework": "vllm",
+  "model_snap": "/raid/yilegu/models/hub/models--Qwen--Qwen3-0.6B/snapshots/c1899de289a04d12100db370d81485cdf75e47ca",
+  "targets": ["model.layers.0.input_layernorm"],
+  "before_image": "rga-local/vllm-pr-27931:b200-before",
+  "after_image": "rga-local/vllm-pr-27931:b200-after",
+  "tokens": 8,
+  "iters": 3000,
+  "render": { "FRAMEWORK": "vllm" }
+}

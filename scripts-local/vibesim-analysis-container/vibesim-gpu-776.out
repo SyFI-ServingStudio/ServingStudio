@@ -1,0 +1,69 @@
+==== slurm_gpu.sh on cayenne job=776 ====
+CUDA_VISIBLE_DEVICES=0
+allocated GPU UUID(s): GPU-c09878e8-fb6a-ff0c-3c33-05993065d679
+0, GPU-c09878e8-fb6a-ff0c-3c33-05993065d679, 0 MiB
+==== exec: ./run_kimi_single_layer.sh --moe-backend deep_gemm --split --only b_ctxindep,c_sweep --json-out /work/kimi_single_layer/result_deepgemm_sweep.json ====
+==== kimi_single_layer: img=lmsysorg/sglang:v0.5.20 gpu="device=GPU-c09878e8-fb6a-ff0c-3c33-05993065d679" args=--moe-backend deep_gemm --split --only b_ctxindep,c_sweep --json-out /work/kimi_single_layer/result_deepgemm_sweep.json ====
+--- Wrapper: Applying owner=yilegu, memory=432834647654 bytes, and cpus=28.8 ---
+==============================================================================
+kimi_single_layer_decode v2 (K3/KDA)  experts=56 EP=16 layer_idx=5 iters=100 warmup=20 split=True moe_backend=deep_gemm
+torch=2.13.0+cu130  dev=NVIDIA B200
+sglang=0.5.20
+==============================================================================
+[cfg] wrote /tmp/k3_cfg/config.json  experts=56 (EP=16) top_k=16 shared=2 layers=8  moe_backend=deep_gemm hidden_act=situ
+[moe] flashinfer_mxfp4_moe_precision=default
+[moe] runner_backend=MoeRunnerBackend.DEEP_GEMM is_flashinfer_mxfp4=False is_deep_gemm=True
+[boot] tp=1 attn_tp=1 world=1  is_kda_layer(5)=True  dtype=torch.bfloat16
+[layer] mxfp4 quant_config=Mxfp4Config quant_format=None
+[layer] UnquantizedLinearMethod from sglang.srt.layers.quantization.unquant
+[layer] patched Mxfp4Config.get_quant_method: LinearBase -> bf16 unquantized fallback
+[layer] KimiK3DecoderLayer(layer_idx=5): self_attn=KimiK3DeltaAttention (KDA=True MLA=False)  mlp=KimiK3MoE (MoE=True)
+[layer] random-init 0.543B float params -> cuda/bf16/eval; conv_weights refreshed dev=cuda:0
+[mxfp4] experts=FusedMoE tensors:
+[mxfp4]   w13_weight                       (56, 6144, 1792)       torch.uint8 <- e2m1 randint
+[mxfp4]   w13_weight_scale                 (56, 6144, 112)        torch.uint8 <- ue8m0 fill 127
+[mxfp4]   w13_weight_bias                  (56, 6144)             torch.bfloat16 <- bias normal
+[mxfp4]   w2_weight                        (56, 3584, 1536)       torch.uint8 <- e2m1 randint
+[mxfp4]   w2_weight_scale                  (56, 3584, 96)         torch.uint8 <- ue8m0 fill 127
+[mxfp4]   w2_weight_bias                   (56, 3584)             torch.bfloat16 <- bias normal
+[mxfp4] quant_method=Mxfp4MoEMethod use_flashinfer=False use_marlin=False _fi_kernel=None precision=default
+[mxfp4] quant_method.process_weights_after_loading(experts) OK
+[moe] resolved expert method: {'class': 'Mxfp4MoEMethod', 'use_flashinfer': False, 'use_marlin': False, '_fi_kernel': None, 'flashinfer_mxfp4_moe_precision': 'default'}
+
+---- rung b_ctxindep ----
+[kda] KDAAttnBackend built; conv=(2, 3, 36864)/torch.bfloat16 temporal=(2, 96, 128, 128)/torch.float32 state=13.03MB/slot-set
+/opt/sglang/lib/python3.12/site-packages/triton/language/core.py:2284: UserWarning: tl.make_block_ptr is deprecated. Use TensorDescriptor or tl.make_tensor_descriptor instead.
+  warn("tl.make_block_ptr is deprecated. Use TensorDescriptor or tl.make_tensor_descriptor instead.")
+Entering DeepGEMM JIT Pre-Compile session. It may take a long time (typically 10-20 mins) if you have not run `sglang.compile_deep_gemm`. It is recommended to run `sglang.compile_deep_gemm` with same args as `sglang.launch_server` for pre-compilation to reduce the overhead if you have not run it before. For example: `python3 -m sglang.compile_deep_gemm --model deepseek-ai/DeepSeek-V3 --tp 8 --trust-remote-code`
+DeepGEMM warmup:   0%|          | 0/16384 [00:00<?, ?it/s]DeepGEMM warmup:   0%|          | 1/16384 [00:02<12:42:27,  2.79s/it]DeepGEMM warmup:   7%|▋         | 1088/16384 [00:02<00:28, 529.37it/s]DeepGEMM warmup:  12%|█▏        | 2009/16384 [00:02<00:13, 1093.60it/s]DeepGEMM warmup:  18%|█▊        | 2930/16384 [00:03<00:07, 1783.11it/s]DeepGEMM warmup:  23%|██▎       | 3850/16384 [00:03<00:04, 2585.65it/s]DeepGEMM warmup:  29%|██▉       | 4770/16384 [00:03<00:03, 3471.33it/s]DeepGEMM warmup:  35%|███▍      | 5691/16384 [00:03<00:02, 4392.13it/s]DeepGEMM warmup:  40%|████      | 6612/16384 [00:03<00:01, 5290.60it/s]DeepGEMM warmup:  46%|████▌     | 7533/16384 [00:03<00:01, 6114.01it/s]DeepGEMM warmup:  52%|█████▏    | 8453/16384 [00:03<00:01, 6827.04it/s]DeepGEMM warmup:  57%|█████▋    | 9374/16384 [00:03<00:00, 7416.52it/s]DeepGEMM warmup:  63%|██████▎   | 10295/16384 [00:03<00:00, 7885.25it/s]DeepGEMM warmup:  68%|██████▊   | 11215/16384 [00:03<00:00, 8242.94it/s]DeepGEMM warmup:  74%|███████▍  | 12135/16384 [00:04<00:00, 8509.26it/s]DeepGEMM warmup:  80%|███████▉  | 13055/16384 [00:04<00:00, 8704.34it/s]DeepGEMM warmup:  85%|████████▌ | 13975/16384 [00:04<00:00, 8846.27it/s]DeepGEMM warmup:  91%|█████████ | 14896/16384 [00:04<00:00, 8950.03it/s]DeepGEMM warmup:  97%|█████████▋| 15817/16384 [00:04<00:00, 9025.78it/s]DeepGEMM warmup: 100%|██████████| 16384/16384 [00:04<00:00, 3596.75it/s]
+Entering DeepGEMM JIT Pre-Compile session. It may take a long time (typically 10-20 mins) if you have not run `sglang.compile_deep_gemm`. It is recommended to run `sglang.compile_deep_gemm` with same args as `sglang.launch_server` for pre-compilation to reduce the overhead if you have not run it before. For example: `python3 -m sglang.compile_deep_gemm --model deepseek-ai/DeepSeek-V3 --tp 8 --trust-remote-code`
+DeepGEMM warmup:   0%|          | 0/16384 [00:00<?, ?it/s]DeepGEMM warmup:   0%|          | 1/16384 [00:02<12:27:06,  2.74s/it]DeepGEMM warmup:   8%|▊         | 1291/16384 [00:02<00:23, 640.44it/s]DeepGEMM warmup:  15%|█▍        | 2415/16384 [00:02<00:10, 1342.01it/s]DeepGEMM warmup:  22%|██▏       | 3539/16384 [00:03<00:05, 2197.07it/s]DeepGEMM warmup:  28%|██▊       | 4663/16384 [00:03<00:03, 3190.25it/s]DeepGEMM warmup:  35%|███▌      | 5787/16384 [00:03<00:02, 4281.98it/s]DeepGEMM warmup:  42%|████▏     | 6911/16384 [00:03<00:01, 5411.10it/s]DeepGEMM warmup:  49%|████▉     | 8035/16384 [00:03<00:01, 6507.50it/s]DeepGEMM warmup:  56%|█████▌    | 9160/16384 [00:03<00:00, 7511.02it/s]DeepGEMM warmup:  63%|██████▎   | 10284/16384 [00:03<00:00, 8376.52it/s]DeepGEMM warmup:  70%|██████▉   | 11408/16384 [00:03<00:00, 9089.01it/s]DeepGEMM warmup:  76%|███████▋  | 12532/16384 [00:03<00:00, 9652.43it/s]DeepGEMM warmup:  83%|████████▎ | 13655/16384 [00:03<00:00, 10082.09it/s]DeepGEMM warmup:  90%|█████████ | 14779/16384 [00:04<00:00, 10405.96it/s]DeepGEMM warmup:  97%|█████████▋| 15903/16384 [00:04<00:00, 10642.79it/s]DeepGEMM warmup: 100%|██████████| 16384/16384 [00:04<00:00, 3919.94it/s] 
+[time] B=    1 L=     4096  us/step=  1148.26  us/tok=1148.256  state=13.0MB  peak=18.32GB  finite=True  shape=[1, 7168]  attn=340.4us moe=583.9us norms=34.9us
+[kda] KDAAttnBackend built; conv=(2, 3, 36864)/torch.bfloat16 temporal=(2, 96, 128, 128)/torch.float32 state=13.03MB/slot-set
+[time] B=    1 L=  1048576  us/step=  1133.66  us/tok=1133.664  state=13.0MB  peak=2.36GB  finite=True  shape=[1, 7168]  attn=340.3us moe=589.0us norms=37.0us
+
+---- rung c_sweep ----
+[kda] KDAAttnBackend built; conv=(129, 3, 36864)/torch.bfloat16 temporal=(129, 96, 128, 128)/torch.float32 state=840.13MB/slot-set
+[time] B=  128 L=     8192  us/step=  1183.84  us/tok=   9.249  state=840.1MB  peak=3.78GB  finite=True  shape=[128, 7168]  attn=517.5us moe=626.3us norms=36.9us
+[kda] KDAAttnBackend built; conv=(257, 3, 36864)/torch.bfloat16 temporal=(257, 96, 128, 128)/torch.float32 state=1673.75MB/slot-set
+[time] B=  256 L=     8192  us/step=  1211.78  us/tok=   4.734  state=1673.7MB  peak=6.25GB  finite=True  shape=[256, 7168]  attn=819.5us moe=624.0us norms=37.2us
+[kda] KDAAttnBackend built; conv=(513, 3, 36864)/torch.bfloat16 temporal=(513, 96, 128, 128)/torch.float32 state=3340.98MB/slot-set
+[time] B=  512 L=     8192  us/step=  2130.11  us/tok=   4.160  state=3341.0MB  peak=11.20GB  finite=True  shape=[512, 7168]  attn=1524.9us moe=633.1us norms=35.6us
+[kda] KDAAttnBackend built; conv=(1025, 3, 36864)/torch.bfloat16 temporal=(1025, 96, 128, 128)/torch.float32 state=6675.46MB/slot-set
+[time] B= 1024 L=     8192  us/step=  4031.84  us/tok=   3.937  state=6675.5MB  peak=21.10GB  finite=True  shape=[1024, 7168]  attn=3043.8us moe=1041.4us norms=39.0us
+[kda] KDAAttnBackend built; conv=(2049, 3, 36864)/torch.bfloat16 temporal=(2049, 96, 128, 128)/torch.float32 state=13344.40MB/slot-set
+[time] B= 2048 L=     8192  us/step=  8531.33  us/tok=   4.166  state=13344.4MB  peak=35.87GB  finite=True  shape=[2048, 7168]  attn=6814.0us moe=1888.3us norms=44.1us
+
+==============================================================================
+rung            B   seq_len    us/step    us/tok  state_MB  status
+b_ctxindep      1      4096    1148.26  1148.256      13.0  ok  attn=340.4 moe=583.9 norms=34.9
+b_ctxindep      1   1048576    1133.66  1133.664      13.0  ok  attn=340.3 moe=589.0 norms=37.0
+c_sweep       128      8192    1183.84     9.249     840.1  ok  attn=517.5 moe=626.3 norms=36.9
+c_sweep       256      8192    1211.78     4.734    1673.7  ok  attn=819.5 moe=624.0 norms=37.2
+c_sweep       512      8192    2130.11     4.160    3341.0  ok  attn=1524.9 moe=633.1 norms=35.6
+c_sweep      1024      8192    4031.84     3.937    6675.5  ok  attn=3043.8 moe=1041.4 norms=39.0
+c_sweep      2048      8192    8531.33     4.166   13344.4  ok  attn=6814.0 moe=1888.3 norms=44.1
+==============================================================================
+[out] wrote /work/kimi_single_layer/result_deepgemm_sweep.json
+[rank0]:[W922 05:42:03.822826952 ProcessGroupNCCL.cpp:1624] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())
+==== done; json -> /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/kimi_single_layer/result_20260921_224057.json ====

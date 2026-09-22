@@ -1,0 +1,13 @@
+==== slurm_gpu.sh on cayenne job=727 ====
+CUDA_VISIBLE_DEVICES=0
+allocated GPU UUID(s): GPU-c09878e8-fb6a-ff0c-3c33-05993065d679
+0, GPU-c09878e8-fb6a-ff0c-3c33-05993065d679, 0 MiB
+==== exec: ./micro_bench_21116.sh ====
+==== 21116 fusion micro-bench (DeepSeek-V3 dims, img=rga-local/sglang-pr-20469:b200-after gpu="device=GPU-c09878e8-fb6a-ff0c-3c33-05993065d679") ====
+T=   219  before  39.905+-0.565  after  15.087+-0.609  gap  24.817  floor3s  2.493  resolvable=True  x2.64  err=0
+T=   512  before  34.522+-3.601  after  16.579+-0.363  gap  17.944  floor3s 10.858  resolvable=True  x2.08  err=0
+T=  1024  before  38.916+-0.002  after  26.784+-0.450  gap  12.132  floor3s  1.350  resolvable=True  x1.45  err=0
+T=  4096  before 112.408+-0.482  after  95.199+-0.229  gap  17.209  floor3s  1.602  resolvable=True  x1.18  err=0
+T= 16384  before 434.833+-0.742  after 371.025+-0.260  gap  63.808  floor3s  2.360  resolvable=True  x1.17  err=0
+JSON_DONE
+==== done -> /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/micro_21116/micro_21116_report.json ====

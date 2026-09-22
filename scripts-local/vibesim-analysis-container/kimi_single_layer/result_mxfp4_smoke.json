@@ -1,0 +1,49 @@
+{
+  "sglang_version": "0.5.20",
+  "moe_backend": "flashinfer_mxfp4",
+  "hidden_act": "situ",
+  "moe_method": {
+    "class": "Mxfp4MoEMethod",
+    "use_flashinfer": true,
+    "use_marlin": false,
+    "_fi_kernel": "trtllm_sm100",
+    "flashinfer_mxfp4_moe_precision": "default"
+  },
+  "experts": 56,
+  "ep": 16,
+  "layer_idx": 5,
+  "config": {
+    "num_experts": 56,
+    "num_experts_per_token": 16,
+    "num_shared_experts": 2,
+    "moe_intermediate_size": 3072,
+    "routed_expert_hidden_size": 3584,
+    "hidden_size": 7168
+  },
+  "kda": {
+    "num_heads": 96,
+    "head_dim": 128,
+    "short_conv_kernel": 4,
+    "gate_lower_bound": -5.0
+  },
+  "points": [
+    {
+      "B": 1,
+      "seq_len": 4096,
+      "ok": true,
+      "out_shape": [
+        1,
+        7168
+      ],
+      "finite": true,
+      "us_step": 1192.0640468597412,
+      "us_token": 1192.0640468597412,
+      "state_mb": 13.02528,
+      "peak_gb": 4.328870912,
+      "us_attn": 335.2319896221161,
+      "us_moe": 615.6799793243408,
+      "us_norms": 35.74400022625923,
+      "rung": "adhoc"
+    }
+  ]
+}

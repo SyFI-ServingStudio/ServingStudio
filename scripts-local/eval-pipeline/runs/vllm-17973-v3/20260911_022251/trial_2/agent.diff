@@ -1,0 +1,136 @@
+diff --git a/model/work/location_maps/qwen2_5_vl_mrope_before_unified.json b/model/work/location_maps/qwen2_5_vl_mrope_before_unified.json
+index 0658ffe..1c2d3ef 100644
+--- a/model/work/location_maps/qwen2_5_vl_mrope_before_unified.json
++++ b/model/work/location_maps/qwen2_5_vl_mrope_before_unified.json
+@@ -1,11 +1,8 @@
+ {
+   "schema_version": 1,
+-  "mapping_id": "qwen2-5-vl-mrope-before-unified-v1",
++  "mapping_id": "qwen2-5-vl-mrope-before-unified-v2",
+   "arch_types": ["qwen2_5_vl_mrope_before"],
+   "locations": [
+-    {"location": "unified.mrope.rot_pos_emb", "semantics": []},
+-    {"location": "unified.mrope.get_window_index", "semantics": []},
+-    {"location": "unified.mrope.old_cu_seqlens", "semantics": []},
+     {"location": "unified.mrope.rotary_pos_emb", "semantics": [], "optional": true},
+     {"location": "unified.mrope.window_index", "semantics": [], "optional": true},
+     {"location": "unified.mrope.cu_window_seqlens", "semantics": ["mrope.cu_window_seqlens"], "optional": true},
+diff --git a/simulator/src/arch/qwen2_5_vl_mrope_before.rs b/simulator/src/arch/qwen2_5_vl_mrope_before.rs
+index fa162a1..b5bbfeb 100644
+--- a/simulator/src/arch/qwen2_5_vl_mrope_before.rs
++++ b/simulator/src/arch/qwen2_5_vl_mrope_before.rs
+@@ -1,13 +1,13 @@
+-//! Qwen2.5-VL-3B local iter-wise architecture for the legacy mRoPE path.
++//! Qwen2.5-VL-3B local iter-wise architecture for the mRoPE-before selector.
+ //!
+-//! `BeforeRecipe` fixes the mRoPE prologue to the three old device-side
+-//! ElementwiseKernel proxy leaves followed by the four H2D transfers. The
+-//! dense language decoder is shared with the after recipe.
++//! The selector keeps its historical `before` label for workload/config
++//! compatibility, but uses the warmed four-transfer mRoPE prologue. The
++//! dense language decoder is shared with the standalone legacy recipe.
+ 
+ use crate::arch::model_cfg::ModelCfg;
+ use crate::timing::{BuildError, Dim, PerfApiBridge};
+ use crate::worklet::{
+-    Qwen25VlMropeLocalBeforeResolved, Qwen25VlMropeLocalBeforeWorklet,
++    Qwen25VlMropeLocalAfterResolved, Qwen25VlMropeLocalAfterWorklet,
+     Qwen25VlMropeLocalWorkletConfig,
+ };
+ 
+@@ -15,14 +15,16 @@ use super::qwen2_5_vl_mrope_common as common;
+ 
+ pub struct BeforeRecipe;
+ 
++// Keep the historical selector name while using the warmed, transfer-only
++// mRoPE topology. The legacy proxy recipe remains a standalone worklet type.
+ impl common::Recipe for BeforeRecipe {
+-    type Worklet = Qwen25VlMropeLocalBeforeWorklet;
+-    type Resolved = Qwen25VlMropeLocalBeforeResolved;
++    type Worklet = Qwen25VlMropeLocalAfterWorklet;
++    type Resolved = Qwen25VlMropeLocalAfterResolved;
+ 
+     const LABEL: &'static str = "qwen2_5_vl_mrope_before";
+ 
+     fn resolve_mrope(cfg: &Qwen25VlMropeLocalWorkletConfig) -> Self::Resolved {
+-        Qwen25VlMropeLocalBeforeWorklet::resolve_config(cfg)
++        Qwen25VlMropeLocalAfterWorklet::resolve_config(cfg)
+     }
+ 
+     fn build_mrope(
+@@ -30,7 +32,7 @@ impl common::Recipe for BeforeRecipe {
+         resolved: Self::Resolved,
+         bridge: &PerfApiBridge,
+     ) -> Result<Self::Worklet, BuildError> {
+-        Qwen25VlMropeLocalBeforeWorklet::build(name, resolved, bridge)
++        Qwen25VlMropeLocalAfterWorklet::build(name, resolved, bridge)
+     }
+ 
+     fn compile_mrope(
+@@ -181,7 +183,7 @@ mod tests {
+     }
+ 
+     #[test]
+-    fn before_has_legacy_mrope_slots_and_expected_kv_bytes() {
++    fn before_selector_uses_optimized_mrope_slots_and_expected_kv_bytes() {
+         let cfgs = build_configs(&model(), &parallel());
+         let resolved = resolve_configs(&cfgs);
+         assert_eq!(total_kv_bytes_per_token(&resolved), 36_864);
+@@ -190,16 +192,14 @@ mod tests {
+         bridge.enable_enumerate();
+         let model = build("unified".to_string(), resolved, &bridge).unwrap();
+         let tree = model.cost_tree();
+-        assert_eq!(tree.n_slots(), 20);
++        assert_eq!(tree.n_slots(), 17);
++        assert!(tree.slots[..4].iter().all(|slot| slot.kind == "h2d_copy"));
+         assert_eq!(
+             tree.slots
+                 .iter()
+                 .map(|slot| slot.name.as_str())
+                 .collect::<Vec<_>>(),
+             [
+-                "unified.mrope.rot_pos_emb",
+-                "unified.mrope.get_window_index",
+-                "unified.mrope.old_cu_seqlens",
+                 "unified.mrope.rotary_pos_emb",
+                 "unified.mrope.window_index",
+                 "unified.mrope.cu_window_seqlens",
+diff --git a/simulator/src/arch/qwen2_5_vl_mrope_common.rs b/simulator/src/arch/qwen2_5_vl_mrope_common.rs
+index b8c1bb6..786a7a5 100644
+--- a/simulator/src/arch/qwen2_5_vl_mrope_common.rs
++++ b/simulator/src/arch/qwen2_5_vl_mrope_common.rs
+@@ -1,9 +1,10 @@
+ //! Private shared L4 implementation for the paired Qwen2.5-VL mRoPE recipes.
+ //!
+ //! The language decoder is the ordinary dense GQA decoder described by the
+-//! checkpoint config.  The recipe type only selects the fixed mRoPE prologue;
+-//! it is not a runtime branch, so the before and after CostTrees have stable,
+-//! different slot manifests while retaining identical decoder configs.
++//! checkpoint config. The recipe type selects the fixed mRoPE prologue; the
++//! `qwen2_5_vl_mrope_before` selector intentionally binds to the transfer-only
++//! worklet while the standalone legacy recipe remains available for worklet
++//! tests. Both paths retain identical decoder configs.
+ 
+ use std::marker::PhantomData;
+ use std::sync::Arc;
+diff --git a/simulator/src/worklet/mod.rs b/simulator/src/worklet/mod.rs
+index 4f6b890..35a6772 100644
+--- a/simulator/src/worklet/mod.rs
++++ b/simulator/src/worklet/mod.rs
+@@ -151,11 +151,11 @@ pub use qwen36_shared_expert_local::{
+     Qwen36SharedExpertLocalWorkletInput, Qwen36SharedExpertLocalWorkletResolved,
+ };
+ pub use qwen2_5_vl_mrope_local::{
+-    MropeProxyFootprint, Qwen25VlMropeBeforeRecipe,
+-    Qwen25VlMropeLocalBeforeResolved,
+-    Qwen25VlMropeLocalBeforeWorklet, Qwen25VlMropeLocalWorklet,
+-    Qwen25VlMropeLocalWorkletConfig, Qwen25VlMropeLocalWorkletInput,
+-    Qwen25VlMropeLocalWorkletResolved,
++    MropeProxyFootprint, Qwen25VlMropeAfterRecipe, Qwen25VlMropeBeforeRecipe,
++    Qwen25VlMropeLocalAfterResolved, Qwen25VlMropeLocalAfterWorklet,
++    Qwen25VlMropeLocalBeforeResolved, Qwen25VlMropeLocalBeforeWorklet,
++    Qwen25VlMropeLocalWorklet, Qwen25VlMropeLocalWorkletConfig,
++    Qwen25VlMropeLocalWorkletInput, Qwen25VlMropeLocalWorkletResolved,
+ };
+ pub use vllm_fp8_attn_block_tp::{
+     VllmFp8AttnBlockTpWorklet, VllmFp8AttnBlockTpWorkletConfig, VllmFp8AttnBlockTpWorkletInput,

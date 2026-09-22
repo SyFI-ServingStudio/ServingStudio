@@ -1,0 +1,98 @@
+{
+  "schema_version": 1,
+  "report_type": "optimality_scoped_v1",
+  "log_dir": "logs/eval_before_run",
+  "selection": {
+    "selector": {
+      "path": "iter/1",
+      "label": null
+    },
+    "section": "iter",
+    "canonical_path": "iter/1",
+    "node_kind": "leaf",
+    "node_label": null,
+    "matched_manifest_workers": 1,
+    "matched_cost_log_rows": 1,
+    "descendant_leaves": [
+      "unified.pre_attn.input_norm"
+    ]
+  },
+  "rungs": {
+    "r0_measured": {
+      "value_gpu_seconds": 1.7605e-05,
+      "unit": "GPU-seconds",
+      "definition": "selected CostTree node wall fold multiplied by its worker GPU count"
+    },
+    "r5_hardware_limit": {
+      "value_gpu_seconds": 8.389632e-06,
+      "unit": "GPU-seconds",
+      "definition": "balanced selected-leaf fold of hardware compute/memory limits"
+    },
+    "r6_segmented_necessary": {
+      "value_gpu_seconds": 3.2768e-08,
+      "unit": "GPU-seconds",
+      "definition": "sum of per-semantic model.work hardware rooflines in the selected scope"
+    },
+    "r7_scope_fused_necessary": {
+      "value_gpu_seconds": 3.2768e-08,
+      "unit": "GPU-seconds",
+      "definition": "one hardware roofline over selected model.work FLOPs and bytes"
+    }
+  },
+  "omitted_rungs": [
+    {
+      "rung": "idle",
+      "reason": "scheduler idle requires whole-run holding spans"
+    },
+    {
+      "rung": "imbalance",
+      "reason": "cross-worker load imbalance requires a cluster or pool scope"
+    },
+    {
+      "rung": "communication",
+      "reason": "communication attribution requires the run transfer context"
+    },
+    {
+      "rung": "balanced",
+      "reason": "balanced R2 requires sibling worker timing"
+    },
+    {
+      "rung": "busy",
+      "reason": "busy time is a whole-run scheduler measure"
+    },
+    {
+      "rung": "per_config_best",
+      "reason": "batching requires a run-level batch distribution"
+    },
+    {
+      "rung": "ignore_network",
+      "reason": "ignore-network is a whole-run communication counterfactual"
+    }
+  ],
+  "provenance": {
+    "cost_log": [
+      "slot_time_ms",
+      "slot_flops",
+      "slot_bytes"
+    ],
+    "cost_manifest": "raw/cost_manifest/worker_<pool>_<worker>.json",
+    "global_rungs": "omitted because scheduler and cluster context are undefined for a CostTree subtree",
+    "hardware": {
+      "gpu_count_source": "default_one",
+      "gpu_names": [
+        "NVIDIA B200 (B200-SXM-180GB)"
+      ],
+      "source": "gpu/spec.json"
+    },
+    "semantic": {
+      "basis": "model.work full-work semantic segments mapped to exact CostTree locations; CostTree Scale is already represented by those segments and is not applied again",
+      "mapping_ids": [
+        "llama3-unified-v1"
+      ],
+      "semantic_names": [
+        "input_norm"
+      ],
+      "status": "reconciled"
+    }
+  }
+}

@@ -1,0 +1,279 @@
+{
+  "sglang_version": "0.5.20",
+  "moe_backend": "flashinfer_mxfp4",
+  "hidden_act": "situ",
+  "moe_method": {
+    "class": "Mxfp4MoEMethod",
+    "use_flashinfer": true,
+    "use_marlin": false,
+    "_fi_kernel": "trtllm_sm100",
+    "flashinfer_mxfp4_moe_precision": "default"
+  },
+  "experts": 56,
+  "ep": 16,
+  "layer_idx": 4,
+  "attn_type": "mla",
+  "num_attention_heads": 96,
+  "config": {
+    "num_experts": 56,
+    "num_experts_per_token": 16,
+    "num_shared_experts": 2,
+    "moe_intermediate_size": 3072,
+    "routed_expert_hidden_size": 3584,
+    "hidden_size": 7168
+  },
+  "mla": {
+    "num_attention_heads": 96,
+    "kv_lora_rank": 512,
+    "qk_nope_head_dim": 128,
+    "qk_rope_head_dim": 64,
+    "v_head_dim": 128,
+    "q_lora_rank": 1536,
+    "kv_cache_dim": 576
+  },
+  "kda": null,
+  "points": [
+    {
+      "B": 1,
+      "seq_len": 4096,
+      "ok": true,
+      "attn_type": "mla",
+      "out_shape": [
+        1,
+        7168
+      ],
+      "finite": true,
+      "us_step": 1269.8880434036255,
+      "us_token": 1269.8880434036255,
+      "kv_gb": 0.004719744,
+      "mla_kv_read_bytes": 4718592,
+      "floor_us": 0.6740845714285715,
+      "peak_gb": 3.925966848,
+      "us_attn": 435.90399622917175,
+      "us_moe": 624.4159936904907,
+      "us_norms": 35.74400022625923,
+      "attn_over_floor": 646.6606931907235,
+      "rung": "a_smoke"
+    },
+    {
+      "B": 1,
+      "seq_len": 4096,
+      "ok": true,
+      "attn_type": "mla",
+      "out_shape": [
+        1,
+        7168
+      ],
+      "finite": true,
+      "us_step": 1246.559977531433,
+      "us_token": 1246.559977531433,
+      "kv_gb": 0.004719744,
+      "mla_kv_read_bytes": 4718592,
+      "floor_us": 0.6740845714285715,
+      "peak_gb": 1.76364032,
+      "us_attn": 429.31199073791504,
+      "us_moe": 627.295970916748,
+      "us_norms": 35.679999738931656,
+      "attn_over_floor": 636.8814966764248,
+      "rung": "b_ctxsweep"
+    },
+    {
+      "B": 1,
+      "seq_len": 8192,
+      "ok": true,
+      "attn_type": "mla",
+      "out_shape": [
+        1,
+        7168
+      ],
+      "finite": true,
+      "us_step": 1244.480013847351,
+      "us_token": 1244.480013847351,
+      "kv_gb": 0.009438336,
+      "mla_kv_read_bytes": 9437184,
+      "floor_us": 1.348169142857143,
+      "peak_gb": 1.768424448,
+      "us_attn": 422.3040044307709,
+      "us_moe": 631.3920021057129,
+      "us_norms": 35.840000957250595,
+      "attn_over_floor": 313.24259768755127,
+      "rung": "b_ctxsweep"
+    },
+    {
+      "B": 1,
+      "seq_len": 16384,
+      "ok": true,
+      "attn_type": "mla",
+      "out_shape": [
+        1,
+        7168
+      ],
+      "finite": true,
+      "us_step": 1233.5679531097412,
+      "us_token": 1233.5679531097412,
+      "kv_gb": 0.01887552,
+      "mla_kv_read_bytes": 18874368,
+      "floor_us": 2.696338285714286,
+      "peak_gb": 1.777992704,
+      "us_attn": 430.4639995098114,
+      "us_moe": 629.8879981040955,
+      "us_norms": 35.77600046992302,
+      "attn_over_floor": 159.64762351611876,
+      "rung": "b_ctxsweep"
+    },
+    {
+      "B": 1,
+      "seq_len": 65536,
+      "ok": true,
+      "attn_type": "mla",
+      "out_shape": [
+        1,
+        7168
+      ],
+      "finite": true,
+      "us_step": 1231.9040298461914,
+      "us_token": 1231.9040298461914,
+      "kv_gb": 0.075498624,
+      "mla_kv_read_bytes": 75497472,
+      "floor_us": 10.785353142857144,
+      "peak_gb": 1.83540224,
+      "us_attn": 551.4559745788574,
+      "us_moe": 631.2959790229797,
+      "us_norms": 35.360001027584076,
+      "attn_over_floor": 51.13008051517277,
+      "rung": "b_ctxsweep"
+    },
+    {
+      "B": 1,
+      "seq_len": 262144,
+      "ok": true,
+      "attn_type": "mla",
+      "out_shape": [
+        1,
+        7168
+      ],
+      "finite": true,
+      "us_step": 2048.383951187134,
+      "us_token": 2048.383951187134,
+      "kv_gb": 0.30199104,
+      "mla_kv_read_bytes": 301989888,
+      "floor_us": 43.141412571428575,
+      "peak_gb": 2.065040384,
+      "us_attn": 1888.6079788208008,
+      "us_moe": 639.4240260124207,
+      "us_norms": 35.58399900794029,
+      "attn_over_floor": 43.77714743794866,
+      "rung": "b_ctxsweep"
+    },
+    {
+      "B": 1,
+      "seq_len": 1048576,
+      "ok": true,
+      "attn_type": "mla",
+      "out_shape": [
+        1,
+        7168
+      ],
+      "finite": true,
+      "us_step": 6502.719879150391,
+      "us_token": 6502.719879150391,
+      "kv_gb": 1.207960704,
+      "mla_kv_read_bytes": 1207959552,
+      "floor_us": 172.5656502857143,
+      "peak_gb": 2.98359296,
+      "us_attn": 6340.9600257873535,
+      "us_moe": 631.712019443512,
+      "us_norms": 37.087999284267426,
+      "attn_over_floor": 36.74520401533401,
+      "rung": "b_ctxsweep"
+    },
+    {
+      "B": 8,
+      "seq_len": 8192,
+      "ok": true,
+      "attn_type": "mla",
+      "out_shape": [
+        8,
+        7168
+      ],
+      "finite": true,
+      "us_step": 1261.728048324585,
+      "us_token": 157.71600604057312,
+      "kv_gb": 0.075498624,
+      "mla_kv_read_bytes": 75497472,
+      "floor_us": 10.785353142857144,
+      "peak_gb": 2.982214144,
+      "us_attn": 526.7840027809143,
+      "us_moe": 633.791983127594,
+      "us_norms": 35.0399985909462,
+      "attn_over_floor": 48.84253633640077,
+      "rung": "c_batchsweep"
+    },
+    {
+      "B": 16,
+      "seq_len": 8192,
+      "ok": true,
+      "attn_type": "mla",
+      "out_shape": [
+        16,
+        7168
+      ],
+      "finite": true,
+      "us_step": 1262.943983078003,
+      "us_token": 78.93399894237518,
+      "kv_gb": 0.150996096,
+      "mla_kv_read_bytes": 150994944,
+      "floor_us": 21.570706285714287,
+      "peak_gb": 2.674429952,
+      "us_attn": 954.7200202941895,
+      "us_moe": 637.2799873352051,
+      "us_norms": 37.79200091958046,
+      "attn_over_floor": 44.2600259652358,
+      "rung": "c_batchsweep"
+    },
+    {
+      "B": 32,
+      "seq_len": 8192,
+      "ok": true,
+      "attn_type": "mla",
+      "out_shape": [
+        32,
+        7168
+      ],
+      "finite": true,
+      "us_step": 1359.455943107605,
+      "us_token": 42.482998222112656,
+      "kv_gb": 0.30199104,
+      "mla_kv_read_bytes": 301989888,
+      "floor_us": 43.141412571428575,
+      "peak_gb": 3.64092928,
+      "us_attn": 1096.0960388183594,
+      "us_moe": 646.4639902114868,
+      "us_norms": 35.77600046992302,
+      "attn_over_floor": 25.407050290798196,
+      "rung": "c_batchsweep"
+    },
+    {
+      "B": 40,
+      "seq_len": 8192,
+      "ok": true,
+      "attn_type": "mla",
+      "out_shape": [
+        40,
+        7168
+      ],
+      "finite": true,
+      "us_step": 1421.504020690918,
+      "us_token": 35.53760051727295,
+      "kv_gb": 0.377488512,
+      "mla_kv_read_bytes": 377487360,
+      "floor_us": 53.92676571428571,
+      "peak_gb": 4.123718656,
+      "us_attn": 1127.776026725769,
+      "us_moe": 634.2399716377258,
+      "us_norms": 36.22400015592575,
+      "attn_over_floor": 20.913103387303842,
+      "rung": "c_batchsweep"
+    }
+  ]
+}

@@ -1,0 +1,40 @@
+{
+  "sglang_version": "0.5.20",
+  "experts": 56,
+  "ep": 16,
+  "layer_idx": 5,
+  "config": {
+    "num_experts": 56,
+    "num_experts_per_token": 16,
+    "num_shared_experts": 2,
+    "moe_intermediate_size": 3072,
+    "routed_expert_hidden_size": 3584,
+    "hidden_size": 7168
+  },
+  "kda": {
+    "num_heads": 96,
+    "head_dim": 128,
+    "short_conv_kernel": 4,
+    "gate_lower_bound": -5.0
+  },
+  "points": [
+    {
+      "B": 1,
+      "seq_len": 4096,
+      "ok": true,
+      "out_shape": [
+        1,
+        7168
+      ],
+      "finite": true,
+      "us_step": 1102.336049079895,
+      "us_token": 1102.336049079895,
+      "state_mb": 13.02528,
+      "peak_gb": 4.832672256,
+      "us_attn": 314.65598940849304,
+      "us_moe": 564.6079778671265,
+      "us_norms": 36.70400008559227,
+      "rung": "adhoc"
+    }
+  ]
+}

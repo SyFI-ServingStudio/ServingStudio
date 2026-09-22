@@ -1,0 +1,24 @@
+{
+  "kimi": true,
+  "layer_id": 1,
+  "config": {
+    "n_routed_experts": 24,
+    "num_attention_heads": 64,
+    "first_k_dense_replace": 1,
+    "num_experts_per_tok": 8,
+    "moe_intermediate_size": 2048,
+    "hidden_size": 7168,
+    "kv_lora_rank": 512,
+    "qk_rope_head_dim": 64
+  },
+  "points": [
+    {
+      "B": 1,
+      "L": 4096,
+      "ok": false,
+      "error": "AttributeError: 'NoneType' object has no attribute 'dtype'",
+      "traceback": "Traceback (most recent call last):\n  File \"/work/kimi_single_layer_decode.py\", line 309, in time_point\n    out = call_layer(layer, fb, positions, hidden)\n          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/work/kimi_single_layer_decode.py\", line 284, in call_layer\n    out = layer.forward(\n          ^^^^^^^^^^^^^^\n  File \"/sgl-workspace/sglang/python/sglang/srt/models/deepseek_v2.py\", line 2222, in forward\n    hidden_states = self.self_attn(\n                    ^^^^^^^^^^^^^^^\n  File \"/usr/local/lib/python3.12/dist-packages/torch/nn/modules/module.py\", line 1779, in _wrapped_call_impl\n    return self._call_impl(*args, **kwargs)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/local/lib/python3.12/dist-packages/torch/nn/modules/module.py\", line 1790, in _call_impl\n    return forward_call(*args, **kwargs)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/sgl-workspace/sglang/python/sglang/srt/models/deepseek_v2.py\", line 1863, in forward\n    s = self.forward_prepare(\n        ^^^^^^^^^^^^^^^^^^^^^\n  File \"/sgl-workspace/sglang/python/sglang/srt/models/deepseek_v2.py\", line 1921, in forward_prepare\n    inner_state = self.forward_absorb_prepare(\n                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/sgl-workspace/sglang/python/sglang/srt/models/deepseek_common/attention_forward_methods/forward_mla.py\", line 510, in forward_absorb_prepare\n    elif self.w_kc.dtype == torch.float8_e4m3fn:\n         ^^^^^^^^^^^^^^^\nAttributeError: 'NoneType' object has no attribute 'dtype'\n",
+      "rung": "a_smoke"
+    }
+  ]
+}

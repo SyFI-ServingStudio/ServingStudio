@@ -1,0 +1,103 @@
+{
+  "sglang_version": "0.5.20",
+  "moe_backend": "flashinfer_mxfp4",
+  "hidden_act": "situ",
+  "moe_method": {
+    "class": "Mxfp4MoEMethod",
+    "use_flashinfer": true,
+    "use_marlin": false,
+    "_fi_kernel": "trtllm_sm100",
+    "flashinfer_mxfp4_moe_precision": "default"
+  },
+  "experts": 56,
+  "ep": 16,
+  "layer_idx": 4,
+  "attn_type": "mla",
+  "attention_backend": "triton",
+  "page_size": 1,
+  "attn_heads": 96,
+  "cuda_graph": true,
+  "num_attention_heads": 96,
+  "config": {
+    "num_experts": 56,
+    "num_experts_per_token": 16,
+    "num_shared_experts": 2,
+    "moe_intermediate_size": 3072,
+    "routed_expert_hidden_size": 3584,
+    "hidden_size": 7168
+  },
+  "mla": {
+    "num_attention_heads": 96,
+    "kv_lora_rank": 512,
+    "qk_nope_head_dim": 128,
+    "qk_rope_head_dim": 64,
+    "v_head_dim": 128,
+    "q_lora_rank": 1536,
+    "kv_cache_dim": 576
+  },
+  "kda": null,
+  "points": [
+    {
+      "B": 1,
+      "seq_len": 1048576,
+      "ok": true,
+      "attn_type": "mla",
+      "page_size": 1,
+      "attention_backend": "triton",
+      "attention_backend_class": "TritonAttnBackend",
+      "out_shape": [
+        1,
+        7168
+      ],
+      "finite": true,
+      "us_step": 6486.4959716796875,
+      "us_token": 6486.4959716796875,
+      "kv_gb": 1.207960704,
+      "mla_kv_read_bytes": 1207959552,
+      "floor_us": 172.5656502857143,
+      "peak_gb": 3.925966848,
+      "us_attn": 6347.231864929199,
+      "us_moe": 613.9199733734131,
+      "us_norms": 38.52799907326698,
+      "attn_over_floor": 36.7815486710141,
+      "graph_ok": true,
+      "us_meta_prep": 596.448004245758,
+      "us_step_graph": 6474.0800857543945,
+      "graph_finite": true,
+      "graph_speedup": 1.0019177838026152,
+      "us_token_graph": 6474.0800857543945,
+      "rung": "adhoc"
+    },
+    {
+      "B": 32,
+      "seq_len": 8192,
+      "ok": true,
+      "attn_type": "mla",
+      "page_size": 1,
+      "attention_backend": "triton",
+      "attention_backend_class": "TritonAttnBackend",
+      "out_shape": [
+        32,
+        7168
+      ],
+      "finite": true,
+      "us_step": 1360.5760335922241,
+      "us_token": 42.518001049757004,
+      "kv_gb": 0.30199104,
+      "mla_kv_read_bytes": 301989888,
+      "floor_us": 43.141412571428575,
+      "peak_gb": 3.639880704,
+      "us_attn": 1084.9599838256836,
+      "us_moe": 684.3519806861877,
+      "us_norms": 40.76800122857094,
+      "attn_over_floor": 25.148921167783552,
+      "graph_ok": true,
+      "us_meta_prep": 67.96800345182419,
+      "us_step_graph": 1331.5520286560059,
+      "graph_finite": true,
+      "graph_speedup": 1.0217971241916197,
+      "us_token_graph": 41.61100089550018,
+      "rung": "adhoc"
+    }
+  ]
+}

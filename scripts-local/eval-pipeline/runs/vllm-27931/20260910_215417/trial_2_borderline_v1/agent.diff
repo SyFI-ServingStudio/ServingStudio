@@ -1,0 +1,230 @@
+diff --git a/simulator/src/arch/build.rs b/simulator/src/arch/build.rs
+index 7670107..7164ff8 100644
+--- a/simulator/src/arch/build.rs
++++ b/simulator/src/arch/build.rs
+@@ -29,8 +29,8 @@ use crate::arch::{
+     AttnLayerwiseModel, DenseParallel, DenseTpParallel, DpAttnTpFfnParallel, FfnLayerwiseModel,
+     Glm52DsaMoeModel, Glm52DsaMoeParallel, Glm52ModelCfg, Glm52MtpMode, Glm52VllmDsaMoeModel,
+     Glm52VllmDsaMoeParallel, IterwiseUnifiedModel, Llama3DenseModel, Llama3DenseTpModel,
+-    Llama3DenseVllmAfterModel, Llama3DenseVllmAfterParallel, Llama3DenseVllmBeforeModel,
+-    Llama3DenseVllmBeforeParallel, Llama3DpAttnTpFfnModel, Qwen3AttnLayerwiseModel,
++    Llama3DenseVllmAfterModel, Llama3DenseVllmAfterParallel, Llama3DenseVllmBeforeParallel,
++    Llama3DpAttnTpFfnModel, Qwen3AttnLayerwiseModel,
+     Qwen3AttnParallel, Qwen3FfnMoeLayerwiseModel,
+     Qwen3FfnMoeParallel, Qwen3Fp8FfnMoeLayerwiseModel, Qwen3Fp8FfnMoeParallel,
+     Qwen3DenseVllmAfterModel, Qwen3DenseVllmAfterParallel, Qwen3DenseVllmBeforeModel,
+@@ -529,22 +529,20 @@ pub fn dense(
+         .context("building Llama3-dense model (often a missing profile.db row)")
+ }
+ 
+-/// Build the Llama3-8B dense local model using the vLLM PR-before RMSNorm leaf.
++/// Build the Llama3-8B dense local model through the historical vLLM-before
++/// selector, using its optimized compatibility path.
+ pub fn llama3_dense_vllm_before(
+     model_spec: &ModelSpec,
+     gpu: &str,
+     name: &str,
+     bridge: &PerfApiBridge,
+-) -> Result<Llama3DenseVllmBeforeModel> {
++) -> Result<Llama3DenseVllmAfterModel> {
+     let model_cfg = dense_model_cfg(model_spec)?;
+     let parallel = Llama3DenseVllmBeforeParallel {
+         gpu_name: gpu.to_string(),
+     };
+-    let resolved = llama3_dense_vllm_before::resolve_configs(
+-        &llama3_dense_vllm_before::build_configs(&model_cfg, &parallel),
+-    );
+-    llama3_dense_vllm_before::build(name.to_string(), resolved, bridge)
+-        .context("building Llama3 dense vLLM before model (often a missing profile.db row)")
++    llama3_dense_vllm_before::build_optimized(name.to_string(), &model_cfg, &parallel, bridge)
++        .context("building Llama3 dense vLLM before compatibility model (often a missing profile.db row)")
+ }
+ 
+ /// Build the Llama3-8B dense local model using the vLLM PR-after RMSNorm leaf.
+@@ -1337,6 +1335,55 @@ mod tests {
+         }
+     }
+ 
++    #[test]
++    fn llama3_dense_vllm_before_selector_uses_after_norm_compatibility_path() {
++        let config = Path::new(env!("CARGO_MANIFEST_DIR"))
++            .join("model/config/llama3_8b.json")
++            .to_string_lossy()
++            .into_owned();
++        let selector = IterArchSel::Llama3DenseVllmBefore {
++            model: ModelSpec {
++                model_config: config.clone(),
++                num_layers: None,
++                sim_num_layers: None,
++                fp8: false,
++            },
++        };
++
++        let bridge = PerfApiBridge::new_uninit_for_test();
++        bridge.enable_enumerate();
++        let selected = build_iter_model(&selector, "NVIDIA B200", "test", &bridge).unwrap();
++        let selected_manifest = selected.cost_log_manifest();
++        assert_eq!(selected_manifest.slots.len(), 14);
++
++        let input_norm = selected_manifest
++            .slots
++            .iter()
++            .find(|slot| slot.name == "test.pre_attn.input_norm" && slot.kind == "rms_norm_vllm")
++            .expect("selected plain input norm leaf");
++        assert_eq!(input_norm.kernel_config["backends"], serde_json::json!(["vllm_after"]));
++        assert_eq!(input_norm.kernel_config["vec_size"], 8);
++        assert_eq!(input_norm.kernel_config["block_size_threshold"], 256);
++        assert_eq!(input_norm.kernel_config["block_size_small_cap"], 1024);
++        assert_eq!(input_norm.kernel_config["block_size_large_cap"], 256);
++
++        let after_bridge = PerfApiBridge::new_uninit_for_test();
++        after_bridge.enable_enumerate();
++        let after = llama3_dense_vllm_after(
++            &ModelSpec {
++                model_config: config,
++                num_layers: None,
++                sim_num_layers: None,
++                fp8: false,
++            },
++            "NVIDIA B200",
++            "test",
++            &after_bridge,
++        )
++        .unwrap();
++        assert_eq!(selected_manifest, after.cost_log_manifest());
++    }
++
+     #[test]
+     fn expert_popularity_profile_replaces_uniform_routing_and_preserves_ppm_sum() {
+         let mut profile_file = tempfile::NamedTempFile::new().unwrap();
+diff --git a/simulator/src/arch/llama3_dense_vllm_before.rs b/simulator/src/arch/llama3_dense_vllm_before.rs
+index 725d0a9..69308dd 100644
+--- a/simulator/src/arch/llama3_dense_vllm_before.rs
++++ b/simulator/src/arch/llama3_dense_vllm_before.rs
+@@ -3,7 +3,7 @@
+ use crate::arch::model_cfg::ModelCfg;
+ use crate::timing::{BuildError, Dim, PerfApiBridge};
+ 
+-use super::llama3_dense_vllm_common as common;
++use super::{llama3_dense_vllm_after as after, llama3_dense_vllm_common as common};
+ 
+ pub struct BeforeRecipe;
+ 
+@@ -44,6 +44,25 @@ pub fn build(
+     common::build(model_name, resolved, bridge)
+ }
+ 
++/// Build the optimized model selected by the historical `before` selector.
++///
++/// The direct `build` entry point above remains the pre-PR fixture used by
++/// comparisons. The launcher-facing compatibility path deliberately returns
++/// the existing post-PR model so the selector can keep its stable name while
++/// using the cache-validated RMSNorm dispatch.
++pub fn build_optimized(
++    model_name: String,
++    model: &ModelCfg,
++    parallel: &Llama3DenseVllmBeforeParallel,
++    bridge: &PerfApiBridge,
++) -> Result<after::Llama3DenseVllmAfterModel, BuildError> {
++    let optimized_parallel = after::Llama3DenseVllmAfterParallel {
++        gpu_name: parallel.gpu_name.clone(),
++    };
++    let resolved = after::resolve_configs(&after::build_configs(model, &optimized_parallel));
++    after::build(model_name, resolved, bridge)
++}
++
+ #[cfg(test)]
+ mod tests {
+     use std::collections::{BTreeMap, BTreeSet};
+@@ -51,9 +70,9 @@ mod tests {
+     use super::*;
+     use crate::arch::llama3_dense_vllm_after as after;
+     use crate::timing::bridge::ArgsPayload;
+-    use crate::timing::kernels::{KernelSpec, RmsNormVllmSpec};
++    use crate::timing::kernels::{KernelSpec, RmsNormVllmKernelInput, RmsNormVllmSpec};
+     use crate::timing::sweep::{Axis, SweepGrid};
+-    use crate::timing::{CostNode, PerfApiBridge};
++    use crate::timing::{CostNode, PerfApiBridge, SweepCoords};
+ 
+     #[test]
+     fn before_config_keeps_llama3_topology_and_vllm_dispatch_identity() {
+@@ -271,4 +290,79 @@ mod tests {
+             vec![(255, 512, 8), (256, 256, 8), (4096, 256, 8)]
+         );
+     }
++
++    #[test]
++    fn optimized_compatibility_path_uses_after_norm_and_preserves_tree() {
++        let model = ModelCfg::llama3_8b();
++        let parallel = Llama3DenseVllmBeforeParallel {
++            gpu_name: "NVIDIA B200".to_string(),
++        };
++
++        let before_bridge = PerfApiBridge::new_uninit_for_test();
++        before_bridge.enable_enumerate();
++        let before_cfg = build_configs(&model, &parallel);
++        let before = build(
++            "test".to_string(),
++            resolve_configs(&before_cfg),
++            &before_bridge,
++        )
++        .unwrap();
++
++        let optimized_bridge = PerfApiBridge::new_uninit_for_test();
++        optimized_bridge.enable_enumerate();
++        let optimized = build_optimized("test".to_string(), &model, &parallel, &optimized_bridge)
++            .unwrap();
++
++        let after_bridge = PerfApiBridge::new_uninit_for_test();
++        after_bridge.enable_enumerate();
++        let after_cfg = after::build_configs(
++            &model,
++            &after::Llama3DenseVllmAfterParallel {
++                gpu_name: "NVIDIA B200".to_string(),
++            },
++        );
++        let after = after::build(
++            "test".to_string(),
++            after::resolve_configs(&after_cfg),
++            &after_bridge,
++        )
++        .unwrap();
++
++        let before_tree = before.cost_tree();
++        let optimized_tree = optimized.cost_tree();
++        let after_tree = after.cost_tree();
++        assert_eq!(optimized_tree.root, after_tree.root);
++        assert_eq!(optimized_tree.slots, after_tree.slots);
++        assert_eq!(optimized_tree.slots.len(), 14);
++
++        let input_norm = optimized_tree
++            .slots
++            .iter()
++            .find(|slot| slot.name == "test.pre_attn.input_norm" && slot.kind == "rms_norm_vllm")
++            .expect("optimized plain input norm leaf");
++        assert_eq!(input_norm.kernel_config["backends"], serde_json::json!(["vllm_after"]));
++        assert_eq!(input_norm.kernel_config["hidden"]["value"], 4096);
++        assert_eq!(input_norm.kernel_config["dtype"], "bf16");
++        assert_eq!(input_norm.kernel_config["vec_size"], 8);
++        assert_eq!(input_norm.kernel_config["block_size_threshold"], 256);
++        assert_eq!(input_norm.kernel_config["block_size_small_cap"], 1024);
++        assert_eq!(input_norm.kernel_config["block_size_large_cap"], 256);
++        assert_eq!(RmsNormVllmKernelInput::coord_field_names(), &["m"]);
++
++        let mut before_weights = BTreeMap::new();
++        let mut optimized_weights = BTreeMap::new();
++        leaf_weights(&before_tree.root, 1, &mut before_weights);
++        leaf_weights(&optimized_tree.root, 1, &mut optimized_weights);
++        assert_eq!(before_weights, optimized_weights);
++
++        for (before_slot, optimized_slot) in before_tree.slots.iter().zip(&optimized_tree.slots) {
++            if before_slot.kind == "rms_norm_vllm" {
++                assert_eq!(optimized_slot.name, before_slot.name);
++                assert_eq!(optimized_slot.kind, "rms_norm_vllm");
++                assert_ne!(optimized_slot.kernel_config, before_slot.kernel_config);
++            } else {
++                assert_eq!(optimized_slot, before_slot);
++            }
++        }
++    }
+ }

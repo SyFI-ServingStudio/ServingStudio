@@ -1,0 +1,14 @@
+{
+  "_note": "Floor-measurement config for sglang-pr-32296 (per_token_group_quant non-finite sanitization halving: two clamps -> one). Model is Qwen3-4B-Instruct-2507-FP8, a genuine BLOCK-fp8 checkpoint (weight_block_size=[128,128], activation_scheme=dynamic) -> its linear forward routes through w8a8_block_fp8_linear -> sglang_per_token_group_quant_fp8 -> the JIT per_token_group_quant kernel (source-verified at merge 9402012f: _run_per_token_group_quant_8bit_kernel calls the JIT .cuh on CUDA). group_size=128 != hidden=2560 so it takes the group-quant path, not the whole-row per-token branch. before_image derived from after by swapping the single .cuh + clearing the JIT cache (build_case_32296.sh). For finite activations the PR is bit-identical (clamp only sanitizes non-finite) so correctness must PASS; the ONLY expected before/after signal is latency. NOTE: target module path is sglang.kernels.ops.quantization.fp8_kernel (the PR-era layout), NOT srt.layers.quantization.fp8_kernel (that is the newer stock rename).",
+  "case": "32296",
+  "framework": "sglang",
+  "model_snap": "/raid/hf/hub/models--Qwen--Qwen3-4B-Instruct-2507-FP8/snapshots/8591804019c8b22094c3b5b4454e0edc05dffc98",
+  "targets": ["sglang.kernels.ops.quantization.fp8_kernel:sglang_per_token_group_quant_fp8"],
+  "before_image": "rga-local/sglang-pr-32296:b200-before",
+  "after_image": "rga-local/sglang-pr-32296:b200-after",
+  "sglang_quant": "",
+  "tokens": 128,
+  "iters": 3000,
+  "err_max": 0.05,
+  "render": { "FRAMEWORK": "sglang" }
+}

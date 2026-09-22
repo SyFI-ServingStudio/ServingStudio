@@ -1,0 +1,47 @@
+==== slurm_gpu.sh on cayenne job=782 ====
+CUDA_VISIBLE_DEVICES=0
+allocated GPU UUID(s): GPU-17dce9e8-fd5a-2fcc-3847-dc31ae451efc
+0, GPU-17dce9e8-fd5a-2fcc-3847-dc31ae451efc, 0 MiB
+==== exec: ./run_kimi_single_layer.sh --attn-type mla --moe-backend flashinfer_mxfp4 --split --iters 30 --warmup 8 --point 1,8192 ====
+==== kimi_single_layer: img=lmsysorg/sglang:v0.5.20 gpu="device=GPU-17dce9e8-fd5a-2fcc-3847-dc31ae451efc" args=--attn-type mla --moe-backend flashinfer_mxfp4 --split --iters 30 --warmup 8 --point 1,8192 ====
+--- Wrapper: Applying owner=yilegu, memory=432834647654 bytes, and cpus=28.8 ---
+==============================================================================
+kimi_single_layer_decode v3 (K3/MLA)  experts=56 EP=16 layer_idx=4 iters=30 warmup=8 split=True moe_backend=flashinfer_mxfp4
+torch=2.13.0+cu130  dev=NVIDIA B200
+sglang=0.5.20
+==============================================================================
+[cfg] wrote /tmp/k3_cfg/config.json  experts=56 (EP=16) top_k=16 shared=2 layers=8  moe_backend=flashinfer_mxfp4 hidden_act=situ  attn_type=mla target_layer=4 heads=96 kda_layers=[1, 2, 3, 4, 6, 7, 8] full_attn=[5]
+[moe] flashinfer_mxfp4_moe_precision=default
+[moe] runner_backend=MoeRunnerBackend.FLASHINFER_MXFP4 is_flashinfer_mxfp4=True is_deep_gemm=False
+[boot] tp=1 attn_tp=1 world=1  is_kda_layer(4)=False  attention_arch=1 dtype=torch.bfloat16
+[layer] mxfp4 quant_config=Mxfp4Config quant_format=None
+[layer] UnquantizedLinearMethod from sglang.srt.layers.quantization.unquant
+[layer] patched Mxfp4Config.get_quant_method: LinearBase/RadixAttention -> bf16 unquantized fallback
+[layer] KimiK3DecoderLayer(layer_idx=4): self_attn=KimiK3MLAAttention (KDA=False MLA=True)  mlp=KimiK3MoE (MoE=True)
+[layer] random-init 0.329B float params -> cuda/bf16/eval (MLA: absorbed kv_b_proj -> w_kc(96, 128, 512) w_vc(96, 512, 128))
+[mxfp4] experts=FusedMoE tensors:
+[mxfp4]   w13_weight                       (56, 6144, 1792)       torch.uint8 <- e2m1 randint
+[mxfp4]   w13_weight_scale                 (56, 6144, 112)        torch.uint8 <- ue8m0 fill 127
+[mxfp4]   w13_weight_bias                  (56, 6144)             torch.bfloat16 <- bias normal
+[mxfp4]   w2_weight                        (56, 3584, 1536)       torch.uint8 <- e2m1 randint
+[mxfp4]   w2_weight_scale                  (56, 3584, 96)         torch.uint8 <- ue8m0 fill 127
+[mxfp4]   w2_weight_bias                   (56, 3584)             torch.bfloat16 <- bias normal
+[mxfp4] quant_method=Mxfp4MoEMethod use_flashinfer=True use_marlin=False _fi_kernel=trtllm_sm100 precision=default
+[mxfp4] quant_method.process_weights_after_loading(experts) OK
+[moe] resolved expert method: {'class': 'Mxfp4MoEMethod', 'use_flashinfer': True, 'use_marlin': False, '_fi_kernel': 'trtllm_sm100', 'flashinfer_mxfp4_moe_precision': 'default'}
+
+---- rung adhoc ----
+[mla] TritonAttnBackend built; use_mla=True num_head=96 num_kv_head=96 v_head_dim=512 kv=0.009GB kv_dim=576
+/sgl-workspace/sglang/python/sglang/srt/environ.py:83: UserWarning: Invalid value for SGLANG_DISABLE_LEAN_ATTENTION: "" is not a valid boolean value, using default "False"
+  warnings.warn(
+/sgl-workspace/sglang/python/sglang/srt/environ.py:83: UserWarning: Invalid value for SGLANG_DISABLE_LEAN_ATTENTION: "" is not a valid boolean value, using default "False"
+  warnings.warn(
+[time] B=    1 L=     8192  us/step=  1444.83  us/tok=1444.832  kv=0.009GB  peak=3.93GB  finite=True  shape=[1, 7168]  attn=551.9us moe=767.9us norms=41.0us  floor=1.3us a/floor=409.35x
+
+==============================================================================
+rung              B   seq_len    us/step    us/tok     kv_GB  status
+adhoc             1      8192    1444.83  1444.832     0.009  ok  attn=551.9 moe=767.9 norms=41.0 floor=1.3 a/floor=409.35x
+==============================================================================
+[out] wrote /work/kimi_single_layer/result_mla_smoke_20260921_235702.json
+[rank0]:[W922 06:57:47.594815965 ProcessGroupNCCL.cpp:1624] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())
+==== done; json -> /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/kimi_single_layer/result_20260921_235702.json ====

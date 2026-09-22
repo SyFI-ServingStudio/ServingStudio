@@ -1,0 +1,209 @@
+diff --git a/model/work/location_maps/llama3_unified.json b/model/work/location_maps/llama3_unified.json
+index 7d233c6..fd3f9df 100644
+--- a/model/work/location_maps/llama3_unified.json
++++ b/model/work/location_maps/llama3_unified.json
+@@ -15,7 +15,6 @@
+     {"location": "unified.post_attn.o_proj", "semantics": ["o"]},
+     {"location": "unified.post_attn.post_norm", "semantics": ["post_norm"]},
+     {"location": "unified.post_attn.up_gate_proj", "semantics": ["gate_up"]},
+-    {"location": "unified.post_attn.activation", "semantics": []},
+     {"location": "unified.post_attn.down_proj", "semantics": ["down"]},
+     {"location": "unified.final_norm", "semantics": ["final_norm"]},
+     {"location": "unified.lm_head", "semantics": ["lm_head"]}
+diff --git a/model/work/location_maps/qwen3_dense_vllm_before_unified.json b/model/work/location_maps/qwen3_dense_vllm_before_unified.json
+index 0548c68..98ef16e 100644
+--- a/model/work/location_maps/qwen3_dense_vllm_before_unified.json
++++ b/model/work/location_maps/qwen3_dense_vllm_before_unified.json
+@@ -17,7 +17,6 @@
+     {"location": "unified.post_attn.o_proj", "semantics": ["o"]},
+     {"location": "unified.post_attn.post_norm", "semantics": ["post_norm"]},
+     {"location": "unified.post_attn.up_gate_proj", "semantics": ["gate_up"]},
+-    {"location": "unified.post_attn.activation", "semantics": []},
+     {"location": "unified.post_attn.down_proj", "semantics": ["down"]},
+     {"location": "unified.final_norm", "semantics": ["final_norm"]},
+     {"location": "unified.lm_head", "semantics": ["lm_head"]}
+diff --git a/simulator/src/arch/llama3_dense.rs b/simulator/src/arch/llama3_dense.rs
+index e63641c..e5d3742 100644
+--- a/simulator/src/arch/llama3_dense.rs
++++ b/simulator/src/arch/llama3_dense.rs
+@@ -134,7 +134,6 @@ pub fn build_configs(model: &ModelCfg, parallel: &DenseParallel) -> Llama3DenseC
+             gpu_name: gpu.clone(),
+             norm_backends: NORM_BACKENDS.to_vec(),
+             gemm_backends: GEMM_BACKENDS.to_vec(),
+-            act_backends: ACT_BACKENDS.to_vec(),
+         },
+         // Embedding gather placeholder: read one hidden-wide row, write one out.
+         embed: ElementwiseKernelConfig {
+diff --git a/simulator/src/arch/qwen3_dense_vllm_common.rs b/simulator/src/arch/qwen3_dense_vllm_common.rs
+index d8451e9..3b2a445 100644
+--- a/simulator/src/arch/qwen3_dense_vllm_common.rs
++++ b/simulator/src/arch/qwen3_dense_vllm_common.rs
+@@ -151,7 +151,6 @@ pub(crate) fn build_configs<R: Recipe>(
+             gpu_name: gpu.clone(),
+             norm_backends: NORM_BACKENDS.to_vec(),
+             gemm_backends: GEMM_BACKENDS.to_vec(),
+-            act_backends: ACT_BACKENDS.to_vec(),
+         },
+         embed: ElementwiseKernelConfig {
+             backends: ACT_BACKENDS.to_vec(),
+diff --git a/simulator/src/worklet/post_attn_local.rs b/simulator/src/worklet/post_attn_local.rs
+index 38007b6..5ca77c3 100644
+--- a/simulator/src/worklet/post_attn_local.rs
++++ b/simulator/src/worklet/post_attn_local.rs
+@@ -1,13 +1,10 @@
+ //! `PostAttnLocalWorklet` — single-GPU post-attention section of a dense decoder
+-//! layer: o_proj → post-attn RMSNorm → MLP (fused up_gate GEMM → SwiGLU
+-//! activation → down GEMM). `Local` group suffix (L3 §1.5): 1 GPU, no
+-//! collective.
++//! layer: o_proj → post-attn RMSNorm → MLP (fused up_gate GEMM → SwiGLU → down
++//! GEMM). `Local` group suffix (L3 §1.5): 1 GPU, no collective.
+ //!
+-//! SwiGLU activation is modeled with the byte-keyed `ElementwiseKernel`: the
+-//! fused up_gate GEMM emits `2·intermediate` elements/token (gate‖up concat),
+-//! the activation reads those and writes `intermediate` elements/token. So
+-//! `input_bytes_per_token = 2·intermediate·dtype_bytes`,
+-//! `output_bytes_per_token = intermediate·dtype_bytes`.
++//! The intermediate SwiGLU tensor is not a standalone byte-only CostTree leaf:
++//! necessary-work accounting treats its activation compute and fusible traffic
++//! as non-pinned, while the up_gate and down projections remain explicit.
+ //!
+ //! `gpu_name` rides in `*Config`; `*Input` is pure shape.
+ 
+@@ -16,9 +13,8 @@ use std::sync::Arc;
+ use crate::op::Op;
+ use crate::timing::bridge::DType;
+ use crate::timing::kernels::{
+-    ElementwiseKernel, ElementwiseKernelConfig, ElementwiseKernelInput, RmsNormKernel,
+-    RmsNormKernelConfig, RmsNormKernelInput, SingleGemmKernel, SingleGemmKernelConfig,
+-    SingleGemmKernelInput,
++    RmsNormKernel, RmsNormKernelConfig, RmsNormKernelInput, SingleGemmKernel,
++    SingleGemmKernelConfig, SingleGemmKernelInput,
+ };
+ use crate::timing::{BuildError, CostNode, CostTreeBuilder, Dim, Evaluator, PerfApiBridge};
+ 
+@@ -32,7 +28,6 @@ pub struct PostAttnLocalWorkletConfig {
+     pub gpu_name: String,
+     pub norm_backends: Vec<&'static str>,
+     pub gemm_backends: Vec<&'static str>,
+-    pub act_backends: Vec<&'static str>,
+ }
+ 
+ #[derive(Clone, Debug)]
+@@ -41,7 +36,6 @@ pub struct PostAttnLocalWorkletResolved {
+     pub o_proj: SingleGemmKernelConfig,
+     pub post_norm: RmsNormKernelConfig,
+     pub up_gate: SingleGemmKernelConfig,
+-    pub act: ElementwiseKernelConfig,
+     pub down: SingleGemmKernelConfig,
+ }
+ 
+@@ -55,15 +49,12 @@ pub struct PostAttnLocalWorklet {
+     pub o_proj: Op<SingleGemmKernel>,
+     pub post_norm: Op<RmsNormKernel>,
+     pub up_gate: Op<SingleGemmKernel>,
+-    pub act: Op<ElementwiseKernel>,
+     pub down: Op<SingleGemmKernel>,
+     resolved: PostAttnLocalWorkletResolved,
+ }
+ 
+ impl PostAttnLocalWorklet {
+     pub fn resolve_config(cfg: &PostAttnLocalWorkletConfig) -> PostAttnLocalWorkletResolved {
+-        let dtype_bytes = cfg.dtype.size_bytes();
+-        let bytes = Dim::param("bytes", dtype_bytes);
+         PostAttnLocalWorkletResolved {
+             o_proj: SingleGemmKernelConfig {
+                 backends: cfg.gemm_backends.clone(),
+@@ -85,12 +76,6 @@ impl PostAttnLocalWorklet {
+                 k: cfg.hidden.clone(),
+                 dtype: cfg.dtype,
+             },
+-            act: ElementwiseKernelConfig {
+-                backends: cfg.act_backends.clone(),
+-                gpu_name: cfg.gpu_name.clone(),
+-                input_bytes_per_token: 2 * cfg.intermediate.clone() * bytes.clone(),
+-                output_bytes_per_token: cfg.intermediate.clone() * bytes.clone(),
+-            },
+             down: SingleGemmKernelConfig {
+                 backends: cfg.gemm_backends.clone(),
+                 gpu_name: cfg.gpu_name.clone(),
+@@ -110,7 +95,6 @@ impl PostAttnLocalWorklet {
+         let o_name = format!("{name}.o_proj");
+         let pn_name = format!("{name}.post_norm");
+         let ug_name = format!("{name}.up_gate_proj");
+-        let act_name = format!("{name}.activation");
+         let down_name = format!("{name}.down_proj");
+ 
+         let o_proj = Op::new(
+@@ -125,10 +109,6 @@ impl PostAttnLocalWorklet {
+             ug_name.clone(),
+             Arc::new(SingleGemmKernel::build(ug_name, resolved.up_gate.clone(), bridge)?),
+         );
+-        let act = Op::new(
+-            act_name.clone(),
+-            Arc::new(ElementwiseKernel::build(act_name, resolved.act.clone(), bridge)?),
+-        );
+         let down = Op::new(
+             down_name.clone(),
+             Arc::new(SingleGemmKernel::build(down_name, resolved.down.clone(), bridge)?),
+@@ -138,15 +118,14 @@ impl PostAttnLocalWorklet {
+             o_proj,
+             post_norm,
+             up_gate,
+-            act,
+             down,
+             resolved,
+         })
+     }
+ 
+-    /// CostTree compile: sum over the five atomic ops (o_proj, post_norm,
+-    /// up_gate, act, down), wrapped in a `Labeled` node with the worklet identity
+-    /// + partition/shape annotation (the old `Describe` header lines).
++    /// CostTree compile: sum over the four explicit ops (o_proj, post_norm,
++    /// up_gate, down), wrapped in a `Labeled` node with the worklet identity +
++    /// partition/shape annotation (the old `Describe` header lines).
+     pub fn compile(&self, builder: &mut CostTreeBuilder) -> CostNode {
+         let label = format!(
+             "{} (PostAttnLocalWorklet) [local (1 GPU); up_gate n={}, down k={}]",
+@@ -158,23 +137,20 @@ impl PostAttnLocalWorklet {
+                 self.o_proj.compile(builder),
+                 self.post_norm.compile(builder),
+                 self.up_gate.compile(builder),
+-                self.act.compile(builder),
+                 self.down.compile(builder),
+             ])),
+         }
+     }
+ 
+-    /// CostTree eval: fill o_proj, post_norm, up_gate, act, down slots in that
+-    /// order, matching `compile` so `cursor` tracks the minted slots.
++    /// CostTree eval: fill o_proj, post_norm, up_gate, down slots in that order,
++    /// matching `compile` so `cursor` tracks the minted slots.
+     pub fn eval(&self, input: &PostAttnLocalWorkletInput, ev: &mut Evaluator) {
+         let m = input.batch_tokens;
+         let gemm_in = SingleGemmKernelInput { m };
+         let norm_in = RmsNormKernelInput { m };
+-        let act_in = ElementwiseKernelInput { num_tokens: m };
+         self.o_proj.eval(&gemm_in, ev);
+         self.post_norm.eval(&norm_in, ev);
+         self.up_gate.eval(&gemm_in, ev);
+-        self.act.eval(&act_in, ev);
+         self.down.eval(&gemm_in, ev);
+     }
+ }
+@@ -193,7 +169,6 @@ mod tests {
+             gpu_name: "H100".to_string(),
+             norm_backends: vec!["flashinfer"],
+             gemm_backends: vec!["torch"],
+-            act_backends: vec!["triton"],
+         }
+     }
+ 
+@@ -206,8 +181,5 @@ mod tests {
+         assert_eq!(r.up_gate.k, 4096);
+         assert_eq!(r.down.n, 4096);
+         assert_eq!(r.down.k, 14336);
+-        // bf16 = 2 bytes/elem.
+-        assert_eq!(r.act.input_bytes_per_token, 2 * 14336 * 2);
+-        assert_eq!(r.act.output_bytes_per_token, 14336 * 2);
+     }
+ }
