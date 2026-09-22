@@ -12,6 +12,9 @@ UUID="$(nvidia-smi --query-gpu=uuid --format=csv,noheader | head -1 | tr -d ' ')
 [ -n "$UUID" ] || { echo "!! no GPU visible"; exit 1; }
 export VIBESIM_PROFILE_GPUS="$UUID"
 export PATH="$HOME/.cargo/bin:$PATH"
+# the host (torch) backend builds its CUPTI extension under $TMPDIR/moesim_cupti_ext;
+# the shared /raid/tmp one belongs to another user -> use our own.
+export TMPDIR="/raid/tmp/yilegu_k3_tmp"; mkdir -p "$TMPDIR"
 echo "==== K3 kernel smoke: repo=$REPO db=$DB gpu=$UUID ===="
 cd "$REPO"
 run () {  # run <kind> <backend> <spec-json>
