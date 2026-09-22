@@ -106,10 +106,14 @@ run_trial () {
   local tree=""
   if [ -n "$PRISTINE" ]; then
     tree="${log}_tree"
-    # a previous trial's container (root) may have left __pycache__ in the tree
+    # a previous trial's container (root) may have left __pycache__ in the tree:
+    # remove the old copy as root via docker, then insist it is gone (a stale
+    # patched tree would make a planted/agent patch fail to apply -> false FAIL).
     if [ -d "$tree" ]; then
-      docker run --rm -v "$tree:/t" --entrypoint rm "$IMG" -rf /t/. >/dev/null 2>&1 || true
+      docker run --rm -v "$(dirname "$tree"):/p" --entrypoint sh "$IMG" \
+        -c "rm -rf /p/$(basename "$tree") /p/$(basename "$tree")_judged" >/dev/null 2>&1 || true
       rm -rf "$tree" "${tree}_judged" 2>/dev/null || true
+      if [ -e "$tree" ]; then echo "!! [$k] could not remove stale tree $tree"; exit 1; fi
     fi
     cp -a "$PRISTINE" "$tree"
     extra+=(-v "$tree:$EDIT_TREE_PATH")
