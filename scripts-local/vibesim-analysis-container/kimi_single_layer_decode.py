@@ -1386,6 +1386,14 @@ def main():
     if args.page_size < 0:
         args.page_size = (64 if args.attention_backend in
                           ("flashmla", "cutedsl_mla", "trtllm_mla") else 1)
+    # KDA recurrent-state dtype: sglang resolves it in configs/mamba_utils.py from
+    # config.mamba_ssm_dtype OR the SGLANG_MAMBA_SSM_DTYPE env (the --mamba-ssm-dtype
+    # server flag sets the env). The synthesized KimiLinearConfig drops the config key
+    # (jobs 851/871 still built an fp32 state), so set the env before bootstrap.
+    # NOTE: with a bf16 state the fused KDA decode kernel is NOT covered
+    # (kda_fused_decode.covered() requires ssm_states fp32) -> the production
+    # cookbook recipe (--mamba-ssm-dtype bfloat16) runs the unfused Triton chain.
+    os.environ["SGLANG_MAMBA_SSM_DTYPE"] = args.mamba_ssm_dtype
     kv_dtype = torch.float8_e4m3fn if args.kv_cache_dtype == "fp8_e4m3" else torch.bfloat16
     sa_kv_dtype = "fp8_e4m3" if args.kv_cache_dtype == "fp8_e4m3" else "auto"
 

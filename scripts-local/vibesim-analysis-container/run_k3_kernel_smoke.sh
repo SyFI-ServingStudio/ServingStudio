@@ -28,13 +28,16 @@ run () {  # run <kind> <backend> <spec-json>
   fi
 }
 KDA='{"batch_size":32,"num_heads":12,"head_k_dim":128,"head_v_dim":128,"dtype":"bf16","state_dtype":"fp32","lower_bound":-5.0}'
-KDA_BF16='{"batch_size":128,"num_heads":12,"head_k_dim":128,"head_v_dim":128,"dtype":"bf16","state_dtype":"bf16","lower_bound":-5.0}'
+# fused KDA decode is only covered for an fp32 recurrent state (kda_fused_decode.covered)
+KDA_BF16='{"batch_size":128,"num_heads":12,"head_k_dim":128,"head_v_dim":128,"dtype":"bf16","state_dtype":"fp32","lower_bound":-5.0}'
+KDA_STATE_BF16='{"batch_size":128,"num_heads":12,"head_k_dim":128,"head_v_dim":128,"dtype":"bf16","state_dtype":"bf16","lower_bound":-5.0}'
 MLA='{"num_heads":12,"kv_lora_rank":512,"rope_dim":64,"q_dtype":"bf16","kv_dtype":"bf16","page_size":64,"batch_size":128,"kv_len":8192}'
 MLA_FP8='{"num_heads":12,"kv_lora_rank":512,"rope_dim":64,"q_dtype":"bf16","kv_dtype":"fp8_e4m3","page_size":64,"batch_size":128,"kv_len":8192}'
 MOE="$(python3 -c 'import json; print(json.dumps({"num_tokens":128,"hidden_size":3584,"intermediate_size":3072,"num_experts":896,"num_local_experts":112,"top_k":16,"input_dtype":"bf16","weight_format":"mxfp4_e2m1_ue8m0","group_size":32,"routing_method":"deepseek_v3_sigmoid","activation":"situ","n_group":1,"topk_group":1,"routed_scaling_factor":1.0,"gemm1_alpha":4.0,"gemm1_clamp_limit":25.0,"per_expert_batches":[128]*16+[0]*880},separators=(",",":")))')"
 run kda_recurrent_decode torch          "$KDA"
 run kda_recurrent_decode sglang_triton  "$KDA"
 run kda_fused_decode     sglang_fused   "$KDA_BF16"
+run kda_recurrent_decode sglang_triton  "$KDA_STATE_BF16"
 run mla_decode_attention sglang_cutedsl_mla "$MLA_FP8"
 run mla_decode_attention sglang_trtllm_mla  "$MLA"
 run mla_decode_attention sglang_triton      "$MLA"
