@@ -121,11 +121,28 @@ JIT recompiles on a content-hashed cache miss (clear cache so before ≠ after);
 - flashinfer cubins pre-warmed at `/raid/yilegu/flashinfer_cache` (offline runs). Goldens cached at
   `/raid/yilegu/eval_goldens`.
 
-## Related: Kimi-K3 single-layer profiler (same dir, separate tool)
+## Kimi-K3 open-ended case (2026-09-22, branch `kimi-k3-loop`)
 
-`kimi_single_layer_decode.py` + `run_kimi_single_layer.sh` — profiles ONE K3 decoder layer on one
-GPU (the full ~1T MoE won't fit). Not part of the eval loop; it's the roofline-target discovery
-tool. Builds a `KimiK3DecoderLayer` with random bf16 weights on `lmsysorg/sglang:v0.5.20`, EP=16 rank
-(56 routed experts), synthetic decode inputs + KDA recurrent-state. See
-`memory/kimi-single-layer-decode-harness.md` for first numbers (KDA layer is context-length-flat;
-MoE is the tunable ~50%).
+K3 is a **new case of the same 3-container loop**, not a separate tool: eval-harness container =
+`lmsysorg/sglang:v0.5.20` (+ codex: `rga-local/sglang-k3:v0520-codex`), VibeSim container = the
+K3 oracle (branch `kimi-k3` of the VibeSim repo, in progress), agent container = codex runner.
+Differences from the PR cases: no answer key (open-ended), the "extractor" is the single-layer
+driver, and the judged metric is **CUDA-graph replay time** of one `KimiK3DecoderLayer` decode step.
+
+| piece | file |
+|---|---|
+| driver / extractor | `kimi_single_layer_decode.py` (`--cuda-graph`, `--capture/--replay`, `--profile-kernels`, `--nvtx-align`, `--attn-heads 12 --attention-backend cutedsl_mla --kv-cache-dtype fp8_e4m3 --mamba-ssm-dtype bfloat16 --experts 112 --ep 8` = cookbook B200 TP8/EP8 rank shape) |
+| cases | `issue_k3_kda.json` (primary B=128×8k), `issue_k3_mla.json` (primary B=128×8k; secondaries 1×1M, 16×64k) |
+| judge | `judge_k3.py` — pristine baseline+golden (5 reps, σ), agent tree reduced to its `.py` diff onto a pristine copy mounted read-only, gates: correctness (output + post-step state, `max_rel_err ≤ 0.02`) ∧ primary improvement ≥ max(5%, 3σ) ∧ no secondary regression |
+| runner | `run_iter_opt_eval.sh` (config keys `judge`, `driver`, `mounts`, `shm_size`, `edit_tree`, `task_template`, `codex_model`; `CODEX_MODEL`/`PLANT_PATCH` env) |
+| prompt | `agent_task_k3_opt.md` (de-leaked; `$ORACLE_URL` = the K3 oracle) |
+| controls | `run_k3_controls.sh` + `controls/planted_{slowdown,numerics}.patch` (null / slowdown / numerics) |
+| goldens | `/raid/yilegu/eval_goldens/golden_k3_<key>/` (key = driver sha + args + points + seed) |
+
+Run: `sbatch slurm_gpu.sh ./run_iter_opt_eval.sh issue_k3_kda.json 3 max` (controls:
+`sbatch slurm_gpu.sh ./run_k3_controls.sh issue_k3_kda.json`). Measured baseline (graph, production
+shape): KDA B=128 ≈ 596 µs, B=32 ≈ 337 µs; MLA B=128 ≈ 636 µs, 1×1M ≈ 340 µs. Golden replay on a pristine
+tree is bit-exact. Why graph time: at production batch the eager KDA/MoE step is launch-bound (~1.0-1.3 ms
+flat), so eager wall time would reward launch-overhead hacks. Why 12 heads: the Blackwell MLA decode
+kernels reject the 96-head DP-attention shape (trtllm-gen: 64 < heads < 128 unsupported; cute-dsl
+needs page 64), and sglang's cookbook B200 recipes are attention TP8.
