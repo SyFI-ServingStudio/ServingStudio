@@ -191,11 +191,20 @@ def main():
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
     cfg = json.loads(pathlib.Path(args.config).read_text())
-    driver_path = HERE / cfg.get("driver", "kimi_single_layer_decode.py")
     prim, secs = points_of(cfg)
     points = [prim] + secs
-    key = case_key(cfg, driver_path)
-    v = {"agent_container": args.agent_container, "case_key": key, "points": {}}
+    # Snapshot the judge's driver ONCE: baseline and replay containers must run the
+    # identical file (an edit landing between the two would otherwise be scored as a
+    # numerics change of the agent's tree).
+    src_driver = HERE / cfg.get("driver", "kimi_single_layer_decode.py")
+    key = case_key(cfg, src_driver)
+    snap_dir = pathlib.Path(args.golden_dir) / f"golden_k3_{key}"
+    snap_dir.mkdir(parents=True, exist_ok=True)
+    driver_path = snap_dir / src_driver.name
+    if not driver_path.exists():
+        shutil.copy2(src_driver, driver_path)
+    v = {"agent_container": args.agent_container, "case_key": key, "points": {},
+         "driver_sha": hashlib.sha1(driver_path.read_bytes()).hexdigest()[:12]}
 
     # 1) pristine baseline + goldens
     gdir, base = ensure_baseline(cfg, driver_path, args.golden_dir, points, key)

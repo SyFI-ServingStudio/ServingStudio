@@ -105,7 +105,13 @@ run_trial () {
   for m in "${MOUNTS[@]:-}"; do [ -n "$m" ] && extra+=(-v "$m"); done
   local tree=""
   if [ -n "$PRISTINE" ]; then
-    tree="${log}_tree"; rm -rf "$tree"; cp -a "$PRISTINE" "$tree"
+    tree="${log}_tree"
+    # a previous trial's container (root) may have left __pycache__ in the tree
+    if [ -d "$tree" ]; then
+      docker run --rm -v "$tree:/t" --entrypoint rm "$IMG" -rf /t/. >/dev/null 2>&1 || true
+      rm -rf "$tree" "${tree}_judged" 2>/dev/null || true
+    fi
+    cp -a "$PRISTINE" "$tree"
     extra+=(-v "$tree:$EDIT_TREE_PATH")
   fi
   docker run -d --name "$cname" --gpus "$GPU" \
@@ -135,6 +141,10 @@ run_trial () {
   docker cp "$cname:/workspace/opt_run" "${log}_opt_run" >/dev/null 2>&1 \
     && echo "== [$k] saved iteration workspace -> ${log}_opt_run" \
     || echo "== [$k] (no /workspace/opt_run produced)"
+  # hand the bind-mounted tree back to the host user (container writes as root)
+  if [ -n "$tree" ]; then
+    docker exec "$cname" chown -R "$(id -u):$(id -g)" "$EDIT_TREE_PATH" >/dev/null 2>&1 || true
+  fi
 
   # Judge-integrity controls (test-only): PLANT_PATCH=<patch> applies a known edit to the
   # agent's tree after the agent step so a planted slowdown / numerics change can be shown to

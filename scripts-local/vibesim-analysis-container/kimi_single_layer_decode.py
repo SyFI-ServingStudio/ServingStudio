@@ -111,6 +111,10 @@ def build_config_dir(experts, ep, num_layers=8, out_dir="/tmp/k3_cfg",
         "intermediate_size": 33792,         # dense layer-0 MLP (real HF value)
         "routed_scaling_factor": 1.0,       # real HF value (was 2.5 in the first sweeps)
         "mla_use_output_gate": True,        # real HF value: MLA o_proj output gate
+        "mla_use_nope": True,               # real HF value (MLA skips rope on the decode path)
+        "moe_renormalize": True,            # real HF value: renormalize top-k weights
+        "num_key_value_heads": 96,          # real HF value
+        "attn_res_block_size": 12,          # real HF value: attention-residual stream block
         "first_k_dense_replace": 1,
         "moe_layer_freq": 1,
         "use_grouped_topk": True,
@@ -128,6 +132,8 @@ def build_config_dir(experts, ep, num_layers=8, out_dir="/tmp/k3_cfg",
         "qk_rope_head_dim": 64,
         "v_head_dim": 128,
         "routed_expert_hidden_size": 3584,  # latent MoE space
+        "latent_moe_use_norm": True,        # real HF value: RMSNorm(3584) on the routed latent
+                                            # (sglang default False -> would silently drop it)
         "hidden_act": "situ" if mxfp4 else "silu",  # K3 uses "situ"; silu=same shapes on bf16
         "rms_norm_eps": 1e-5,
         "max_position_embeddings": 1048576,
@@ -846,20 +852,68 @@ def _cuda_time(fn, iters):
     return t[len(t) // 2] * 1000.0  # median us
 
 
-def call_layer(layer, fb, positions, hidden):
+def call_layer(layer, fb, positions, hidden, ar=None):
+    """One decoder-layer decode step. With an AttnResState (production
+    attn_res_block_size=12) the layer runs _forward_attn_residual: `residual` carries
+    the pending prefix_sum and `attn_res` the snapshot bank; without it, the plain
+    residual path."""
     za = make_zero_allocator()
     return layer.forward(
         positions=positions,
         hidden_states=hidden,
         forward_batch=fb,
-        residual=None,
-        attn_res=None,
+        residual=None if ar is None else ar.prefix,
+        attn_res=None if ar is None else ar.ar,
         zero_allocator=za,
     )
 
 
+class AttnResState:
+    """K3 attention-residual stream state for ONE layer (kimi_k3.py:2429-2445,
+    2893-2900; layers/attn_residual.py). Production builds one AttnResidual per
+    forward with block_num = ceil(93/12) = 8 bank rows of [T, H]; a layer at index
+    i aggregates over prev_valid_blocks = ceil(i/12) banked rows (two score
+    projections [H->1] + two RMSNorms + the aggregation kernel per layer) and
+    write-layers (i % 12 == 0) snapshot a new row. We seed the bank and the pending
+    prefix_sum and expose reset()/state_after() for the golden."""
+
+    K3_NUM_LAYERS = 93
+
+    def __init__(self, layer, B, seed, device="cuda"):
+        from sglang.srt.layers.attn_residual import AttnResidual
+        bs = int(layer.attn_res_block_size)
+        self.block_num = -(-self.K3_NUM_LAYERS // bs)
+        self.nvb0 = int(layer.prev_valid_blocks)
+        self.is_write_layer = bool(layer.is_block_write_layer)
+        gen = torch.Generator(device=device)
+        gen.manual_seed(seed + 31)
+        hidden0 = torch.zeros(B, HIDDEN_SIZE, device=device, dtype=torch.bfloat16)
+        self.ar = AttnResidual(hidden0, self.block_num, block_residual=None)
+        with torch.no_grad():
+            bank = torch.randn(self.ar.block_residual.shape, device=device,
+                               dtype=torch.bfloat16, generator=gen) * 0.02 + 0.01
+            self.ar.block_residual.copy_(bank)
+            self.prefix = torch.randn(B, HIDDEN_SIZE, device=device,
+                                      dtype=torch.bfloat16, generator=gen) * 0.02
+        self.ar.num_valid_blocks = self.nvb0
+        self._bank0 = self.ar.block_residual.clone()
+        self._prefix0 = self.prefix.clone()
+
+    def reset(self):
+        with torch.no_grad():
+            self.ar.block_residual.copy_(self._bank0)
+            self.prefix.copy_(self._prefix0)
+        self.ar.num_valid_blocks = self.nvb0
+
+    def state_after(self):
+        # the bank row a write-layer snapshots (else nothing changes)
+        if self.is_write_layer:
+            return {"attn_res_row": self.ar.block_residual[:, self.nvb0, :].clone()}
+        return {}
+
+
 def graph_capture_and_time(layer, backend, backend_for_ctx, fb, positions, hidden,
-                           iters, B, warmup=3):
+                           iters, B, warmup=3, ar=None):
     """Capture ONE decode step of the layer in a CUDA graph and time replays.
 
     Mirrors DecodeCudaGraphRunner (model_executor/runner/decode_cuda_graph_runner.py):
@@ -884,7 +938,7 @@ def graph_capture_and_time(layer, backend, backend_for_ctx, fb, positions, hidde
         in_graph = getattr(backend, "init_forward_metadata_in_graph", None)
         if in_graph is not None:
             in_graph(fb)
-        return call_layer(layer, fb, positions, hidden)
+        return call_layer(layer, fb, positions, hidden, ar)
 
     side = torch.cuda.Stream()
     with model_capture_mode(), forward_ctx(backend_for_ctx), torch.inference_mode():
@@ -946,12 +1000,14 @@ def _tensor_diff(a, b):
 
 
 def correctness_step(layer, st, fb, positions, hidden, seed, backend_for_ctx,
-                     graph=None, static_out=None):
+                     graph=None, static_out=None, ar=None):
     """One decode step from the GOLDEN initial state and input; returns
     (output[B,H] bf16, post-step state dict). Uses the captured graph when
     available (the judged metric is graph replay, so the checked numerics must be
     the graph's), else the eager path."""
     st.reset()
+    if ar is not None:
+        ar.reset()
     with torch.no_grad():
         hidden.copy_(gen_hidden(seed, hidden.shape[0]))
     torch.cuda.synchronize()
@@ -961,10 +1017,13 @@ def correctness_step(layer, st, fb, positions, hidden, seed, backend_for_ctx,
         out = static_out.clone()
     else:
         with forward_ctx(backend_for_ctx), torch.inference_mode():
-            o = call_layer(layer, fb, positions, hidden)
+            o = call_layer(layer, fb, positions, hidden, ar)
         torch.cuda.synchronize()
         out = (o[0] if isinstance(o, tuple) else o).clone()
-    return out, st.state_after()
+    state = st.state_after()
+    if ar is not None:
+        state.update(ar.state_after())
+    return out, state
 
 
 def profile_kernels(fn, n=10):
@@ -1088,17 +1147,23 @@ def time_point(cfg, sa, layer, B, seq_len, iters, warmup, split=False,
             backend_for_ctx = KDADecodeShim(st.kda)
         hidden = gen_hidden(seed, B)
         positions = fb.positions
+        # Production K3 runs the attention-residual stream (attn_res_block_size=12);
+        # build its per-layer state so the layer takes _forward_attn_residual.
+        ar = AttnResState(layer, B, seed) if getattr(layer, "use_attn_residuals", False) else None
+        if ar is not None:
+            res["attn_res"] = {"block_num": ar.block_num, "valid_blocks": ar.nvb0,
+                               "write_layer": ar.is_write_layer}
 
         with forward_ctx(backend_for_ctx), torch.inference_mode():
             for _ in range(warmup):
-                out = call_layer(layer, fb, positions, hidden)
+                out = call_layer(layer, fb, positions, hidden, ar)
             torch.cuda.synchronize()
 
             hs = out[0] if isinstance(out, tuple) else out
             res["out_shape"] = list(hs.shape)
             res["finite"] = bool(torch.isfinite(hs).all().item())
 
-            res["us_step"] = _cuda_time(lambda: call_layer(layer, fb, positions, hidden), iters)
+            res["us_step"] = _cuda_time(lambda: call_layer(layer, fb, positions, hidden, ar), iters)
             res["us_token"] = res["us_step"] / B
             if attn_type == "mla":
                 res["kv_gb"] = st.kv_bytes / 1e9
@@ -1123,7 +1188,7 @@ def time_point(cfg, sa, layer, B, seq_len, iters, warmup, split=False,
             try:
                 gbackend = st.backend if attn_type == "mla" else st.kda
                 g = graph_capture_and_time(layer, gbackend, backend_for_ctx, fb,
-                                           positions, hidden, iters, B)
+                                           positions, hidden, iters, B, ar=ar)
                 graph_keepalive = (g.pop("_graph"), g.pop("_static_out"))
                 res.update(g)
                 res["graph_speedup"] = res["us_step"] / res["us_step_graph"]
@@ -1146,7 +1211,7 @@ def time_point(cfg, sa, layer, B, seq_len, iters, warmup, split=False,
             else:
                 def fn():
                     with forward_ctx(backend_for_ctx), torch.inference_mode():
-                        call_layer(layer, fb, positions, hidden)
+                        call_layer(layer, fb, positions, hidden, ar)
             prof = profile_kernels(fn)
             prof.update({"point": [B, seq_len], "latency_us": res["latency_us"],
                          "latency_mode": res["latency_mode"], "attn_type": attn_type})
@@ -1166,14 +1231,14 @@ def time_point(cfg, sa, layer, B, seq_len, iters, warmup, split=False,
             else:
                 def step_fn():
                     with forward_ctx(backend_for_ctx), torch.inference_mode():
-                        call_layer(layer, fb, positions, hidden)
+                        call_layer(layer, fb, positions, hidden, ar)
             nvtx_align_steps(step_fn, nvtx_align["dir"], B, seq_len, nvtx_align["steps"],
                              res["latency_mode"])
 
         if golden is not None:
             graph, static_out = graph_keepalive if graph_keepalive else (None, None)
             out, state = correctness_step(layer, st, fb, positions, hidden, seed,
-                                          backend_for_ctx, graph, static_out)
+                                          backend_for_ctx, graph, static_out, ar=ar)
             gpath = _point_path(golden["path"], B, seq_len)
             if golden["mode"] == "capture":
                 torch.save({"B": B, "seq_len": seq_len, "seed": seed, "attn_type": attn_type,

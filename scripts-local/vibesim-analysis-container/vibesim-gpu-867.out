@@ -1,0 +1,248 @@
+==== slurm_gpu.sh on cayenne job=867 ====
+CUDA_VISIBLE_DEVICES=0
+allocated GPU UUID(s): GPU-623e9206-cf90-1c4b-a44a-1d64759092d7
+0, GPU-623e9206-cf90-1c4b-a44a-1d64759092d7, 0 MiB
+==== exec: ./run_k3_controls.sh issue_k3_mla.json ====
+######## control 1/3: null (pristine tree)
+rendered /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/agent_task_rendered.md (100 lines)
+== extracting pristine /sgl-workspace/sglang/python/sglang from rga-local/sglang-k3:v0520-codex -> /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/pristine_tree
+--- Wrapper: Applying owner=yilegu, memory=432834647654 bytes, and cpus=28.8 ---
+==================== k3_mla TRIAL 1 ====================
+--- Wrapper: Applying owner=yilegu, memory=432834647654 bytes, and cpus=28.8 ---
+== [1] launching Codex agent (gpt-5.6-luna effort=max, timeout 1s)
+== [1] agent exit=124 (transcript: /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/trial_1_agent.log)
+== [1] saved iteration workspace -> /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/trial_1_opt_run
+== [1] deterministic rebuild of the agent's tree
+== [1] install step: true
+== [1] judging (judge_k3.py)
+{
+  "agent_container": "iteropt_k3_mla_run_1",
+  "case_key": "d062fa4803ed",
+  "points": {
+    "128,8192": {
+      "before_us": 687.6159906387329,
+      "before_sigma_us": 0.36820185710530534,
+      "after_us": 688.6399984359741,
+      "after_lat": [
+        687.5519752502441,
+        687.5839829444885,
+        688.6399984359741,
+        688.6399984359741,
+        688.6399984359741
+      ],
+      "improvement": -0.0015,
+      "noise_frac_3sigma": 0.0016,
+      "correctness": {
+        "max_abs_err": 0.0,
+        "max_rel_err": 0.0,
+        "mean_rel_err": 0.0,
+        "nan": false,
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "latency_mode": "graph",
+      "primary": true
+    },
+    "1,1048576": {
+      "before_us": 341.47199988365173,
+      "before_sigma_us": 0.8131734549962168,
+      "after_us": 342.52798557281494,
+      "after_lat": [
+        341.47199988365173,
+        341.47199988365173,
+        342.52798557281494,
+        343.51998567581177,
+        343.48800778388977
+      ],
+      "improvement": -0.0031,
+      "noise_frac_3sigma": 0.0071,
+      "correctness": {
+        "max_abs_err": 0.0,
+        "max_rel_err": 0.0,
+        "mean_rel_err": 0.0,
+        "nan": false,
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "latency_mode": "graph",
+      "primary": false
+    },
+    "16,65536": {
+      "before_us": 351.6159951686859,
+      "before_sigma_us": 2.491564359583284,
+      "after_us": 355.80798983573914,
+      "after_lat": [
+        355.77601194381714,
+        355.80798983573914,
+        355.77601194381714,
+        355.80798983573914,
+        355.80798983573914
+      ],
+      "improvement": -0.0119,
+      "noise_frac_3sigma": 0.0213,
+      "correctness": {
+        "max_abs_err": 0.0,
+        "max_rel_err": 0.0,
+        "mean_rel_err": 0.0,
+        "nan": false,
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "latency_mode": "graph",
+      "primary": false
+    }
+  },
+  "changed_files": [],
+  "diff_patch": "/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/trial_1_tree_judged.patch",
+  "diff_lines": 0,
+  "gates": {
+    "correctness": true,
+    "latency_improved": false,
+    "no_secondary_regression": true
+  },
+  "required_improvement": 0.05,
+  "before_us": 687.6159906387329,
+  "latency_us": 688.6399984359741,
+  "recovered_frac": -0.0015,
+  "correctness": {
+    "pass": true
+  },
+  "golden_dir": "/raid/yilegu/eval_goldens/golden_k3_d062fa4803ed",
+  "verdict": "FAIL",
+  "reason": "failed: latency_improved"
+}
+== [1] done -> /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/trial_1_verdict.json
+==================== SUMMARY (k3_mla) ====================
+  trial 1: FAIL improvement/recovered=-0.0015 lat=688.6399984359741us correct=True reason=failed: latency_improved
+  PASS 0/1
+######## control 2/3: planted slowdown
+rendered /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/agent_task_rendered.md (100 lines)
+==================== k3_mla TRIAL 2 ====================
+--- Wrapper: Applying owner=yilegu, memory=432834647654 bytes, and cpus=28.8 ---
+== [2] launching Codex agent (gpt-5.6-luna effort=max, timeout 1s)
+== [2] agent exit=124 (transcript: /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/trial_2_agent.log)
+== [2] saved iteration workspace -> /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/trial_2_opt_run
+== [2] CONTROL: applying planted patch /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/controls/planted_slowdown.patch to the agent tree
+patching file srt/models/kimi_k3.py
+== [2] deterministic rebuild of the agent's tree
+== [2] install step: true
+== [2] judging (judge_k3.py)
+{
+  "agent_container": "iteropt_k3_mla_run_2",
+  "case_key": "69c92b45da6f",
+  "points": {
+    "128,8192": {
+      "before_us": 689.6640062332153,
+      "before_sigma_us": 0.4034555894408399,
+      "after_us": 682.3999881744385,
+      "after_lat": [
+        681.4079880714417,
+        682.3999881744385,
+        681.6319823265076,
+        682.4960112571716,
+        682.4640035629272
+      ],
+      "improvement": 0.0105,
+      "noise_frac_3sigma": 0.0018,
+      "correctness": {
+        "max_abs_err": 0.20947265625,
+        "max_rel_err": 1.7874847467968273,
+        "mean_rel_err": 1.6965482234954834,
+        "nan": false,
+        "state_ok": false,
+        "rel_err_max": 0.02,
+        "pass": false
+      },
+      "latency_mode": "graph",
+      "primary": true
+    },
+    "1,1048576": {
+      "before_us": 343.51998567581177,
+      "before_sigma_us": 0.7971480399516209,
+      "after_us": 347.6479947566986,
+      "after_lat": [
+        348.60798716545105,
+        347.7120101451874,
+        347.6479947566986,
+        347.6159870624542,
+        347.5840091705322
+      ],
+      "improvement": -0.012,
+      "noise_frac_3sigma": 0.007,
+      "correctness": {
+        "max_abs_err": 0.1728515625,
+        "max_rel_err": 1.7524574800350539,
+        "mean_rel_err": 1.6857281923294067,
+        "nan": false,
+        "state_ok": false,
+        "rel_err_max": 0.02,
+        "pass": false
+      },
+      "latency_mode": "graph",
+      "primary": false
+    },
+    "16,65536": {
+      "before_us": 353.7600040435791,
+      "before_sigma_us": 0.02024344329250359,
+      "after_us": 357.9519987106323,
+      "after_lat": [
+        359.8720133304596,
+        359.935998916626,
+        357.85600543022156,
+        357.9519987106323,
+        357.85600543022156
+      ],
+      "improvement": -0.0118,
+      "noise_frac_3sigma": 0.0002,
+      "correctness": {
+        "max_abs_err": 0.1827392578125,
+        "max_rel_err": 1.7088881287539375,
+        "mean_rel_err": 1.7064045667648315,
+        "nan": false,
+        "state_ok": false,
+        "rel_err_max": 0.02,
+        "pass": false
+      },
+      "latency_mode": "graph",
+      "primary": false
+    }
+  },
+  "changed_files": [],
+  "diff_patch": "/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/trial_2_tree_judged.patch",
+  "diff_lines": 0,
+  "gates": {
+    "correctness": false,
+    "latency_improved": false,
+    "no_secondary_regression": true
+  },
+  "required_improvement": 0.05,
+  "before_us": 689.6640062332153,
+  "latency_us": 682.3999881744385,
+  "recovered_frac": 0.0105,
+  "correctness": {
+    "pass": false
+  },
+  "golden_dir": "/raid/yilegu/eval_goldens/golden_k3_69c92b45da6f",
+  "verdict": "FAIL",
+  "reason": "failed: correctness,latency_improved"
+}
+== [2] done -> /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/trial_2_verdict.json
+==================== SUMMARY (k3_mla) ====================
+  trial 1: FAIL improvement/recovered=-0.0015 lat=688.6399984359741us correct=True reason=failed: latency_improved
+  trial 2: FAIL improvement/recovered=0.0105 lat=682.3999881744385us correct=False reason=failed: correctness,latency_improved
+  PASS 0/2
+######## control 3/3: planted numerics change
+rendered /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/agent_task_rendered.md (100 lines)
+==================== k3_mla TRIAL 3 ====================
+--- Wrapper: Applying owner=yilegu, memory=432834647654 bytes, and cpus=28.8 ---
+== [3] launching Codex agent (gpt-5.6-luna effort=max, timeout 1s)
+== [3] agent exit=124 (transcript: /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/trial_3_agent.log)
+== [3] saved iteration workspace -> /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/trial_3_opt_run
+== [3] CONTROL: applying planted patch /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/controls/planted_numerics.patch to the agent tree
+patching file srt/models/kimi_k3.py
+== [3] deterministic rebuild of the agent's tree
+== [3] install step: true
+== [3] judging (judge_k3.py)
