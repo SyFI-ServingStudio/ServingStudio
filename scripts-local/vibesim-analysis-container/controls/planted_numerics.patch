@@ -1,0 +1,11 @@
+--- a/srt/models/kimi_k3.py	2026-09-22 11:28:55.545916216 -0700
++++ b/srt/models/kimi_k3.py	2026-09-22 11:28:55.546916133 -0700
+@@ -1335,7 +1335,7 @@
+         latent = buf[:latent_numel].view(num_tokens, self.moe_hidden_size)
+         shared_output = buf[latent_numel:].view(num_tokens, hidden_size)
+         if not fused_norm:
+-            latent = self._latent_norm(latent)
++            pass  # PLANTED CONTROL: routed_expert_norm skipped -> numerics change
+         out, _ = self.routed_expert_up_proj(latent)
+ 
+         # prefetch_bc: b (shared_output) was produced by the all-reduce and

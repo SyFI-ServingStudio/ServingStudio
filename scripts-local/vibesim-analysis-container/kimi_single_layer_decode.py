@@ -997,6 +997,36 @@ def profile_kernels(fn, n=10):
             "num_launches": sum(r["count"] for r in rows)}
 
 
+def nvtx_align_steps(step_fn, out_dir, B, L, n_steps, latency_mode):
+    """Layer-level alignment PROBE for VibeSim's nsys pipeline: wrap n_steps decode steps
+    in the NVTX ranges its parser keys on (`sglang_iteration(N): forward`,
+    alignment/nsys/parse.py) and append the canonical sglang_text records
+    (`VibeSimAlignmentWorker` once, one `VibeSimAlignmentIteration` per step; field set
+    per alignment/profiler/record_extraction.py) to <out_dir>/server.log. Run the whole
+    driver under `nsys profile --cuda-graph-trace=node ...` to get the matching .nsys-rep.
+    This is a single-layer debug probe, not a full-model alignment (no K3 checkpoint)."""
+    os.makedirs(out_dir, exist_ok=True)
+    logp = os.path.join(out_dir, "server.log")
+    with open(logp, "a") as f:
+        f.write("VibeSimAlignmentWorker " + json.dumps({
+            "schema_version": 1, "input_adapter": "sglang_text", "pid": os.getpid(),
+            "device_id": 0, "visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES", "0"),
+            "tp_rank": 0, "dp_rank": 0, "pp_rank": 0, "tp_size": 1, "dp_size": 1,
+            "probe": f"kimi_single_layer_decode B={B} L={L} mode={latency_mode}"}) + "\n")
+        torch.cuda.synchronize()
+        for i in range(n_steps):
+            torch.cuda.nvtx.range_push(f"sglang_iteration({i}): forward")
+            step_fn()
+            torch.cuda.nvtx.range_pop()
+            f.write("VibeSimAlignmentIteration " + json.dumps({
+                "schema_version": 1, "input_adapter": "sglang_text", "iteration_index": i,
+                "prefill_tokens": 0, "decode_requests": B, "decode_tokens_scheduled": B,
+                "prefill_chunk_pairs": [], "decode_kv_lens": [L] * B,
+                "latency_mode": latency_mode}) + "\n")
+        torch.cuda.synchronize()
+    log(f"[nvtx] {n_steps} steps under sglang_iteration(N) ranges; records -> {logp}")
+
+
 def time_split(layer, fb, positions, hidden, iters, warmup, attn_type="kda"):
     """Separately time self_attn vs MoE mlp vs the two RMSNorms."""
     out = {}
@@ -1036,7 +1066,7 @@ def time_split(layer, fb, positions, hidden, iters, warmup, attn_type="kda"):
 def time_point(cfg, sa, layer, B, seq_len, iters, warmup, split=False,
                attn_type="kda", mc=None, layer_idx=5, attention_backend="triton",
                cuda_graph=False, page_size=1, kv_dtype=torch.bfloat16, seed=0,
-               golden=None, profile_kernels_out=None):
+               golden=None, profile_kernels_out=None, nvtx_align=None):
     """golden: None | {"mode": "capture"|"replay", "path": str, "rel_err_max": float}."""
     res = {"B": B, "seq_len": seq_len, "ok": False, "attn_type": attn_type, "seed": seed}
     st = None
@@ -1128,6 +1158,17 @@ def time_point(cfg, sa, layer, B, seq_len, iters, warmup, split=False,
             log(f"[profile] {ppath}: {prof['num_launches']:.0f} launches/step, "
                 f"kernel sum {prof['total_kernel_us']:.1f}us "
                 f"(latency {res['latency_us']:.1f}us {res['latency_mode']})")
+
+        if nvtx_align:
+            graph = graph_keepalive[0] if graph_keepalive else None
+            if graph is not None:
+                step_fn = graph.replay
+            else:
+                def step_fn():
+                    with forward_ctx(backend_for_ctx), torch.inference_mode():
+                        call_layer(layer, fb, positions, hidden)
+            nvtx_align_steps(step_fn, nvtx_align["dir"], B, seq_len, nvtx_align["steps"],
+                             res["latency_mode"])
 
         if golden is not None:
             graph, static_out = graph_keepalive if graph_keepalive else (None, None)
@@ -1267,6 +1308,11 @@ def main():
                     help="CHECK passes iff max|a-b|/max|b| <= this for output and state")
     ap.add_argument("--profile-kernels", type=str, default="",
                     help="write a per-kernel torch.profiler table (JSON) per point")
+    ap.add_argument("--nvtx-align", type=str, default="",
+                    help="dir: run --nvtx-align-steps steps under sglang_iteration(N) NVTX "
+                         "ranges and append VibeSim alignment records to <dir>/server.log "
+                         "(run the driver under nsys to produce the matching .nsys-rep)")
+    ap.add_argument("--nvtx-align-steps", type=int, default=20)
     ap.add_argument("--point", type=str, default="", help="single point B,seq_len")
     ap.add_argument("--json-out", type=str, default="")
     args = ap.parse_args()
@@ -1378,7 +1424,9 @@ def main():
                            attention_backend=args.attention_backend,
                            cuda_graph=args.cuda_graph, page_size=args.page_size,
                            kv_dtype=kv_dtype, seed=args.seed, golden=golden,
-                           profile_kernels_out=args.profile_kernels)
+                           profile_kernels_out=args.profile_kernels,
+                           nvtx_align=({"dir": args.nvtx_align, "steps": args.nvtx_align_steps}
+                                       if args.nvtx_align else None))
             r["rung"] = name
             results["points"].append(r)
             # Machine-readable per-point line (what the judge parses).
