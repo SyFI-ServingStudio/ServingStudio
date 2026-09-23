@@ -56,7 +56,7 @@ def log(*a):
 # --------------------------------------------------------------------------- #
 def build_config_dir(experts, ep, num_layers=8, out_dir="/tmp/k3_cfg",
                      moe_backend="bf16", attn_type="kda", target_layer=5,
-                     attn_heads=96, mamba_ssm_dtype="float32"):
+                     attn_heads=96, mamba_ssm_dtype="float32", local_topk=16):
     """Write a Kimi-K3 config.json (model_type=kimi_linear) with the routed-expert
     count shrunk to the per-EP-rank footprint. Returns (out_dir, cfg_dict).
 
@@ -106,7 +106,12 @@ def build_config_dir(experts, ep, num_layers=8, out_dir="/tmp/k3_cfg",
         "num_attention_heads": num_attention_heads,  # 96 for MLA, 64 for KDA-only
         "moe_intermediate_size": 3072,
         "num_experts": experts,             # EP-rank-shrunk (896/EP; 56 @ EP16)
-        "num_experts_per_token": 16,        # K3 top-k
+        # K3 top-k is 16 over 896 global experts. A single-process rank cannot run
+        # sglang's EP group, so `--local-topk 16/EP` (2 @ EP8) emulates the rank's
+        # share of the assignments: 128 tokens x 2 = 256 local rows instead of the
+        # 2048 an all-local top-16 over the shrunk expert list would produce (8x a
+        # production rank). Numerics are synthetic either way; the MoE work is not.
+        "num_experts_per_token": local_topk,
         "num_shared_experts": 2,
         "intermediate_size": 33792,         # dense layer-0 MLP (real HF value)
         "routed_scaling_factor": 1.0,       # real HF value (was 2.5 in the first sweeps)
@@ -981,12 +986,22 @@ def _point_path(path, B, L):
     return f"{root}_B{B}_L{L}{ext or '.pt'}"
 
 
+HIDDEN_SCALE = 0.02   # set from --hidden-scale in main()
+
+
 def gen_hidden(seed, B, device="cuda"):
-    """Seeded decode input (one token per request), independent of the global RNG."""
+    """Seeded decode input (one token per request), independent of the global RNG.
+
+    Scale matters for routing: at 0.02 the residual is dwarfed by the attention
+    output, whose planted structure (shared-mean KDA state / identical high-norm KV
+    rows) is the same for every request, so the post-attention norm feeds the router
+    near-identical vectors and the top-k collapses onto ~20 experts. Unit scale keeps
+    the per-token identity dominant and the routing spread (production-like).
+    """
     gen = torch.Generator(device=device)
     gen.manual_seed(seed + 1000 + B)
     return torch.randn(B, HIDDEN_SIZE, device=device, dtype=torch.bfloat16,
-                       generator=gen) * 0.02
+                       generator=gen) * HIDDEN_SCALE
 
 
 def _tensor_diff(a, b):
@@ -1329,6 +1344,12 @@ def main():
     ap.add_argument("--experts", type=int, default=56,
                     help="routed experts on this rank (896/EP; 56 @ EP=16)")
     ap.add_argument("--ep", type=int, default=16, help="modeled EP degree (metadata)")
+    ap.add_argument("--local-topk", type=int, default=16,
+                    help="routed experts per token on this rank (16 = all-local top-16; "
+                         "16/EP emulates the rank's share of a global top-16, e.g. 2 @ EP8)")
+    ap.add_argument("--hidden-scale", type=float, default=0.02,
+                    help="std of the seeded decode input (0.02 = legacy, collapses routing; "
+                         "1.0 = per-token identity dominates -> spread routing)")
     ap.add_argument("--layer-idx", type=int, default=-1,
                     help="decoder layer index to build; default 5 (KDA) / 4 (MLA)")
     ap.add_argument("--attn-type", type=str, default="kda", choices=["kda", "mla"],
@@ -1396,10 +1417,13 @@ def main():
     os.environ["SGLANG_MAMBA_SSM_DTYPE"] = args.mamba_ssm_dtype
     kv_dtype = torch.float8_e4m3fn if args.kv_cache_dtype == "fp8_e4m3" else torch.bfloat16
     sa_kv_dtype = "fp8_e4m3" if args.kv_cache_dtype == "fp8_e4m3" else "auto"
+    global HIDDEN_SCALE
+    HIDDEN_SCALE = args.hidden_scale
 
     log("=" * 78)
     log(f"kimi_single_layer_decode v3 (K3/{args.attn_type.upper()})  "
-        f"experts={args.experts} EP={args.ep} "
+        f"experts={args.experts} EP={args.ep} local_topk={args.local_topk} "
+        f"hidden_scale={args.hidden_scale} "
         f"layer_idx={args.layer_idx} iters={args.iters} warmup={args.warmup} "
         f"split={args.split} moe_backend={args.moe_backend} "
         f"attention_backend={args.attention_backend if args.attn_type == 'mla' else 'n/a'} "
@@ -1411,6 +1435,7 @@ def main():
     log("=" * 78)
 
     cfg_dir, cfg_dict = build_config_dir(args.experts, args.ep, args.num_layers,
+                                         local_topk=args.local_topk,
                                          moe_backend=args.moe_backend,
                                          attn_type=args.attn_type,
                                          target_layer=args.layer_idx,
@@ -1451,6 +1476,7 @@ def main():
         "hidden_act": cfg_dict["hidden_act"],
         "moe_method": moe_method,
         "experts": args.experts, "ep": args.ep, "layer_idx": args.layer_idx,
+        "local_topk": args.local_topk, "hidden_scale": args.hidden_scale,
         "attn_type": args.attn_type,
         "attention_backend": args.attention_backend if args.attn_type == "mla" else None,
         "page_size": args.page_size if args.attn_type == "mla" else None,
