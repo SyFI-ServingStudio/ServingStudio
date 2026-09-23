@@ -92,7 +92,8 @@ run the fused KDA kernel on the bf16 state (trial 7 did the real kernel work, ju
   → B10 (Codex, GPU 3 pinned by UUID): A/B the runner against the layer's real call (routing histogram,
   tactic/autotune, input format, PDL/graph) and fix the Max attribution. Oracles stay on the post-B8 image
   until B10 lands.
-- B10 (GPU 3 microbench, commit pending): the gap was the **routing distribution**. The driver's real top-k
+- B10 (ef202ca2, GPU 3 microbench; final rows B=32 178.1 µs vs 176.2 reference (+1.1%), B=128 382.6 vs ≈418
+  (−8.3%); tests 1091 Rust / 3478 Py green): the gap was the **routing distribution**. The driver's real top-k
   histogram is collapsed (≈16–20 experts get 119–128 tokens each, most experts 0 — decode inputs are
   `randn×0.02` plus a shared-mean planted state, so all tokens look alike after the pre-MoE norm), and
   `--experts 112` makes all 2048 top-16 assignments local (a real EP8 rank gets ≈256). Runner with the routed
