@@ -153,7 +153,11 @@ KDA 402.9 / 262.7 / 139.7 µs (B=128/32/1).
 **Campaign 2 result: MLA PASS (−12.1% @1×1M); KDA best −4.6% @B=128 (4 trials, all bit-exact, gate 5% not
 met).** KDA levers found are independent and bit-exact: packed decode fast path (≈−2%), shared-`down` GEMM →
 CuteDSL bf16 (≈−3%), Triton recurrent-kernel tuning + overlap (≈−1.5…−2.5%); no single 45–60-min run combined
-the CuteDSL GEMM with the others — stacked they would clear the gate (untested as one tree).
+the CuteDSL GEMM with the others. **Operator-stacked verification** (trial 11's tree + trial 8's CuteDSL GEMM
+hunk, judged identically, `iter_opt_eval_k3_kda/stacked_verdict.json`, not an agent result): 403.0 → 383.7 µs
+(**−4.8%**), −5.4% @32, −6.0% @1, bit-exact — the levers do not add linearly (the shared GEMM already runs on
+the side stream, so making it faster barely moves the critical path). With Python-level edits the KDA layer's
+ceiling at B=128 is ≈4.8% under this workload; the remaining 52% is the weight-bandwidth-bound MXFP4 MoE cubin.
 
 ## Artifacts
 
