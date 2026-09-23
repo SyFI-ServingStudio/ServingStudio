@@ -106,6 +106,24 @@ run the fused KDA kernel on the bf16 state (trial 7 did the real kernel work, ju
 - Branch profile DB `kimi_single_layer/k3_branch_profile.db`; merging into the shared
   `profiling/profile.db` awaits the user's explicit OK.
 
+## Realistic-routing re-baseline (2026-09-24, GPU 7)
+
+Driver flags `--local-topk 2 --hidden-scale 1.0` (commit e4a3c25; now in both case configs, 9cc2670):
+top-2 over the 112 local experts emulates the rank's share of K3's global top-16 (256 local rows at
+B=128 instead of 2048), unit-scale inputs stop the routing collapse.
+
+| layer | point | old flags (µs) | realistic (µs) | MoE kernels (realistic) |
+|---|---|---|---|---|
+| KDA | 128×8k | 556.5 | **252.4** | 85 of 306 kernel-µs (28%; was ≈54%) |
+| KDA | 32×8k / 1×8k | 310.7 / 179.6 | 174.6 / 139.7 | 44 / 24 µs |
+| MLA | 128×8k | 680.4 | **352.6** | 96 of 405 kernel-µs |
+| MLA | 1×1M / 16×64k | 345.5 / 357.9 | 306.7 / 264.7 | 25 / 46 µs |
+
+Consequence: with a production-like MoE load the layers are attention/projection-dominated at B=128, so
+the earlier "MoE-bound, ≤3% recoverable" conclusion was an artifact of the collapsed 8× MoE. The trial
+campaign must be re-run on these baselines (after B11 re-bakes the oracles with matching predictions).
+Note the routed MXFP4 BMM tactic also changed (`t128x8x512` vs `t128x16x256` at the old load).
+
 ## Artifacts
 
 `iter_opt_eval_k3_{kda,mla}/trial_<k>_{verdict.json,agent.log,opt_run/,tree_judged.patch}`,
