@@ -119,10 +119,23 @@ B=128 instead of 2048), unit-scale inputs stop the routing collapse.
 | MLA | 128×8k | 680.4 | **352.6** | 96 of 405 kernel-µs |
 | MLA | 1×1M / 16×64k | 345.5 / 357.9 | 306.7 / 264.7 | 25 / 46 µs |
 
-Consequence: with a production-like MoE load the layers are attention/projection-dominated at B=128, so
-the earlier "MoE-bound, ≤3% recoverable" conclusion was an artifact of the collapsed 8× MoE. The trial
-campaign must be re-run on these baselines (after B11 re-bakes the oracles with matching predictions).
-Note the routed MXFP4 BMM tactic also changed (`t128x8x512` vs `t128x16x256` at the old load).
+**Correction (02:30):** the table above was still routing-collapsed (8 of 112 experts active). The actual
+root cause was the parameter init: every parameter, *including the RMSNorm gains*, was `N(0, 0.02)`, so
+normalized activations were ×0.02, router logits ~0.03 wide, sigmoid ≈ 0.5 for every token, and the
+`e_score_correction_bias` alone ranked the experts (`--hidden-scale` was a red herring: 0.02 → 75 active,
+1.0 → 8, 20 → 91). With norm gains `1 + 0.02·randn` (commit 80786a0) the top-2 routing is Poisson-like:
+**85/112 experts active at B=128 (max 11), 44 at B=32.**
+
+| layer | point | old flags (µs) | realistic v2 (µs) | MoE kernels (v2) |
+|---|---|---|---|---|
+| KDA | 128×8k | 556.5 | **402.9** | 236 of 457 kernel-µs (52%) |
+| KDA | 32×8k / 1×8k | 310.7 / 179.6 | 262.7 / 139.7 | 135 / 25 µs |
+| MLA | 128×8k | 680.4 | **493.0** | 237 of 545 kernel-µs (43%) |
+| MLA | 1×1M / 16×64k | 345.5 / 357.9 | 305.7 / 303.6 | 25 / 85 µs |
+
+So at B=128 the MoE is weight-bandwidth-bound over ~85 active experts (≈1.4 GB of MXFP4 weights per step)
+and still the largest single leaf, but no longer 8× inflated; at 1×1M attention dominates. The trial campaign
+is re-run on these baselines with the MLA primary moved to 1×1M.
 
 ## Artifacts
 
