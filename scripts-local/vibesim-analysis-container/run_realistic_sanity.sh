@@ -7,6 +7,8 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 GPU_IDX="${K3_GPU_INDEX:-3}"
 export DOCKER_GPU_ARG="\"device=$GPU_IDX\""
 wait_idle () {
+  # K3_SHARED_GPU=1: the user allows a lightly loaded shared device (GPU 7 on 2026-09-24) -> no idle gate.
+  [ "${K3_SHARED_GPU:-0}" = 1 ] && return 0
   while :; do
     used="$(nvidia-smi -i "$GPU_IDX" --query-gpu=memory.used --format=csv,noheader,nounits | tr -d ' ')"
     [ "${used:-99999}" -lt 1000 ] && return 0

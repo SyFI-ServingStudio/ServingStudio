@@ -13,7 +13,7 @@ DB="${VIBESIM_PROFILE_DB:-$HERE/kimi_single_layer/k3_branch_profile.db}"
 # Under slurm the cgroup shows only the granted GPU; when run directly on the host, pass
 # K3_GPU_INDEX=3 (or 2) so the fill never lands on the first visible device (GPU 0).
 if [ -n "${K3_GPU_INDEX:-}" ]; then
-  case "$K3_GPU_INDEX" in 2|3) ;; *) echo "!! GPU $K3_GPU_INDEX not authorized (only 2,3)"; exit 1;; esac
+  case "$K3_GPU_INDEX" in 2|3|7) ;; *) echo "!! GPU $K3_GPU_INDEX not authorized (only 2,3,7)"; exit 1;; esac
   UUID="$(nvidia-smi -i "$K3_GPU_INDEX" --query-gpu=uuid --format=csv,noheader | tr -d ' ')"
 else
   UUID="$(nvidia-smi --query-gpu=uuid --format=csv,noheader | head -1 | tr -d ' ')"

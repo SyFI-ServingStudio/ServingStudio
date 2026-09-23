@@ -12,11 +12,14 @@
 set -Eeuo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 GPU_IDX="$1"; shift
-case "$GPU_IDX" in 2|3) ;; *) echo "!! GPU $GPU_IDX not authorized (only 2,3)"; exit 1;; esac
+# GPU 7 authorized by the user on 2026-09-24 (shared with a light-load run; skip the idle gate
+# with K3_SHARED_GPU=1). Still never 0,1,4,5,6.
+case "$GPU_IDX" in 2|3|7) ;; *) echo "!! GPU $GPU_IDX not authorized (only 2,3,7)"; exit 1;; esac
 export DOCKER_GPU_ARG="\"device=$GPU_IDX\""
 export AGENT_TIMEOUT="${AGENT_TIMEOUT:-1800}"
 
 wait_idle () {
+  [ "${K3_SHARED_GPU:-0}" = 1 ] && return 0
   while :; do
     used="$(nvidia-smi -i "$GPU_IDX" --query-gpu=memory.used --format=csv,noheader,nounits | tr -d ' ')"
     [ "${used:-99999}" -lt 1000 ] && return 0
