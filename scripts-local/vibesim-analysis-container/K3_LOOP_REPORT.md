@@ -92,6 +92,16 @@ run the fused KDA kernel on the bf16 state (trial 7 did the real kernel work, ju
   → B10 (Codex, GPU 3 pinned by UUID): A/B the runner against the layer's real call (routing histogram,
   tactic/autotune, input format, PDL/graph) and fix the Max attribution. Oracles stay on the post-B8 image
   until B10 lands.
+- B10 (GPU 3 microbench, commit pending): the gap was the **routing distribution**. The driver's real top-k
+  histogram is collapsed (≈16–20 experts get 119–128 tokens each, most experts 0 — decode inputs are
+  `randn×0.02` plus a shared-mean planted state, so all tokens look alike after the pre-MoE norm), and
+  `--experts 112` makes all 2048 top-16 assignments local (a real EP8 rank gets ≈256). Runner with the routed
+  API + actual histogram: 390.5 µs @B=128, 180.9 @B=32 (layer ≈418/384); balanced routing ≈516. With the
+  histogram-aware row + shared `Max` attribution, alignment is KDA **−3.3%** (553.1 vs 535.0 µs; MoE leaf
+  within 8%) and MLA **−10.2%** (677.5 vs 608.5; MoE −9.2%, `mla_decode_attention` −9.2%, small attention
+  leaves still noisy). **Harness caveat for every trial above:** the judged MoE workload is collapsed-routing
+  and 8× a production rank's assignment count; fixing the driver (unit-scale inputs, EP8 shard routing over
+  896 experts) requires a re-baseline and re-run — pending the user's decision.
 - Branch profile DB `kimi_single_layer/k3_branch_profile.db`; merging into the shared
   `profiling/profile.db` awaits the user's explicit OK.
 
