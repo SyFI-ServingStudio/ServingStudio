@@ -147,7 +147,12 @@ KDA 402.9 / 262.7 / 139.7 µs (B=128/32/1).
 | **MLA 8** | **PASS** | **−12.1%** (304.6 → 267.7 @1×1M) | +1.6%, +0.7% | pass (rel 0.0 / 0.014 / 0.005), state_ok | 15-line diff, `cutedsl_mla_backend.py`: non-DCP decode routed to TRT-LLM MLA | one iteration: `kernels` flagged a cached alternative on the MLA decode leaf → agent applied it, re-verified, stopped |
 | KDA 8 | FAIL (gate) | −3.1% (403.0 → 390.7 @128×8k) | −4.7% @32, −5.9% @1 | pass, rel 0.0 at all points | 45-line diff, `kimi_k3.py`: shared `down` GEMM (7168×6144, m≤128) routed to the CuteDSL bf16 GEMM + shared branch on the alt stream; rejected fused MXFP4 router (+6 µs) and KDA TMA threshold (neutral) | `mxfp4_fused_moe` rank 1 (no alternative) → `moe.shared_down` (50 µs vs R6 16.6) → `kda_recurrent_decode` (42.5 vs R5 8.2) |
 | KDA 9 | FAIL (gate) | −0.3% (403.0 → 401.9) | −2.3% @32, 0.0% @1 | pass (rel 0.013 / 0.007 / 0.0) | 589-line CUDA port of the fused KDA decode JIT kernel to bf16 state (`kda_fused_decode.cuh` + `.py`) — judged properly this time; two earlier iterations failed CHECK and were rolled back | `mxfp4_fused_moe` → `kda_recurrent_decode` (42.5 µs vs R5 8.2) |
-| KDA 10 | running (started 04:59, 60-min budget) | | | | | |
+| KDA 10 | FAIL (gate, by 0.4 pt) | **−4.6%** (403.0 → 384.6 @128×8k) | −5.4% @32, 0.0% @1 | pass, rel 0.0 at all points | 50-line diff: packed KDA decode fast path kept for K3's lower-bounded gate (`kda_backend.py`) + shared/routed alt-stream overlap (`kimi_k3.py`); rejected bf16 fused kernel (483 µs), bf16-activation dispatch, route-quant cap, PDL-off | `mxfp4_fused_moe` → KDA packed-dispatch guard |
+| KDA 11 | running (started 06:03, 60-min budget) | | | | | |
+
+KDA levers found so far are independent and bit-exact: packed decode fast path (≈−2%), shared-`down`
+GEMM → CuteDSL bf16 (≈−3%), shared/routed overlap (≈−1.5…−2.5%); stacked they clear the 5% gate — no single
+45–60-min agent run has combined all three yet.
 
 ## Artifacts
 
