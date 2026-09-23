@@ -11,6 +11,7 @@ B200, and obtain measurable, numerically verified speedups without telling the a
 ## 2. Pipeline
 
 Three containers, one per role. K3 is a **case** of the existing loop, not a new tool.
+Figure: `K3_PIPELINE_FIGURE.html` (self-contained SVG; open in a browser).
 
 ```
 ┌───────────────────────────┐   read-only HTTP    ┌──────────────────────────────┐
