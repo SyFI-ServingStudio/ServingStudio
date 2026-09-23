@@ -81,6 +81,9 @@ $REBUILD_CMD
 ```
 It clears `__pycache__` and runs a one-point smoke that must print `LAYER_SMOKE_OK`. If it
 does not, your change is NOT valid no matter how good an isolated number looks; fix it first.
+The smoke covers ONE small point only: before you finish, re-run the replay at **every** point in
+`$POINTS` — the judge measures all of them, and a kernel that runs at B=1 but rejects the B=128 or
+long-context shape (dtype/layout guards inside the kernels are common) is scored as a hard FAIL.
 
 ## Organize your work by iteration
 Create `/workspace/opt_run/iter_00/`, `iter_01/`, … For each iteration write, in that folder:
