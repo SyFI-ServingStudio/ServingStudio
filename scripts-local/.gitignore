@@ -2,6 +2,8 @@
 # small result JSONs and slurm .out logs; leave build artifacts / trial dumps /
 # vendored snapshots out of git.
 vibesim-analysis-container/context/
+vibesim-analysis-container/context_k3/
+vibesim-analysis-container/direct_*.out
 *.tar
 *.log
 vibesim-analysis-container/iter_opt_eval_*/
