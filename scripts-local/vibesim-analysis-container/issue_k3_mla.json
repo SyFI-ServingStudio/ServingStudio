@@ -28,6 +28,6 @@
     "POINTS": "128,8192;1,1048576;16,65536",
     "INSTALL_CMD": "true",
     "REBUILD_CMD": "find /sgl-workspace/sglang/python/sglang -name __pycache__ -prune -exec rm -rf {} + ; cd /tmp && python3 /tmp/kimi_single_layer_decode.py --point 1,8192 --attn-type mla --moe-backend flashinfer_mxfp4 --attention-backend cutedsl_mla --attn-heads 12 --kv-cache-dtype fp8_e4m3 --experts 112 --ep 8 --cuda-graph --iters 5 --warmup 2 && echo LAYER_SMOKE_OK",
-    "ORACLE_URL": "http://172.17.0.1:8801"
+    "ORACLE_URL": "http://172.17.0.1:8802"
   }
 }

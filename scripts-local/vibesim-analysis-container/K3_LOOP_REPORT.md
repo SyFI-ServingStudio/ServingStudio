@@ -57,6 +57,11 @@ run the fused KDA kernel on the bf16 state (trial 7 did the real kernel work).
 5. Judge corrections made during the campaign (all evidence preserved as `_v1`): driver snapshotted
    per case key (an edit between baseline and replay had produced a false rel_err 1.79); JIT CUDA
    sources (`.cu/.cuh/.h`) now part of the judged diff (trial 7).
+6. **Oracle wiring bug in the MLA case (found during MLA 6):** `issue_k3_mla.json` still pointed at
+   the KDA oracle (8801). That image carries both baked predictions, and the agents in MLA 4 and 5
+   discovered and used `prediction=k3_mla:before` themselves (trial 4: 1938 `unified.mla` hits vs 37
+   `unified.kda`); MLA 6 analyzed the KDA prediction only. Config fixed to 8802 (whose default
+   `.:before` is `k3_mla`); MLA trial 7 re-run with the correct oracle is queued after the fill.
 
 ## VibeSim side (Milestone 2)
 
