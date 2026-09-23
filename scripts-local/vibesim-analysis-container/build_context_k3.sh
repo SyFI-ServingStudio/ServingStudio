@@ -25,7 +25,11 @@ echo "== staging into $OUT from $SRC_REPO @ $(git -C "$SRC_REPO" rev-parse --sho
 rm -rf "$OUT"; mkdir -p "$REPO_OUT" "$OUT/app"
 
 echo "== 1. tracked assets at HEAD"
-git -C "$SRC_REPO" archive HEAD -- gpu model simulator eval-configs presets | tar -x -C "$REPO_OUT"
+# (upstream has no eval-configs/; the server's `config` default only matters for a live
+#  simulate, which the prebaked shim short-circuits -- point it at the K3 preset anyway)
+git -C "$SRC_REPO" archive HEAD -- gpu model simulator presets | tar -x -C "$REPO_OUT"
+mkdir -p "$REPO_OUT/eval-configs"
+cp "$REPO_OUT/presets/predict_kimi_k3_b200_rank1_layer_kda.json" "$REPO_OUT/eval-configs/before.json"
 find "$REPO_OUT" -maxdepth 2 -type f \( -name '*_plan.md' -o -name '*_progress.md' \) -delete
 
 echo "== 2. branch profile.db + analyze binary"
