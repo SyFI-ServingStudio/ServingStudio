@@ -75,8 +75,13 @@ run the fused KDA kernel on the bf16 state (trial 7 did the real kernel work).
   baseline); MLA 585/331/289 vs 688/352/342 µs (128×8k, 16×64k, 1×1M). Alignment (duration-weighted):
   KDA −1.9% (97% coverage), MLA −13.7% (98%).
 - B8 (07d5ee16): `qkvbfg_a_proj` split into wide QKVG GEMM + side-stream `[f_a|β]` GEMV under
-  `CostNode::Max` (was +198%); MLA cache-append runner storage fixed. Needs 136 new B200 rows (fill
-  queued on GPU 3); analyzer caveat: `Max` hides non-critical leaves' time in the ladder.
+  `CostNode::Max` (was +198%); MLA cache-append runner storage fixed; 136 new B200 rows filled
+  (21:41). Post-B8 rank-1 predictions vs measured graph time: KDA 141/277/495 vs 179.6/310.7/556.5 µs
+  (B=1/32/128 → −21/−11/−11%); MLA 569/274/317 vs 680.4/345.5/357.9 µs (128×8k, 1×1M, 16×64k →
+  −16/−21/−11%). The qkvbfg leaf is now correct (~21 µs), so the remaining under-prediction is the
+  `mxfp4_fused_moe` row (−10.8%: the runner times one call with a uniform expert distribution, the
+  driver's seeded routing is skewed) plus ~17 µs of unmapped `attn_res_fused_tma` + CUDA-graph glue.
+  Analyzer caveat: `Max` hides non-critical leaves' time in the ladder.
 - Branch profile DB `kimi_single_layer/k3_branch_profile.db`; merging into the shared
   `profiling/profile.db` awaits the user's explicit OK.
 
