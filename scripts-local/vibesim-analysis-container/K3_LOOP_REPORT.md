@@ -137,6 +137,16 @@ So at B=128 the MoE is weight-bandwidth-bound over ~85 active experts (≈1.4 GB
 and still the largest single leaf, but no longer 8× inflated; at 1×1M attention dominates. The trial campaign
 is re-run on these baselines with the MLA primary moved to 1×1M.
 
+## Campaign 2 — realistic workload (v2 driver, oracles on B11 predictions, GPU 7, 45-min agents)
+
+Baselines (judge, 5 reps): MLA 304.6 (1×1M, primary) / 493.0 (128×8k) / 302.5 (16×64k) µs;
+KDA 402.9 / 262.7 / 139.7 µs (B=128/32/1).
+
+| trial | verdict | primary Δ | secondaries Δ | CHECK | change | VibeSim path |
+|---|---|---|---|---|---|---|
+| **MLA 8** | **PASS** | **−12.1%** (304.6 → 267.7 @1×1M) | +1.6%, +0.7% | pass (rel 0.0 / 0.014 / 0.005), state_ok | 15-line diff, `cutedsl_mla_backend.py`: non-DCP decode routed to TRT-LLM MLA | one iteration: `kernels` flagged a cached alternative on the MLA decode leaf → agent applied it, re-verified, stopped |
+| KDA 8 | running (started 03:20) | | | | | |
+
 ## Artifacts
 
 `iter_opt_eval_k3_{kda,mla}/trial_<k>_{verdict.json,agent.log,opt_run/,tree_judged.patch}`,
