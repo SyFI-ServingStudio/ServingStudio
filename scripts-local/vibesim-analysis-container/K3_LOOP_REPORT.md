@@ -82,6 +82,16 @@ run the fused KDA kernel on the bf16 state (trial 7 did the real kernel work, ju
   `mxfp4_fused_moe` row (−10.8%: the runner times one call with a uniform expert distribution, the
   driver's seeded routing is skewed) plus ~17 µs of unmapped `attn_res_fused_tma` + CUDA-graph glue.
   Analyzer caveat: `Max` hides non-critical leaves' time in the ladder.
+- B9 (b088a6eb): root cause of the MoE row: the runner profiled 896 global experts, under which only 258 of
+  the 2048 assignments hit the 112 local experts (≈1/8 of the layer's expert work). Added a
+  `routing_experts` dimension (112 rank-1 / 896 EP8); 68 new rows filled per preset. Post-B9 alignment
+  (CPU rerun): KDA 553.1 measured vs 679.4 simulated (**+22.8%**, mxfp4 leaf +37%), MLA 677.5 vs 752.9
+  (**+11.1%**, mxfp4 +25%) — the 112-expert runner call now *over*-prices the layer's launch (layer's
+  MoE kernels sum to ≈418 µs at B=128: two `bmm_*MxE2m1*` 265+135 µs + finalize 10 + routing 8). Also
+  confirmed: `mla_cache_append`/`output_gate`/`kv_a_layernorm` read −100% under the `Max` attribution.
+  → B10 (Codex, GPU 3 pinned by UUID): A/B the runner against the layer's real call (routing histogram,
+  tactic/autotune, input format, PDL/graph) and fix the Max attribution. Oracles stay on the post-B8 image
+  until B10 lands.
 - Branch profile DB `kimi_single_layer/k3_branch_profile.db`; merging into the shared
   `profiling/profile.db` awaits the user's explicit OK.
 
