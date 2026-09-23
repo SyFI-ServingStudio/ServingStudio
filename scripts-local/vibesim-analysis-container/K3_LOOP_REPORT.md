@@ -145,7 +145,8 @@ KDA 402.9 / 262.7 / 139.7 µs (B=128/32/1).
 | trial | verdict | primary Δ | secondaries Δ | CHECK | change | VibeSim path |
 |---|---|---|---|---|---|---|
 | **MLA 8** | **PASS** | **−12.1%** (304.6 → 267.7 @1×1M) | +1.6%, +0.7% | pass (rel 0.0 / 0.014 / 0.005), state_ok | 15-line diff, `cutedsl_mla_backend.py`: non-DCP decode routed to TRT-LLM MLA | one iteration: `kernels` flagged a cached alternative on the MLA decode leaf → agent applied it, re-verified, stopped |
-| KDA 8 | running (started 03:20) | | | | | |
+| KDA 8 | FAIL (gate) | −3.1% (403.0 → 390.7 @128×8k) | −4.7% @32, −5.9% @1 | pass, rel 0.0 at all points | 45-line diff, `kimi_k3.py`: shared `down` GEMM (7168×6144, m≤128) routed to the CuteDSL bf16 GEMM + shared branch on the alt stream; rejected fused MXFP4 router (+6 µs) and KDA TMA threshold (neutral) | `mxfp4_fused_moe` rank 1 (no alternative) → `moe.shared_down` (50 µs vs R6 16.6) → `kda_recurrent_decode` (42.5 vs R5 8.2) |
+| KDA 9 | running (started 04:11) | | | | | |
 
 ## Artifacts
 
