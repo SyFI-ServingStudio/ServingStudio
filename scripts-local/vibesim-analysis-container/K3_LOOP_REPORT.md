@@ -32,9 +32,10 @@ MLA 681.3 (128×8k) / 345.5 (1×1M) / 358.8 (16×64k) µs.
 | KDA 7 | v1 FAIL (judge artifact) → v2 pending | — | — | — | **templated the JIT CUDA kernel `kda_fused_decode.cuh` for a bf16 state** + `.py` gate (39 `.py` lines + `.cuh`); v1 judge dropped the `.cuh` (`.py`-only diff) → pristine kernel rejected bf16. Agent only smoke-tested at B=1. Also rejected FlashInfer `recurrent_kda` (556→591 µs) and PDL-off | `attention.kda_recurrent_decode`, then `moe.merged_front` (R0 120 → R6 30 µs) |
 | MLA 4 | FAIL (gate) | −2.1% (667.1) | **−11.3% @1×1M** (306.5), −0.3% | pass, rel 0.0 | non-DCP decode `cute-dsl` → `trtllm-gen` (`cutedsl_mla_backend.py`) + shared/routed overlap for ≥64 tokens (`kimi_k3.py`), 35 lines; 3 null hypotheses killed (fused-token cap, TRT tactic bucket, CUTLASS backend) | `moe.mxfp4_fused_moe` rank 1; attention leaf for the 1M point |
 | MLA 5 | FAIL (gate) | −2.1% (667.3) | **−14.5% @1×1M** (295.3), −0.9% | pass, rel 0.0 | `backend = cute-dsl if dcp_enabled else trtllm-gen`; shared GEMM on side stream joined by event before the final add — **gated on `tp_size == 1`** (harness-only, would not fire in production TP8); `cutedsl_bf16_gemm.py` tweak; 60 lines. Thin artifacts (no analysis.md/diff.patch) | same |
-| MLA 6 | running | | | | | |
+| MLA 6 | FAIL (null) | +0.1% (680.4) | 0.0%, 0.0% | pass | TRT-LLM MoE tactic ceiling 128→256 in `moe_runner/flashinfer_trtllm.py` (39 lines) — no kernel change, no effect; agent analyzed the KDA prediction (oracle wiring bug, finding 6) | `mxfp4_fused_moe` (KDA prediction) |
+| MLA 7 | queued (oracle fixed) | | | | | |
 
-PASS: 0 / 6 judged. Bit-exact improvements found in 4 of 6; the two crashes were both attempts to
+PASS: 0 / 7 judged. Bit-exact improvements found in 4 of 7; the two crashes were both attempts to
 run the fused KDA kernel on the bf16 state (trial 7 did the real kernel work).
 
 ## Findings
