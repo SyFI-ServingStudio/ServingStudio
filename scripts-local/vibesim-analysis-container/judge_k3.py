@@ -11,8 +11,9 @@ captured from the PRISTINE tree with the same seed (relative tolerance).
 Integrity model (the agent never touches anything the judge measures with):
   * baseline + golden come from a fresh container of `before_image` (pristine sglang
     tree, judge-owned driver copy, flashinfer cache mounted READ-ONLY);
-  * the agent's edited tree is reduced to its `.py` diff against the pristine tree,
-    applied onto a fresh copy of the pristine tree (drops __pycache__/binaries/etc.),
+  * the agent's edited tree is reduced to its source diff (.py + JIT CUDA sources, see
+    SRC_EXT) against the pristine tree, applied onto a fresh copy of the pristine tree
+    (drops __pycache__/binaries/etc.),
     and that copy is bind-mounted READ-ONLY over the sglang package in a second
     fresh `before_image` container for the replay;
   * every point is measured `reps` times; the primary point must improve by
@@ -151,28 +152,36 @@ def ensure_baseline(cfg, driver_path, golden_dir, points, key):
         cont.rm()
 
 
+# Source files the agent may legitimately change. sglang JIT-compiles the CUDA sources under
+# kernels/jit/csrc at import time, so .cu/.cuh/.h edits are part of the edit surface (KDA
+# trial 7 extended kda_fused_decode.cuh to a bf16 state); only bytecode/binaries are dropped.
+SRC_EXT = (".py", ".cu", ".cuh", ".h", ".hpp", ".cc", ".cpp", ".inc", ".jinja")
+
+
+def _src_files(root):
+    for f in root.rglob("*"):
+        if f.is_file() and f.suffix in SRC_EXT and "__pycache__" not in f.relative_to(root).parts:
+            yield f
+
+
 def build_judged_tree(pristine, agent_tree, out_dir):
-    """Fresh pristine copy + the agent's `.py` changes only. Returns (dir, patch_text, files)."""
+    """Fresh pristine copy + the agent's source changes only. Returns (dir, patch_text, files)."""
     pristine, agent_tree, out_dir = map(pathlib.Path, (pristine, agent_tree, out_dir))
     if out_dir.exists():
         shutil.rmtree(out_dir)
     shutil.copytree(pristine, out_dir, symlinks=True,
                     ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
     changed = []
-    for f in agent_tree.rglob("*.py"):
+    for f in _src_files(agent_tree):
         rel = f.relative_to(agent_tree)
-        if "__pycache__" in rel.parts:
-            continue
         pf = pristine / rel
         if not pf.exists() or pf.read_bytes() != f.read_bytes():
             (out_dir / rel).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(f, out_dir / rel)
             changed.append(str(rel))
-    # deletions of .py files by the agent are honoured too
-    for pf in pristine.rglob("*.py"):
+    # deletions of source files by the agent are honoured too
+    for pf in _src_files(pristine):
         rel = pf.relative_to(pristine)
-        if "__pycache__" in rel.parts:
-            continue
         if not (agent_tree / rel).exists() and (out_dir / rel).exists():
             (out_dir / rel).unlink()
             changed.append(f"-{rel}")
