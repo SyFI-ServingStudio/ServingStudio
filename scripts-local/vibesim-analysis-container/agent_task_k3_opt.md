@@ -57,6 +57,13 @@ python3 /tmp/kimi_single_layer_decode.py --point "$POINTS" $ARGS --replay /tmp/g
 ```
 - Every point prints a `JSON {"latency_us": ..., "latency_mode": "graph", ...}` line; the
   judged number is `latency_us` in graph mode. `--split` adds eager attn/moe/norms times.
+- **Measure before and after with the IDENTICAL command** (same flags, same points, same
+  `--iters/--warmup`), and treat a run that also carries `--split` or `--profile-kernels` as a
+  *diagnostic*, not a timing reference: those extra phases perturb the graph-replay number by
+  ~10%. The judge re-measures your tree and the pristine tree with the plain fixed flags, 5
+  repetitions each, and only credits an improvement that clears both 5% and 3 sigma on the first
+  point without regressing the others — so a before/after pair taken with different flags will
+  mislead you about your own progress.
 - `CHECK {... "pass": ...}`: output and post-step state must match the golden
   (`max_rel_err <= 0.02`, no NaN). **A change that speeds things up but alters the output or
   state FAILS**, on every point in `$POINTS` (the first point is the one scored for speed; the
