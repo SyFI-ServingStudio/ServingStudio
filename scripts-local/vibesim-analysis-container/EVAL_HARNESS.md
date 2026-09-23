@@ -131,18 +131,27 @@ driver, and the judged metric is **CUDA-graph replay time** of one `KimiK3Decode
 
 | piece | file |
 |---|---|
-| driver / extractor | `kimi_single_layer_decode.py` (`--cuda-graph`, `--capture/--replay`, `--profile-kernels`, `--nvtx-align`, `--attn-heads 12 --attention-backend cutedsl_mla --kv-cache-dtype fp8_e4m3 --mamba-ssm-dtype bfloat16 --experts 112 --ep 8` = cookbook B200 TP8/EP8 rank shape) |
-| cases | `issue_k3_kda.json` (primary B=128×8k), `issue_k3_mla.json` (primary B=128×8k; secondaries 1×1M, 16×64k) |
-| judge | `judge_k3.py` — pristine baseline+golden (5 reps, σ), agent tree reduced to its `.py` diff onto a pristine copy mounted read-only, gates: correctness (output + post-step state, `max_rel_err ≤ 0.02`) ∧ primary improvement ≥ max(5%, 3σ) ∧ no secondary regression |
-| runner | `run_iter_opt_eval.sh` (config keys `judge`, `driver`, `mounts`, `shm_size`, `edit_tree`, `task_template`, `codex_model`; `CODEX_MODEL`/`PLANT_PATCH` env) |
-| prompt | `agent_task_k3_opt.md` (de-leaked; `$ORACLE_URL` = the K3 oracle) |
+| driver / extractor | `kimi_single_layer_decode.py` (`--cuda-graph`, `--capture/--replay`, `--profile-kernels`, `--nvtx-align`, `--dump-routing`; shape `--attn-heads 12 --attention-backend cutedsl_mla --kv-cache-dtype fp8_e4m3 --mamba-ssm-dtype bfloat16 --experts 112 --ep 8` = cookbook B200 TP8/EP8 rank; **realistic routing** `--local-topk 2` (the rank's share of K3's global top-16 → 256 local rows at B=128) + norm gains ≈1 (see lessons) |
+| cases | `issue_k3_kda.json` (primary B=128×8k; 32×8k, 1×8k), `issue_k3_mla.json` (primary **1×1M**; 128×8k, 16×64k) |
+| judge | `judge_k3.py` — pristine baseline+golden (5 reps, σ; driver snapshotted per case key), agent tree reduced to its **source** diff (`.py` + JIT CUDA `.cu/.cuh/.h`…) onto a pristine copy mounted read-only, gates: correctness (output + post-step state, `max_rel_err ≤ 0.02`) ∧ primary improvement ≥ max(5%, 3σ) ∧ no secondary regression |
+| runner | `run_iter_opt_eval.sh` (config keys `judge`, `driver`, `mounts`, `shm_size`, `edit_tree`, `task_template`, `codex_model`; `CODEX_MODEL`/`PLANT_PATCH`/`AGENT_TIMEOUT`/`START` env); **`run_k3_trials_direct.sh <gpu> case:k …`** runs trials sequentially via plain docker on GPU 2/3/7 (idle-gated; `K3_SHARED_GPU=1` for the user-shared GPU 7) — no slurm allocation is held while the agent thinks |
+| prompt | `agent_task_k3_opt.md` (de-leaked; `$ORACLE_URL` = the K3 oracle, 8801 KDA / 8802 MLA; identical before/after flags; re-run all points before finishing) |
 | controls | `run_k3_controls.sh` + `controls/planted_{slowdown,numerics}.patch` (null / slowdown / numerics) |
 | goldens | `/raid/yilegu/eval_goldens/golden_k3_<key>/` (key = driver sha + args + points + seed) |
+| VibeSim side | branch `kimi-k3` (K3 kinds/backends, `sglang_k3_env`, arch `kimi_k3_sglang`, model.work label, alignment pack); fills: `run_k3_jit_fill.sh` (`K3_GPU_INDEX`), oracle bake: `build_context_k3.sh` → `vibesim-analysis:k3` |
+| results | `K3_LOOP_REPORT.md` — campaign 1 (collapsed-routing workload, 0/8), campaign 2 (realistic): **MLA PASS −12.1% @1×1M**, KDA best −4.8% (gate 5% unmet) |
 
-Run: `sbatch slurm_gpu.sh ./run_iter_opt_eval.sh issue_k3_kda.json 3 max` (controls:
-`sbatch slurm_gpu.sh ./run_k3_controls.sh issue_k3_kda.json`). Measured baseline (graph, production
-shape): KDA B=128 ≈ 596 µs, B=32 ≈ 337 µs; MLA B=128 ≈ 636 µs, 1×1M ≈ 340 µs. Golden replay on a pristine
-tree is bit-exact. Why graph time: at production batch the eager KDA/MoE step is launch-bound (~1.0-1.3 ms
-flat), so eager wall time would reward launch-overhead hacks. Why 12 heads: the Blackwell MLA decode
-kernels reject the 96-head DP-attention shape (trtllm-gen: 64 < heads < 128 unsupported; cute-dsl
-needs page 64), and sglang's cookbook B200 recipes are attention TP8.
+Run: `K3_SHARED_GPU=1 AGENT_TIMEOUT=2700 ./run_k3_trials_direct.sh 7 mla:8 kda:8` (controls:
+`./run_k3_controls.sh issue_k3_kda.json` with `DOCKER_GPU_ARG='"device=7"'`). Realistic baselines (graph,
+5-rep judge medians): KDA 403.0 / 262.7 / 139.7 µs (B=128/32/1 @8k); MLA 493.0 (128×8k) / 305.7 (1×1M) /
+303.6 (16×64k) µs. Golden replay on a pristine tree is bit-exact. Why graph time: at production batch the
+eager KDA/MoE step is launch-bound (~1.0-1.3 ms flat), so eager wall time would reward launch-overhead hacks.
+Why 12 heads: the Blackwell MLA decode kernels reject the 96-head DP-attention shape (trtllm-gen:
+64 < heads < 128 unsupported; cute-dsl needs page 64), and sglang's cookbook B200 recipes are attention TP8.
+
+Lessons (hard-won, 2026-09-23/24): (1) a synthetic layer's **parameter init decides the MoE routing** —
+`N(0,0.02)` norm gains made every token route to the same ~8 experts (the correction bias alone ranked
+experts); norm gains ≈1 restore Poisson-like routing (85/112 experts active at B=128); (2) `--experts 112`
+with top-16 gives a rank 8× its production expert load — emulate the EP share with `--local-topk 16/EP`;
+(3) the judge must carry JIT CUDA sources, agents do port kernels; (4) never point two cases at one oracle
+port; (5) run trials on a shared GPU directly, not under a slurm hold.
