@@ -369,7 +369,17 @@ def build_layer(cfg, layer_idx=5, moe_backend="bf16", attn_type="kda", seed=0):
         for b in layer.buffers():
             if b.is_floating_point():
                 b.normal_(0.0, 0.02)
-    log(f"[layer] float params={n/1e9:.3f}B (fp32 kept: {n_fp32/1e6:.2f}M)")
+        # Norm gains ~1 (trained models: O(1)), not N(0, 0.02): with 0.02 gains every
+        # normalized activation is x0.02, the router logits are ~0.03 wide, sigmoid
+        # sits at 0.5 for all tokens and the e_score_correction_bias alone ranks the
+        # experts -> the same ~8 experts for every token (routing collapse, B10/B11).
+        n_norm = 0
+        for name, p in layer.named_parameters():
+            if p.is_floating_point() and p.dim() == 1 and "norm" in name.lower() \
+                    and name.endswith("weight"):
+                p.copy_(1.0 + 0.02 * torch.randn_like(p))
+                n_norm += 1
+    log(f"[layer] float params={n/1e9:.3f}B (fp32 kept: {n_fp32/1e6:.2f}M) norm gains ~1: {n_norm}")
     # RadixLinearAttention captured conv_weights = qkv_conv1d.weight.squeeze(1) as a
     # plain tensor VIEW at __init__ time (on CPU). nn.Module.cuda() swaps each
     # Parameter's .data in place, so Parameter refs (A_log, dt_bias) stay valid but
@@ -516,8 +526,13 @@ class KDAState:
         gen.manual_seed(seed + 17)
         self.conv = (torch.randn((num_slots, *conv_shape), dtype=torch.bfloat16,
                                  device=device, generator=gen) * 0.02).to(conv_dtype)
+        # The non-zero mean is PER SLOT (0.025..0.075): a mean shared by every request made
+        # the state-driven attention output identical across requests, which dominated the
+        # residual before the pre-MoE norm and collapsed the routing onto ~8 experts.
+        slot_mean = (0.05 * (1.0 + 0.5 * torch.randn((num_slots, 1, 1, 1), device=device,
+                                                       generator=gen)).clamp(0.5, 1.5))
         self.temporal = (torch.randn((num_slots, *temporal_shape), dtype=torch.float32,
-                                     device=device, generator=gen) * 0.02 + 0.05
+                                     device=device, generator=gen) * 0.02 + slot_mean
                          ).to(ssm_dtype)
         self.state_bytes = (self.conv.numel() * self.conv.element_size()
                             + self.temporal.numel() * self.temporal.element_size())
@@ -989,6 +1004,47 @@ def _point_path(path, B, L):
 HIDDEN_SCALE = 0.02   # set from --hidden-scale in main()
 
 
+def install_routing_probe(num_experts):
+    """Wrap FlashInfer's routed MXFP4 MoE entry points to print the per-expert top-k
+    histogram (once per distinct histogram, never during graph capture)."""
+    import json as _json
+    from flashinfer import fused_moe as _fm
+    seen = set()
+
+    def _hist(ids):
+        counts = torch.bincount(ids.detach().reshape(-1), minlength=num_experts).tolist()
+        key = tuple(counts)
+        if key in seen:
+            return
+        seen.add(key)
+        active = sum(1 for c in counts if c)
+        print("ROUTING_HISTOGRAM " + _json.dumps({"sum": sum(counts), "active": active,
+                                                  "max": max(counts), "counts": counts}), flush=True)
+
+    def _wrap(fn, ids_of):
+        def probe(*a, **kw):
+            if not torch.cuda.is_current_stream_capturing():
+                ids = ids_of(a, kw)
+                if torch.is_tensor(ids):
+                    _hist(ids)
+            return fn(*a, **kw)
+        return probe
+
+    if hasattr(_fm, "trtllm_fp4_block_scale_routed_moe"):
+        def _routed_ids(a, kw):
+            r = kw.get("topk_ids", a[0] if a else None)
+            return r[0] if isinstance(r, tuple) else r
+        name = "trtllm_fp4_block_scale_routed_moe"
+        probe = _wrap(getattr(_fm, name), _routed_ids)
+        setattr(_fm, name, probe)
+        # sglang binds the symbol with `from flashinfer.fused_moe import ...` at import
+        # time, so also rebind it in every already-imported module that holds it.
+        import sys as _sys
+        for m in list(_sys.modules.values()):
+            if m is not _fm and getattr(m, name, None) is not None and m.__name__.startswith("sglang"):
+                setattr(m, name, probe)
+
+
 def gen_hidden(seed, B, device="cuda"):
     """Seeded decode input (one token per request), independent of the global RNG.
 
@@ -1347,6 +1403,9 @@ def main():
     ap.add_argument("--local-topk", type=int, default=16,
                     help="routed experts per token on this rank (16 = all-local top-16; "
                          "16/EP emulates the rank's share of a global top-16, e.g. 2 @ EP8)")
+    ap.add_argument("--dump-routing", action="store_true",
+                    help="print ROUTING_HISTOGRAM {counts,sum,active} for each distinct routed-MoE "
+                         "top-k histogram seen outside graph capture (routing-collapse check)")
     ap.add_argument("--hidden-scale", type=float, default=0.02,
                     help="std of the seeded decode input (0.02 = legacy, collapses routing; "
                          "1.0 = per-token identity dominates -> spread routing)")
@@ -1419,6 +1478,8 @@ def main():
     sa_kv_dtype = "fp8_e4m3" if args.kv_cache_dtype == "fp8_e4m3" else "auto"
     global HIDDEN_SCALE
     HIDDEN_SCALE = args.hidden_scale
+    if args.dump_routing:
+        install_routing_probe(args.experts)
 
     log("=" * 78)
     log(f"kimi_single_layer_decode v3 (K3/{args.attn_type.upper()})  "
