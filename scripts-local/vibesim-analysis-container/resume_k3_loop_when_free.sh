@@ -9,11 +9,15 @@ set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 K0="$1"; N="$2"
 export AGENT_TIMEOUT="${AGENT_TIMEOUT:-2700}"
+# A GPU counts as idle only after 5 consecutive idle readings (~10 min): the user's vLLM jobs
+# on 2/3 restart in short gaps, and grabbing one during a gap double-books their next run.
+declare -A IDLE_STREAK=([2]=0 [3]=0)
 while :; do
   for g in 3 2; do
     used="$(nvidia-smi -i "$g" --query-gpu=memory.used --format=csv,noheader,nounits | tr -d ' ')"
-    if [ "${used:-99999}" -lt 1000 ]; then
-      echo "==== $(date +%F_%T) GPU $g idle -> resuming rounds $K0..$((K0+N-1)) there"
+    if [ "${used:-99999}" -lt 1000 ]; then IDLE_STREAK[$g]=$((IDLE_STREAK[$g] + 1)); else IDLE_STREAK[$g]=0; fi
+    if [ "${IDLE_STREAK[$g]}" -ge 5 ]; then
+      echo "==== $(date +%F_%T) GPU $g idle for 5 checks -> resuming rounds $K0..$((K0+N-1)) there"
       exec "$HERE/run_k3_alternate.sh" "$g" "$K0" "$N"
     fi
   done
