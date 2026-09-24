@@ -159,6 +159,19 @@ hunk, judged identically, `iter_opt_eval_k3_kda/stacked_verdict.json`, not an ag
 the side stream, so making it faster barely moves the critical path). With Python-level edits the KDA layer's
 ceiling at B=128 is ≈4.8% under this workload; the remaining 52% is the weight-bandwidth-bound MXFP4 MoE cubin.
 
+## Campaign 3 — continuous loop (user decision 2026-09-24: no fixed gate)
+
+Each round seeds the agent with the current `best_tree`, the judge measures the round's baseline from
+that tree and accepts any primary gain ≥ max(3σ, 0.5%) with no secondary regression; correctness is
+always checked against the **pristine** goldens (accuracy cannot drift). Seeds: MLA = trial 8's judged
+tree (267.7 µs @1×1M), KDA = the verified stacked tree (383.7 µs @B=128). GPU 7 is shared with a heavy
+co-tenant during this campaign (±3% run-to-run noise; the 3σ requirement absorbs part of it).
+
+| round | verdict | primary | secondaries | numerics | new change this round | note |
+|---|---|---|---|---|---|---|
+| MLA 20 | PASS | +0.75% (267.7 → 265.7 @1×1M) | 0.0%, +0.65% | rel ≤ 0.014 | `route_quant_fused` JIT specialized for the 112-expert/top-2 shape (+ `route_radix`, `topk.py`) | **harness-specific**: production routes top-16 over 896 experts and already uses the fused kernel |
+| KDA 20 | running | | | | | |
+
 ## Artifacts
 
 `iter_opt_eval_k3_{kda,mla}/trial_<k>_{verdict.json,agent.log,opt_run/,tree_judged.patch}`,
