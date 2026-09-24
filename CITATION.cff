@@ -17,6 +17,8 @@ authors:
     family-names: Kamahori
   - given-names: Vic
     family-names: Li
+  - given-names: Yi
+    family-names: Pan
   - given-names: Dedong
     family-names: Xie
   - given-names: Stephanie
@@ -41,6 +43,8 @@ preferred-citation:
       family-names: Kamahori
     - given-names: Vic
       family-names: Li
+    - given-names: Yi
+      family-names: Pan
     - given-names: Dedong
       family-names: Xie
     - given-names: Stephanie
