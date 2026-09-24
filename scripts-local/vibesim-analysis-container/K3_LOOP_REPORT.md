@@ -199,8 +199,13 @@ state, inputs; 5-rep timings vs the pristine tree at every point):
 All PASS; the speedups reproduce under new seeds. Caveat stands: this is layer-level kernel equivalence
 (≤ 2% relative error on bf16 outputs + exact post-step state), not an end-to-end model-quality eval.
 The MLA case now also carries a **mixed-context-length** point (`16,65536,mix`: 64k/48k/32k/16k) so
-uniform-length shortcuts like round 25's `is_var_seq=False` fail CHECK; the round-25 tree is being
-re-judged on it (see below).
+uniform-length shortcuts fail CHECK if they are wrong. **Result for round 25's `is_var_seq=False`:** the
+round-25 tree **passes** the mixed-length point (rel 0.0046, and −7.4% vs pristine there: 293.6 → 271.8 µs).
+Reading FlashInfer (`mla/_core.py`): `is_var_seq=False` maps to `is_persistent=True`, i.e. it selects the
+persistent TRT-LLM MLA kernel schedule; per-request `seq_lens` are still honoured, so it is a scheduling
+choice, not a uniform-length assumption. The "harness overfit" flag on round 25 is therefore downgraded
+to "agent's stated rationale was harness-specific, but the change is correct on mixed lengths" and the
+MLA best tree stays at 253.5 µs.
 
 ## Artifacts
 

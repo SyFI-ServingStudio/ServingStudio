@@ -100,16 +100,18 @@ tree, the judge measures that round's baseline from the same tree and accepts an
 | KDA 23 | FAIL (null) | +0.3% (below the 0.5% floor) | — | five ideas rejected cleanly |
 | MLA 24 | PASS | 261.6 → 255.4 (+2.4%); +2.2% @128×8k, +3.4% @16×64k | shared/routed alt-stream overlap in `KimiK3MoE._forward_fused` | |
 | KDA 24 | FAIL (null) | 0.0% | — | tree returned to the seed |
-| MLA 25 | PASS | 255.4 → 253.5 (+0.8%) | `is_var_seq=False` forced for the K3 fp8 MLA layout + 16-warp CTA for the B=1 KV-concat grid | **harness overfit** — fixed-length scheduling is only correct because the driver's decode batch has uniform context lengths; not production-safe as written |
+| MLA 25 | PASS | 255.4 → 253.5 (+0.8%) | `is_var_seq=False` (FlashInfer's persistent TRT-LLM MLA schedule) for the K3 fp8 MLA layout + 16-warp CTA for the B=1 KV-concat grid | initially flagged as a uniform-length overfit; **re-judged on a new mixed-context-length point (64k/48k/32k/16k): passes, rel 0.0046, −7.4% there** — the flag is a scheduling choice, per-request lengths are honoured |
 | KDA 25 | FAIL (null) | +0.3% (below the 0.56% needed) | — | KDA plateau (rounds 23–25) |
 | MLA 26 | FAIL (null) | 0.0% | `cutedsl_bf16_gemm.py` tweak, no effect | |
 | MLA 27 | FAIL (null) | 0.0% | fused finalize+shared JIT kernel (regressed, reverted); `flashinfer_trtllm.py` tweak | MLA plateau; loop stopped |
 
-**Cumulative vs pristine:** MLA **304.6 → 253.5 µs @1×1M (−16.8%; −16.2% excluding the round-25 overfit)**;
-KDA **403.0 → 379.4 µs @B=128 (−5.9%)** (stacked seed −4.8% + round 22). Every accepted round passed CHECK
-against the original goldens (rel_err ≤ 0.014). KDA has plateaued — the remaining 52% of its step is the
-weight-bandwidth-bound MXFP4 MoE cubin. Lesson from round 25: the judge can only enforce what the workload
-exercises; a mixed-context-length decode point is needed to rule out uniform-length shortcuts.
+**Cumulative vs pristine:** MLA **304.6 → 253.5 µs @1×1M (−16.8%)**; KDA **403.0 → 379.4 µs @B=128
+(−5.9%)** (stacked seed −4.8% + round 22). Every accepted round passed CHECK against the original goldens
+(rel_err ≤ 0.014). Both trees were then re-judged under two extra seeds (fresh weights/state/inputs): 4/4
+PASS, speedups reproduce (MLA −16.8%, KDA −5.7…−6.1% at B=128). KDA has plateaued — the remaining 52% of its
+step is the weight-bandwidth-bound MXFP4 MoE cubin. Lesson from round 25: the judge can only enforce what the
+workload exercises; the MLA case now carries a mixed-context-length point (64k/48k/32k/16k), on which the
+round-25 tree also passes (−7.4% there).
 
 ### Campaign 1 — the first 8 trials (superseded)
 
