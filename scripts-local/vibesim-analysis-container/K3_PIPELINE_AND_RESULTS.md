@@ -98,10 +98,11 @@ tree, the judge measures that round's baseline from the same tree and accepts an
 | **KDA 22** | **PASS** | **384.4 → 379.4 µs @B=128 (+1.3%)**; +2.5% @32, +3.1% @1 | bf16-state port of the fused KDA decode JIT kernel (`.cuh` + `.py`) | the lever trials 7/9/10 kept attempting finally pays off |
 | MLA 23 | PASS | 265.7 → 261.6 (+1.5%) | `latent_up` (7168×3584) and `shared_down` (7168×6144) → BF16 TGV kernel | |
 | KDA 23 | FAIL (null) | +0.3% (below the 0.5% floor) | — | five ideas rejected cleanly |
+| MLA 24 | PASS | 261.6 → 255.4 (+2.4%); +2.2% @128×8k, +3.4% @16×64k | shared/routed alt-stream overlap in `KimiK3MoE._forward_fused` | |
 
-**Cumulative vs pristine:** MLA **304.6 → 261.6 µs @1×1M (−14.1%)**; KDA **403.0 → 379.4 µs @B=128
+**Cumulative vs pristine:** MLA **304.6 → 255.4 µs @1×1M (−16.2%)**; KDA **403.0 → 379.4 µs @B=128
 (−5.9%)** (stacked seed −4.8% + round 22). Every accepted round passed CHECK against the original goldens
-(rel_err ≤ 0.014). Rounds 24–25 were queued after this table was written.
+(rel_err ≤ 0.014). KDA 24, MLA 25, KDA 25 were still running when this table was written.
 
 ### Campaign 1 — the first 8 trials (superseded)
 
