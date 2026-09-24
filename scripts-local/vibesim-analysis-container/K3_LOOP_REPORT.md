@@ -170,7 +170,7 @@ co-tenant during this campaign (±3% run-to-run noise; the 3σ requirement absor
 | round | verdict | primary | secondaries | numerics | new change this round | note |
 |---|---|---|---|---|---|---|
 | MLA 20 | PASS | +0.75% (267.7 → 265.7 @1×1M) | 0.0%, +0.65% | rel ≤ 0.014 | `route_quant_fused` JIT specialized for the 112-expert/top-2 shape (+ `route_radix`, `topk.py`) | **harness-specific**: production routes top-16 over 896 experts and already uses the fused kernel |
-| KDA 20 | running | | | | | |
+| KDA 20 | FAIL (infra) | — | — | — | agent ended near its seed (+15 lines `kimi_k3.py`); tried bf16-input MoE dispatch (383 µs, no gain), PDL-off, a variant that failed CHECK (rel 0.37) | judge's replay hit **CUDA OOM** (17 MB free): the co-tenant sglang scheduler grew to 167 GB on GPU 7. Not an agent result. Loop paused 20:25; auto-resumes (`resume_k3_loop_when_free.sh`) when an authorized GPU has room |
 
 ## Artifacts
 
