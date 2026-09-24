@@ -11,12 +11,12 @@ authors:
     family-names: Gu
   - given-names: Sheetal
     family-names: Sriram
+  - given-names: Mathew
+    family-names: Jacob
   - given-names: Keisuke
     family-names: Kamahori
   - given-names: Vic
     family-names: Li
-  - given-names: Mathew
-    family-names: Jacob
   - given-names: Dedong
     family-names: Xie
   - given-names: Stephanie
@@ -35,12 +35,12 @@ preferred-citation:
       family-names: Gu
     - given-names: Sheetal
       family-names: Sriram
+    - given-names: Mathew
+      family-names: Jacob
     - given-names: Keisuke
       family-names: Kamahori
     - given-names: Vic
       family-names: Li
-    - given-names: Mathew
-      family-names: Jacob
     - given-names: Dedong
       family-names: Xie
     - given-names: Stephanie
