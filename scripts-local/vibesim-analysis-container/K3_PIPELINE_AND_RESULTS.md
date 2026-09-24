@@ -99,10 +99,15 @@ tree, the judge measures that round's baseline from the same tree and accepts an
 | MLA 23 | PASS | 265.7 → 261.6 (+1.5%) | `latent_up` (7168×3584) and `shared_down` (7168×6144) → BF16 TGV kernel | |
 | KDA 23 | FAIL (null) | +0.3% (below the 0.5% floor) | — | five ideas rejected cleanly |
 | MLA 24 | PASS | 261.6 → 255.4 (+2.4%); +2.2% @128×8k, +3.4% @16×64k | shared/routed alt-stream overlap in `KimiK3MoE._forward_fused` | |
+| KDA 24 | FAIL (null) | 0.0% | — | tree returned to the seed |
+| MLA 25 | PASS | 255.4 → 253.5 (+0.8%) | `is_var_seq=False` forced for the K3 fp8 MLA layout + 16-warp CTA for the B=1 KV-concat grid | **harness overfit** — fixed-length scheduling is only correct because the driver's decode batch has uniform context lengths; not production-safe as written |
+| KDA 25 | FAIL (null) | +0.3% (below the 0.56% needed) | — | KDA plateau (rounds 23–25) |
 
-**Cumulative vs pristine:** MLA **304.6 → 255.4 µs @1×1M (−16.2%)**; KDA **403.0 → 379.4 µs @B=128
-(−5.9%)** (stacked seed −4.8% + round 22). Every accepted round passed CHECK against the original goldens
-(rel_err ≤ 0.014). KDA 24, MLA 25, KDA 25 were still running when this table was written.
+**Cumulative vs pristine:** MLA **304.6 → 253.5 µs @1×1M (−16.8%; −16.2% excluding the round-25 overfit)**;
+KDA **403.0 → 379.4 µs @B=128 (−5.9%)** (stacked seed −4.8% + round 22). Every accepted round passed CHECK
+against the original goldens (rel_err ≤ 0.014). KDA has plateaued — the remaining 52% of its step is the
+weight-bandwidth-bound MXFP4 MoE cubin. Lesson from round 25: the judge can only enforce what the workload
+exercises; a mixed-context-length decode point is needed to rule out uniform-length shortcuts.
 
 ### Campaign 1 — the first 8 trials (superseded)
 
