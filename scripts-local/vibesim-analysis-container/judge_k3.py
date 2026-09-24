@@ -164,6 +164,30 @@ def _src_files(root):
             yield f
 
 
+def measure_tree(cfg, driver_path, points, tree_dir, reps):
+    """Latency-only measurement of an arbitrary (host) tree mounted read-only: the
+    continuous loop's per-round baseline is the CURRENT BEST tree, not the pristine one.
+    Goldens still come from the pristine tree, so correctness never drifts across rounds."""
+    cont = Container(cfg, f"judge_k3_base_{int(time.time())}",
+                     tree_mount=(str(tree_dir), cfg["edit_tree"]["container_path"]))
+    try:
+        cont.cp_in(driver_path, f"/tmp/{driver_path.name}")
+        lat = {p: [] for p in points}
+        mode = {}
+        for _ in range(reps):
+            res, out = run_driver(cont, cfg, driver_path.name, points, [])
+            for p in points:
+                if not res[p].get("ok"):
+                    raise RuntimeError(f"baseline tree failed at {p}: {res[p].get('error')}\n{out[-2000:]}")
+                lat[p].append(float(res[p]["latency_us"]))
+                mode[p] = res[p].get("latency_mode")
+        return {f"{b},{l}": {"lat": v, "median": statistics.median(v),
+                             "sigma": statistics.pstdev(v) if len(v) > 1 else 0.0,
+                             "latency_mode": mode[(b, l)]} for (b, l), v in lat.items()}
+    finally:
+        cont.rm()
+
+
 def build_judged_tree(pristine, agent_tree, out_dir):
     """Fresh pristine copy + the agent's source changes only. Returns (dir, patch_text, files)."""
     pristine, agent_tree, out_dir = map(pathlib.Path, (pristine, agent_tree, out_dir))
@@ -198,6 +222,11 @@ def main():
     ap.add_argument("--pristine-dir", required=True, help="pristine sglang package (host path)")
     ap.add_argument("--golden-dir", default="/raid/yilegu/eval_goldens")
     ap.add_argument("--out", default=None)
+    ap.add_argument("--baseline-tree", default=None,
+                    help="continuous loop: measure the latency baseline from this (current best) "
+                         "tree instead of the pristine one; goldens stay pristine")
+    ap.add_argument("--min-improvement", type=float, default=None,
+                    help="override the config's min_improvement (0 = any 3-sigma gain counts)")
     args = ap.parse_args()
     cfg = json.loads(pathlib.Path(args.config).read_text())
     prim, secs = points_of(cfg)
@@ -215,8 +244,14 @@ def main():
     v = {"agent_container": args.agent_container, "case_key": key, "points": {},
          "driver_sha": hashlib.sha1(driver_path.read_bytes()).hexdigest()[:12]}
 
-    # 1) pristine baseline + goldens
+    # 1) pristine baseline + goldens (goldens are ALWAYS the pristine tree's)
     gdir, base = ensure_baseline(cfg, driver_path, args.golden_dir, points, key)
+    v["pristine_points"] = {k: {"median": p["median"], "sigma": p["sigma"]} for k, p in base["points"].items()}
+    if args.baseline_tree:
+        # continuous loop: the round's latency baseline is the current best tree
+        base = dict(base)
+        base["points"] = measure_tree(cfg, driver_path, points, args.baseline_tree, int(cfg.get("reps", 5)))
+        v["baseline_tree"] = str(args.baseline_tree)
 
     # 2) judged tree = pristine + agent .py diff
     judged_dir, patch, changed = build_judged_tree(
@@ -272,7 +307,10 @@ def main():
             "noise_frac_3sigma": round(noise, 4), "correctness": c,
             "latency_mode": b.get("latency_mode"), "primary": p == prim}
     pp = per_point[f"{prim[0]},{prim[1]}"]
-    need = max(float(cfg.get("min_improvement", 0.05)), pp["noise_frac_3sigma"])
+    min_impr = float(cfg.get("min_improvement", 0.05)) if args.min_improvement is None else args.min_improvement
+    # 3 sigma of the baseline, but never below 0.5%: two 5-rep medians on a shared GPU can
+    # differ by that much with sigma ~0, and a "gain" inside that band is not a gain.
+    need = max(min_impr, pp["noise_frac_3sigma"], 0.005)
     gates["correctness"] = all_correct
     gates["latency_improved"] = pp["improvement"] >= need
     gates["no_secondary_regression"] = all(

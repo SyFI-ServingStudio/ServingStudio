@@ -19,6 +19,9 @@
 #   CODEX_MODEL=<m>    override the codex model (default: config codex_model or gpt-5.6-luna)
 #   TASK_TMPL=<file>   override the prompt template (default: config task_template or
 #                      agent_task_iter_opt.md)
+#   START_TREE=<dir>   continuous loop: seed the agent tree from this (current best) tree and
+#                      judge against its latency (K3 judge only; goldens stay pristine)
+#   MIN_IMPROVEMENT=<f> override the judge's min_improvement (0 = any 3-sigma gain)
 #
 # Config keys beyond the judge's (all optional unless noted):
 #   codex_image (req), model_snap, gpu, case, judge (script in this dir), driver (file copied
@@ -115,7 +118,11 @@ run_trial () {
       rm -rf "$tree" "${tree}_judged" 2>/dev/null || true
       if [ -e "$tree" ]; then echo "!! [$k] could not remove stale tree $tree"; exit 1; fi
     fi
-    cp -a "$PRISTINE" "$tree"
+    # Continuous loop: START_TREE seeds the agent with the current best tree (previous
+    # rounds' accepted edits) instead of the pristine one; the judge then measures its
+    # latency baseline from that same tree (goldens stay pristine).
+    cp -a "${START_TREE:-$PRISTINE}" "$tree"
+    [ -n "${START_TREE:-}" ] && echo "== [$k] seeded agent tree from $START_TREE"
     extra+=(-v "$tree:$EDIT_TREE_PATH")
   fi
   docker run -d --name "$cname" --gpus "$GPU" \
@@ -178,7 +185,9 @@ run_trial () {
   if [ -n "$tree" ]; then
     python3 "$HERE/$JUDGE" --agent-container "$cname" --config "$CONFIG" \
       --golden-dir "$GOLDEN_DIR" --out "${log}_verdict.json" \
-      --tree-dir "$tree" --pristine-dir "$PRISTINE"
+      --tree-dir "$tree" --pristine-dir "$PRISTINE" \
+      ${START_TREE:+--baseline-tree "$START_TREE"} \
+      ${MIN_IMPROVEMENT:+--min-improvement "$MIN_IMPROVEMENT"}
   else
     python3 "$HERE/$JUDGE" --agent-container "$cname" \
       --config "$CONFIG" --golden-dir "$GOLDEN_DIR" --out "${log}_verdict.json"

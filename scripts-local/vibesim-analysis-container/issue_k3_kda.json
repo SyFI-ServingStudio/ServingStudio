@@ -11,7 +11,7 @@
   "driver_args": "--attn-type kda --moe-backend flashinfer_mxfp4 --attn-heads 12 --mamba-ssm-dtype bfloat16 --experts 112 --ep 8 --local-topk 2 --hidden-scale 1.0 --cuda-graph --iters 40 --warmup 10",
   "points": {"primary": [128, 8192], "secondary": [[32, 8192], [1, 8192]]},
   "reps": 5,
-  "min_improvement": 0.05,
+  "min_improvement": 0.0,
   "rel_err_max": 0.02,
   "seed": 0,
   "edit_tree": {"container_path": "/sgl-workspace/sglang/python/sglang"},
