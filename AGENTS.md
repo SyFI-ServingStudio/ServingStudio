@@ -37,10 +37,13 @@ Read the relevant README and local agent instructions before editing.
 - Before starting services, check all selected ports for conflicts. Follow the
   per-user port convention in `reproduce.md`; never stop another user's service
   or silently switch ports.
+- Before running anything on a GPU, check whether Slurm is available
+  (`sinfo`/`squeue`). If it is, look for a `run-gpu-job` skill and follow it —
+  it chooses the execution shape, partition, and time limit. Run directly on a
+  host only for interactive debugging, a short sanity check, or when there is no
+  Slurm.
 - Run physical GPU checks with elevation; sandbox device failures do not prove
   that the host GPU is unavailable.
 - Read and maintain `goal.md`, `progress.md`, and `notes.md` in the working tree.
   Keep these records out of commits unless requested.
-
-
-Answer in chinese
+- Avoid sleep over 30s: check updates frequently.

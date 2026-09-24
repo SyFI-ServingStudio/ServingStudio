@@ -46,18 +46,18 @@ for workflows and performance case studies.
   interactive analysis application for LLM serving research and development.
 
 <a id="workflow"></a>
-## 💡 From real measurements to real improvements
+## 💡 Close the loop on serving performance
 
 ServingStudio connects simulation and implementation in one evidence-driven loop:
 
 | Step | Stage | What happens |
 | ---: | --- | --- |
-| 1 | **Understand the workload** | Define the model, request mix, hardware, and performance objective; establish a measured baseline from the existing system. |
-| 2 | **Explore in simulation** | Compare serving configurations and inspect operation costs to identify a promising improvement. |
-| 3 | **Build with the Agent** | Implement the selected change in a real serving framework, from a kernel optimization to a new model implementation. |
-| 4 | **Profile the change** | Capture a GPU trace and inspect kernel timings, communication, and idle gaps in the modified implementation. |
-| 5 | **Align back with simulation** | Compare prediction with measurement and attribute differences in kernels, batching, communication, and host overhead. |
-| 6 | **Validate on real hardware** | Check correctness and measure serving performance, then accept the improvement or use the evidence to guide another iteration. |
+| 1 | **Set the target and baseline** | Define the model, request mix, hardware, and performance target, then measure the current deployment to establish a baseline. |
+| 2 | **Explore in simulation** | Sweep serving configurations and inspect predicted operation costs to select one change worth testing. |
+| 3 | **Implement one change** | Apply the selected change to vLLM or SGLang, from a kernel optimization to a new model implementation; pass correctness checks before measuring performance. |
+| 4 | **Profile the change** | Capture a GPU trace of the modified implementation and break down execution time across kernels, communication, and idle gaps. |
+| 5 | **Compare measurement with prediction** | Compare the measured breakdown with the Simulator's prediction; investigate whether each gap comes from the performance model, the implementation, or the measurement setup. |
+| 6 | **Validate end-to-end performance** | Measure throughput and latency on the full serving workload against the baseline; retain, reject, or refine the change, then feed the evidence into the next simulation pass. |
 
 The loop keeps the simulator grounded in measured execution while using its
 predictions to guide changes in the real system.
