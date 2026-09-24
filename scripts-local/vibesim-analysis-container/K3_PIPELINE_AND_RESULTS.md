@@ -1,3 +1,5 @@
+dd
+
 # Kimi-K3 Decoder-Layer Optimization Loop — Pipeline, Results, and What Worked
 
 *2026-09-24 · branches `kimi-k3-loop` (workspace) and `kimi-k3` (VibeSim) · full trial-by-trial detail in `K3_LOOP_REPORT.md`*
@@ -31,16 +33,17 @@ Figure: `K3_PIPELINE_FIGURE.html` (self-contained SVG; open in a browser).
 │ per-kernel table, routing histogram                                             │
 │ judge: pristine baseline (5 reps) vs agent tree (source diff onto pristine),    │
 │ gates: output+state match ∧ primary ≥ max(5%, 3σ) ∧ no secondary regression     │
+│ (continuous mode: baseline = current best tree, gain ≥ max(3σ, 0.5%))            │
 └────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 **Workload (sglang cookbook B200 recipe, one rank):** attention TP8 → 12 heads, EP8 → 112 local MXFP4
 experts, fp8-e4m3 KV cache, bf16 KDA state, `cutedsl_mla` decode. One decode token per request.
 
-| case | primary point | secondary points (must not regress) |
-|---|---|---|
-| KDA layer | B=128, ctx 8k | B=32 @8k, B=1 @8k |
-| MLA layer | B=1, ctx 1M (long-context decode) | B=128 @8k, B=16 @64k |
+| case      | primary point                     | secondary points (must not regress) |
+| --------- | --------------------------------- | ----------------------------------- |
+| KDA layer | B=128, ctx 8k                     | B=32 @8k, B=1 @8k                   |
+| MLA layer | B=1, ctx 1M (long-context decode) | B=128 @8k, B=16 @64k                |
 
 **Metric:** CUDA-graph replay time of the layer's decode step (eager time is launch-bound at these
 shapes and would reward launch-count hacks). **Correctness:** output *and* post-step state (KDA recurrent
@@ -64,18 +67,41 @@ copy, goldens, or oracle; its tree is reduced to a source diff and re-applied on
 Baselines (judge medians, σ < 1 µs): KDA 403.0 / 262.7 / 139.7 µs (B=128/32/1);
 MLA 304.6 (1×1M) / 493.0 (128×8k) / 302.5 (16×64k) µs.
 
-| trial | verdict | primary | secondaries | numerics | change |
-|---|---|---|---|---|---|
-| **MLA 8** | **PASS** | **−12.1%** (304.6 → 267.7 µs) | +1.6%, +0.7% | rel_err 0.0 / 0.014 / 0.005, state ok | non-DCP decode `cute-dsl` → TRT-LLM MLA (15 lines) |
-| KDA 8 | FAIL (gate) | −3.1% | −4.7%, −5.9% | 0.0 everywhere | shared-`down` GEMM → CuteDSL bf16 GEMM + side-stream overlap |
-| KDA 9 | FAIL (gate) | −0.3% | −2.3%, 0.0% | ≤ 0.013 | 589-line bf16 port of the fused KDA CUDA kernel (works, no gain) |
-| KDA 10 | FAIL (by 0.4 pt) | **−4.6%** | −5.4%, 0.0% | 0.0 everywhere | packed KDA decode fast path + overlap |
-| KDA 11 | FAIL (gate) | −4.4% | −5.05%, −5.9% | 0.0 everywhere | fast path + Triton recurrent-kernel launch tuning + overlap |
-| operator-stacked (not an agent result) | — | −4.8% | −5.4%, −6.0% | 0.0 | KDA 11 tree + KDA 8's GEMM lever |
+| trial                                  | verdict          | primary                                | secondaries     | numerics                              | change                                                           |
+| -------------------------------------- | ---------------- | -------------------------------------- | --------------- | ------------------------------------- | ---------------------------------------------------------------- |
+| **MLA 8**                        | **PASS**   | **−12.1%** (304.6 → 267.7 µs) | +1.6%, +0.7%    | rel_err 0.0 / 0.014 / 0.005, state ok | non-DCP decode`cute-dsl` → TRT-LLM MLA (15 lines)             |
+| KDA 8                                  | FAIL (gate)      | −3.1%                                 | −4.7%, −5.9%  | 0.0 everywhere                        | shared-`down` GEMM → CuteDSL bf16 GEMM + side-stream overlap  |
+| KDA 9                                  | FAIL (gate)      | −0.3%                                 | −2.3%, 0.0%    | ≤ 0.013                              | 589-line bf16 port of the fused KDA CUDA kernel (works, no gain) |
+| KDA 10                                 | FAIL (by 0.4 pt) | **−4.6%**                       | −5.4%, 0.0%    | 0.0 everywhere                        | packed KDA decode fast path + overlap                            |
+| KDA 11                                 | FAIL (gate)      | −4.4%                                 | −5.05%, −5.9% | 0.0 everywhere                        | fast path + Triton recurrent-kernel launch tuning + overlap      |
+| operator-stacked (not an agent result) | —               | −4.8%                                 | −5.4%, −6.0%  | 0.0                                   | KDA 11 tree + KDA 8's GEMM lever                                 |
 
 **Both layers show real, bit-exact gains.** The MLA layer clears the gate in one VibeSim-guided
 iteration. The KDA layer's Python-level ceiling at B=128 under this workload is ≈4.8%: the remaining
 52% of its step is the weight-bandwidth-bound TRT-LLM MXFP4 expert GEMM, a closed cubin.
+
+### Campaign 3 — continuous loop (no fixed gate; 2026-09-24)
+
+Per the user's direction, the 5% gate was dropped: each round seeds the agent with the current best
+tree, the judge measures that round's baseline from the same tree and accepts any primary gain
+≥ max(3σ, 0.5%) with no secondary regression, and correctness is always checked against the
+**original pristine goldens** (accuracy cannot drift across rounds). Runner: `run_k3_continuous.sh`
+(promotes the judged tree to `best_tree` on PASS; history in `rounds.jsonl`).
+
+| round | verdict | primary | new change | note |
+|---|---|---|---|---|
+| MLA 20 | PASS | 267.7 → 265.7 µs @1×1M (+0.75%) | `route_quant_fused` JIT specialized for the 112-expert/top-2 shape | harness-specific (production is 896/top-16) |
+| KDA 20 | FAIL (infra) | — | — | judge OOM: a 167 GB co-tenant on the shared GPU |
+| MLA 21 | PASS | 267.8 → 263.7 (+1.5%); +3.2% @128×8k | fp32-output front GEMM (15984×7168 / 6016×7168, m ≤ 16) → CuTe TGV instead of cuBLAS | production-relevant |
+| KDA 21 | FAIL (correctness) | — | route+quant specialization broke numerics at B=32/1 (rel 0.42) | rejected on both gates; 3σ was 7% under a busy co-tenant |
+| MLA 22 | FAIL (null) | 0.0% | — | |
+| **KDA 22** | **PASS** | **384.4 → 379.4 µs @B=128 (+1.3%)**; +2.5% @32, +3.1% @1 | bf16-state port of the fused KDA decode JIT kernel (`.cuh` + `.py`) | the lever trials 7/9/10 kept attempting finally pays off |
+| MLA 23 | PASS | 265.7 → 261.6 (+1.5%) | `latent_up` (7168×3584) and `shared_down` (7168×6144) → BF16 TGV kernel | |
+| KDA 23 | FAIL (null) | +0.3% (below the 0.5% floor) | — | five ideas rejected cleanly |
+
+**Cumulative vs pristine:** MLA **304.6 → 261.6 µs @1×1M (−14.1%)**; KDA **403.0 → 379.4 µs @B=128
+(−5.9%)** (stacked seed −4.8% + round 22). Every accepted round passed CHECK against the original goldens
+(rel_err ≤ 0.014). Rounds 24–25 were queued after this table was written.
 
 ### Campaign 1 — the first 8 trials (superseded)
 
@@ -120,13 +146,13 @@ moves the critical path (stacked check: −4.8%, not −7%).
 
 ### Prediction accuracy that made the guidance trustworthy
 
-| stage | KDA @B=128 | MLA @B=128 | what changed |
-|---|---|---|---|
-| B4/B5 first arch | −2.6% | −13.7% | qkvbfg leaf +198% (serial vs side-stream) |
-| B8 | −11% | −16% | qkvbfg split into wide GEMM ‖ side GEMV (`CostNode::Max`) |
-| B9 | +23% | +11% | runner had profiled 896-wide routing (1/8 of the rank's expert work) |
-| B10 | **−3.3%** | **−10.2%** | routed-API runner with the layer's real top-k histogram; proportional `Max` attribution |
-| B11 (realistic workload) | ≈+3% (417 vs 403) | ≈0% (491 vs 493) | local top-k share (256 rows/rank) in presets and runner |
+| stage                    | KDA @B=128         | MLA @B=128        | what changed                                                                             |
+| ------------------------ | ------------------ | ----------------- | ---------------------------------------------------------------------------------------- |
+| B4/B5 first arch         | −2.6%             | −13.7%           | qkvbfg leaf +198% (serial vs side-stream)                                                |
+| B8                       | −11%              | −16%             | qkvbfg split into wide GEMM ‖ side GEMV (`CostNode::Max`)                             |
+| B9                       | +23%               | +11%              | runner had profiled 896-wide routing (1/8 of the rank's expert work)                     |
+| B10                      | **−3.3%**   | **−10.2%** | routed-API runner with the layer's real top-k histogram; proportional`Max` attribution |
+| B11 (realistic workload) | ≈+3% (417 vs 403) | ≈0% (491 vs 493) | local top-k share (256 rows/rank) in presets and runner                                  |
 
 ## 5. Harness lessons (what had to be fixed to get here)
 
