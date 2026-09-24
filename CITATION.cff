@@ -1,0 +1,57 @@
+cff-version: 1.2.0
+message: "If you use ServingStudio in your research, please cite the blog post below."
+title: "ServingStudio"
+type: software
+url: "https://github.com/SyFI-ServingStudio/ServingStudio"
+repository-code: "https://github.com/SyFI-ServingStudio/ServingStudio"
+authors:
+  - given-names: Kan
+    family-names: Zhu
+  - given-names: Michael
+    family-names: Gu
+  - given-names: Sheetal
+    family-names: Sriram
+  - given-names: Keisuke
+    family-names: Kamahori
+  - given-names: Vic
+    family-names: Li
+  - given-names: Mathew
+    family-names: Jacob
+  - given-names: Dedong
+    family-names: Xie
+  - given-names: Stephanie
+    family-names: Wang
+  - given-names: Arvind
+    family-names: Krishnamurthy
+  - given-names: Baris
+    family-names: Kasikci
+preferred-citation:
+  type: blog
+  title: "Introducing ServingStudio: An Integrated Workbench for Simulating, Analyzing, and Optimizing LLM Serving Systems"
+  authors:
+    - given-names: Kan
+      family-names: Zhu
+    - given-names: Michael
+      family-names: Gu
+    - given-names: Sheetal
+      family-names: Sriram
+    - given-names: Keisuke
+      family-names: Kamahori
+    - given-names: Vic
+      family-names: Li
+    - given-names: Mathew
+      family-names: Jacob
+    - given-names: Dedong
+      family-names: Xie
+    - given-names: Stephanie
+      family-names: Wang
+    - given-names: Arvind
+      family-names: Krishnamurthy
+    - given-names: Baris
+      family-names: Kasikci
+  year: 2026
+  month: 9
+  url: "https://syfi.cs.washington.edu/blog/2026-09-24-introducing-servingstudio/"
+  publisher:
+    name: "SyFI Lab, University of Washington"
+  notes: "Code: https://github.com/SyFI-ServingStudio/ServingStudio"
