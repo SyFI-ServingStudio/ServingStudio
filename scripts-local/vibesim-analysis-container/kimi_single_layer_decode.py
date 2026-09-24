@@ -660,7 +660,7 @@ class MLAState:
 
     def __init__(self, cfg, mc, sa, layer_idx, B, L, device="cuda",
                  attention_backend="triton", page_size=1, kv_dtype=torch.bfloat16,
-                 seed=0):
+                 seed=0, mixed=False):
         from sglang.srt.mem_cache.memory_pool import (
             MLATokenToKVPool, ReqToTokenPool,
         )
@@ -668,6 +668,19 @@ class MLAState:
         from sglang.srt.layers.attention.attention_registry import ATTENTION_BACKENDS
 
         self.B, self.L = B, L
+        # mixed=True: a production-like decode batch where requests have DIFFERENT context
+        # lengths (L, 3L/4, L/2, L/4 cycling; multiples of 128 so every Blackwell MLA
+        # backend accepts them). Each request still owns an L-slot range; only its live
+        # length differs. A uniform-length batch let an agent hardcode fixed-length
+        # scheduling (is_var_seq=False) and pass CHECK -- this point exists to catch that.
+        self.mixed = bool(mixed)
+        if self.mixed:
+            q = max(128, page_size)
+            lens = [max(q, ((L * (4 - (r % 4)) // 4) // q) * q) for r in range(B)]
+        else:
+            lens = [L] * B
+        self.lens = lens
+        self.lens_t = torch.tensor(lens, device=device, dtype=torch.int64)
         self.attention_backend = attention_backend
         self.page_size = page_size
         assert L % page_size == 0, f"seq_len {L} must be a multiple of page_size {page_size}"
@@ -714,17 +727,18 @@ class MLAState:
                 chunk = kb[s:s + step]
                 chunk.copy_(torch.randn(chunk.shape, device=device,
                                         dtype=torch.bfloat16, generator=gen) * 0.02)
-            n_plant = min(64, L)
-            offs = (torch.arange(n_plant, device=device) * (L // n_plant)
-                    + torch.randint(0, max(1, L // n_plant), (n_plant,),
-                                    device=device, generator=gen))
             for r in range(B):
+                Lr = lens[r]
+                n_plant = min(64, Lr)
+                offs = (torch.arange(n_plant, device=device) * (Lr // n_plant)
+                        + torch.randint(0, max(1, Lr // n_plant), (n_plant,),
+                                        device=device, generator=gen))
                 rows = self.slot0 + r * L + offs
                 kb[rows] = (kb[rows].to(torch.bfloat16) * 32.0).to(kb.dtype)
             # Golden support: the step writes exactly one row per request
-            # (out_cache_loc = last slot of the request's range).
+            # (out_cache_loc = last LIVE slot of the request's range).
             self.write_locs = (self.slot0 + torch.arange(B, device=device) * L
-                               + (L - 1))
+                               + (self.lens_t - 1))
             self._kv0_rows = kb[self.write_locs].clone()
         kb = self.kv_pool.kv_buffer[0]
         self.kv_bytes = kb.numel() * kb.element_size()
@@ -797,11 +811,11 @@ class MLAState:
         B, L = self.B, self.L
         dev = "cuda"
         req_pool_indices = torch.arange(B, device=dev, dtype=torch.int64) + 1  # rows 1..B
-        seq_lens = torch.full((B,), L, device=dev, dtype=torch.int64)
-        seq_lens_cpu = torch.full((B,), L, dtype=torch.int64)
-        positions = torch.full((B,), L - 1, device=dev, dtype=torch.int64)
-        # current-token write slot = last slot of req r's contiguous range.
-        out_cache_loc = self.slot0 + (req_pool_indices - 1) * L + (L - 1)
+        seq_lens = self.lens_t.clone()
+        seq_lens_cpu = torch.tensor(self.lens, dtype=torch.int64)
+        positions = self.lens_t - 1
+        # current-token write slot = last LIVE slot of req r's contiguous range.
+        out_cache_loc = self.slot0 + (req_pool_indices - 1) * L + (self.lens_t - 1)
         input_ids = torch.randint(0, cfg.vocab_size, (B,), device=dev, dtype=torch.int64)
 
         fb = ForwardBatch(
@@ -811,7 +825,7 @@ class MLAState:
             req_pool_indices=req_pool_indices,
             seq_lens=seq_lens,
             seq_lens_cpu=seq_lens_cpu,
-            seq_lens_sum=int(B * L),
+            seq_lens_sum=int(sum(self.lens)),
             out_cache_loc=out_cache_loc,
             positions=positions,
         )
@@ -993,12 +1007,13 @@ def graph_capture_and_time(layer, backend, backend_for_ctx, fb, positions, hidde
     return out
 
 
-def _point_path(path, B, L):
-    """Per-point file name: fill {B}/{L} if present, else insert _B{B}_L{L} before the ext."""
+def _point_path(path, B, L, mixed=False):
+    """Per-point file name: fill {B}/{L} if present, else insert _B{B}_L{L}[mix] before the ext."""
+    tag = f"{L}mix" if mixed else str(L)
     if "{B}" in path or "{L}" in path:
-        return path.replace("{B}", str(B)).replace("{L}", str(L))
+        return path.replace("{B}", str(B)).replace("{L}", tag)
     root, ext = os.path.splitext(path)
-    return f"{root}_B{B}_L{L}{ext or '.pt'}"
+    return f"{root}_B{B}_L{tag}{ext or '.pt'}"
 
 
 HIDDEN_SCALE = 0.02   # set from --hidden-scale in main()
@@ -1151,7 +1166,8 @@ def nvtx_align_steps(step_fn, out_dir, B, L, n_steps, latency_mode):
             f.write("VibeSimAlignmentIteration " + json.dumps({
                 "schema_version": 1, "input_adapter": "sglang_text", "iteration_index": i,
                 "prefill_tokens": 0, "decode_requests": B, "decode_tokens_scheduled": B,
-                "prefill_chunk_pairs": [], "decode_kv_lens": [L] * B,
+                "prefill_chunk_pairs": [],
+                "decode_kv_lens": list(getattr(st, "lens", [L] * B)),
                 "latency_mode": latency_mode}) + "\n")
         torch.cuda.synchronize()
     log(f"[nvtx] {n_steps} steps under sglang_iteration(N) ranges; records -> {logp}")
@@ -1196,14 +1212,16 @@ def time_split(layer, fb, positions, hidden, iters, warmup, attn_type="kda"):
 def time_point(cfg, sa, layer, B, seq_len, iters, warmup, split=False,
                attn_type="kda", mc=None, layer_idx=5, attention_backend="triton",
                cuda_graph=False, page_size=1, kv_dtype=torch.bfloat16, seed=0,
-               golden=None, profile_kernels_out=None, nvtx_align=None):
-    """golden: None | {"mode": "capture"|"replay", "path": str, "rel_err_max": float}."""
-    res = {"B": B, "seq_len": seq_len, "ok": False, "attn_type": attn_type, "seed": seed}
+               golden=None, profile_kernels_out=None, nvtx_align=None, mixed=False):
+    """golden: None | {"mode": "capture"|"replay", "path": str, "rel_err_max": float}.
+    mixed: MLA only -- per-request context lengths L, 3L/4, L/2, L/4 (see MLAState)."""
+    res = {"B": B, "seq_len": seq_len, "ok": False, "attn_type": attn_type, "seed": seed,
+           "mixed": bool(mixed and attn_type == "mla")}
     st = None
     graph_keepalive = None
     try:
         if attn_type == "mla":
-            st = MLAState(cfg, mc, sa, layer_idx, B, seq_len,
+            st = MLAState(cfg, mc, sa, layer_idx, B, seq_len, mixed=mixed,
                           attention_backend=attention_backend, page_size=page_size,
                           kv_dtype=kv_dtype, seed=seed)
             res["page_size"] = page_size
@@ -1310,9 +1328,10 @@ def time_point(cfg, sa, layer, B, seq_len, iters, warmup, split=False,
             graph, static_out = graph_keepalive if graph_keepalive else (None, None)
             out, state = correctness_step(layer, st, fb, positions, hidden, seed,
                                           backend_for_ctx, graph, static_out, ar=ar)
-            gpath = _point_path(golden["path"], B, seq_len)
+            gpath = _point_path(golden["path"], B, seq_len, res["mixed"])
             if golden["mode"] == "capture":
                 torch.save({"B": B, "seq_len": seq_len, "seed": seed, "attn_type": attn_type,
+                            "mixed": res["mixed"],
                             "latency_mode": res["latency_mode"], "out": out.cpu(),
                             "state": {k: v.cpu() for k, v in state.items()}}, gpath)
                 res["golden_path"] = gpath
@@ -1563,11 +1582,14 @@ def main():
     }
 
     if args.point:
-        # one or more "B,L" points separated by ";" (e.g. "1,1048576;16,65536")
+        # one or more "B,L" points separated by ";" (e.g. "1,1048576;16,65536");
+        # "B,L,mix" = mixed per-request context lengths (MLA; see MLAState).
         pts = []
         for tok in args.point.split(";"):
-            B, L = (int(x) for x in tok.split(","))
-            pts.append((B, L))
+            parts = tok.split(",")
+            B, L = int(parts[0]), int(parts[1])
+            mixed = len(parts) > 2 and parts[2].strip().lower() in ("mix", "mixed")
+            pts.append((B, L, mixed))
         rungs = [("adhoc", pts)]
     else:
         rungs = default_ladder(attn_type=args.attn_type)
@@ -1577,7 +1599,9 @@ def main():
 
     for name, points in rungs:
         log(f"\n---- rung {name} ----")
-        for (B, L) in points:
+        for pt in points:
+            B, L = pt[0], pt[1]
+            mixed = bool(pt[2]) if len(pt) > 2 else False
             r = time_point(cfg, sa, layer, B, L, args.iters, args.warmup,
                            split=args.split, attn_type=args.attn_type, mc=mc,
                            layer_idx=args.layer_idx,
@@ -1586,16 +1610,17 @@ def main():
                            kv_dtype=kv_dtype, seed=args.seed, golden=golden,
                            profile_kernels_out=args.profile_kernels,
                            nvtx_align=({"dir": args.nvtx_align, "steps": args.nvtx_align_steps}
-                                       if args.nvtx_align else None))
+                                       if args.nvtx_align else None),
+                           mixed=mixed)
             r["rung"] = name
             results["points"].append(r)
             # Machine-readable per-point line (what the judge parses).
             summary = {k: r.get(k) for k in (
-                "B", "seq_len", "ok", "latency_us", "latency_mode", "us_step",
+                "B", "seq_len", "mixed", "ok", "latency_us", "latency_mode", "us_step",
                 "us_step_graph", "us_attn", "us_moe", "us_norms", "finite",
                 "graph_finite", "attention_backend", "attn_heads", "seed", "error")}
             summary["attn_heads"] = args.attn_heads
-            summary["point"] = [r["B"], r["seq_len"]]
+            summary["point"] = [r["B"], r["seq_len"]] + (["mix"] if r.get("mixed") else [])
             if "correctness" in r:
                 summary["correctness"] = {k: v for k, v in r["correctness"].items()
                                           if k != "state"}

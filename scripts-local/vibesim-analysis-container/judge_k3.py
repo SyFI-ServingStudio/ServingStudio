@@ -41,24 +41,40 @@ def sh(argv, timeout=3600, check=False):
     return out
 
 
+# A point is (B, L, mixed). `mixed` = per-request context lengths L, 3L/4, L/2, L/4 (MLA
+# only; the driver's "B,L,mix" syntax). Config points may be [B, L] or [B, L, "mix"].
+def _pt(p):
+    p = list(p)
+    mixed = len(p) > 2 and str(p[2]).lower() in ("mix", "mixed", "true", "1")
+    return (int(p[0]), int(p[1]), mixed)
+
+
+def pt_key(p):
+    return f"{p[0]},{p[1]}" + ("mix" if p[2] else "")
+
+
+def golden_name(p):
+    return f"golden_B{p[0]}_L{p[1]}{'mix' if p[2] else ''}.pt"
+
+
 def parse_json_lines(out):
-    """Driver stdout -> {(B,L): summary dict} from the `JSON {...}` lines."""
+    """Driver stdout -> {(B,L,mixed): summary dict} from the `JSON {...}` lines."""
     res = {}
     for line in out.splitlines():
         if line.startswith("JSON "):
             d = json.loads(line[5:])
-            res[(int(d["B"]), int(d["seq_len"]))] = d
+            res[(int(d["B"]), int(d["seq_len"]), bool(d.get("mixed", False)))] = d
     return res
 
 
 def points_of(cfg):
-    prim = tuple(cfg["points"]["primary"])
-    secs = [tuple(p) for p in cfg["points"].get("secondary", [])]
+    prim = _pt(cfg["points"]["primary"])
+    secs = [_pt(p) for p in cfg["points"].get("secondary", [])]
     return prim, secs
 
 
 def point_arg(points):
-    return ";".join(f"{b},{l}" for b, l in points)
+    return ";".join(f"{b},{l}" + (",mix" if m else "") for b, l, m in points)
 
 
 def case_key(cfg, driver_path):
@@ -138,12 +154,12 @@ def ensure_baseline(cfg, driver_path, golden_dir, points, key):
                 if "saved golden" not in out:
                     raise RuntimeError(f"golden capture missing:\n{out[-2000:]}")
                 for p in points:
-                    cont.cp_out(f"/tmp/golden/golden_B{p[0]}_L{p[1]}.pt", gdir)
+                    cont.cp_out(f"/tmp/golden/{golden_name(p)}", gdir)
                 mode = {p: res[p].get("latency_mode") for p in points}
-        base = {"points": {f"{b},{l}": {"lat": v, "median": statistics.median(v),
-                                          "sigma": statistics.pstdev(v) if len(v) > 1 else 0.0,
-                                          "latency_mode": mode[(b, l)]}
-                           for (b, l), v in lat.items()},
+        base = {"points": {pt_key(p): {"lat": v, "median": statistics.median(v),
+                                       "sigma": statistics.pstdev(v) if len(v) > 1 else 0.0,
+                                       "latency_mode": mode[p]}
+                           for p, v in lat.items()},
                 "driver_args": cfg["driver_args"], "seed": cfg.get("seed", 0),
                 "before_image": cfg["before_image"], "raw_tail": raw_tail}
         meta.write_text(json.dumps(base, indent=2))
@@ -181,9 +197,9 @@ def measure_tree(cfg, driver_path, points, tree_dir, reps):
                     raise RuntimeError(f"baseline tree failed at {p}: {res[p].get('error')}\n{out[-2000:]}")
                 lat[p].append(float(res[p]["latency_us"]))
                 mode[p] = res[p].get("latency_mode")
-        return {f"{b},{l}": {"lat": v, "median": statistics.median(v),
-                             "sigma": statistics.pstdev(v) if len(v) > 1 else 0.0,
-                             "latency_mode": mode[(b, l)]} for (b, l), v in lat.items()}
+        return {pt_key(p): {"lat": v, "median": statistics.median(v),
+                            "sigma": statistics.pstdev(v) if len(v) > 1 else 0.0,
+                            "latency_mode": mode[p]} for p, v in lat.items()}
     finally:
         cont.rm()
 
@@ -268,7 +284,7 @@ def main():
         cont.cp_in(driver_path, f"/tmp/{driver_path.name}")
         cont.exec(["mkdir", "-p", "/tmp/golden"])
         for p in points:
-            cont.cp_in(gdir / f"golden_B{p[0]}_L{p[1]}.pt", f"/tmp/golden/golden_B{p[0]}_L{p[1]}.pt")
+            cont.cp_in(gdir / golden_name(p), f"/tmp/golden/{golden_name(p)}")
         lat = {p: [] for p in points}
         correctness = {}
         for rep in range(int(cfg.get("reps", 5))):
@@ -293,7 +309,7 @@ def main():
     gates, per_point = {}, {}
     all_correct = True
     for p in points:
-        b = base["points"][f"{p[0]},{p[1]}"]
+        b = base["points"][pt_key(p)]
         before, sigma = b["median"], b["sigma"]
         after = statistics.median(lat[p])
         improvement = (before - after) / before
@@ -301,12 +317,12 @@ def main():
         c = correctness[p]
         ok_c = bool(c.get("pass"))
         all_correct = all_correct and ok_c
-        per_point[f"{p[0]},{p[1]}"] = {
+        per_point[pt_key(p)] = {
             "before_us": before, "before_sigma_us": sigma, "after_us": after,
             "after_lat": lat[p], "improvement": round(improvement, 4),
             "noise_frac_3sigma": round(noise, 4), "correctness": c,
-            "latency_mode": b.get("latency_mode"), "primary": p == prim}
-    pp = per_point[f"{prim[0]},{prim[1]}"]
+            "latency_mode": b.get("latency_mode"), "primary": p == prim, "mixed": p[2]}
+    pp = per_point[pt_key(prim)]
     min_impr = float(cfg.get("min_improvement", 0.05)) if args.min_improvement is None else args.min_improvement
     # 3 sigma of the baseline, but never below 0.5%: two 5-rep medians on a shared GPU can
     # differ by that much with sigma ~0, and a "gain" inside that band is not a gain.
@@ -314,7 +330,7 @@ def main():
     gates["correctness"] = all_correct
     gates["latency_improved"] = pp["improvement"] >= need
     gates["no_secondary_regression"] = all(
-        per_point[f"{p[0]},{p[1]}"]["improvement"] >= -max(0.02, per_point[f"{p[0]},{p[1]}"]["noise_frac_3sigma"])
+        per_point[pt_key(p)]["improvement"] >= -max(0.02, per_point[pt_key(p)]["noise_frac_3sigma"])
         for p in secs)
     v.update(points=per_point, gates=gates, required_improvement=round(need, 4),
              before_us=pp["before_us"], latency_us=pp["after_us"],
