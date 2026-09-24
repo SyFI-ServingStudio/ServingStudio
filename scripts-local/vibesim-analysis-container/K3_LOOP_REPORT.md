@@ -184,6 +184,24 @@ co-tenant during this campaign (±3% run-to-run noise; the 3σ requirement absor
 | KDA 21 | FAIL (correctness) | −2.6% (394.7 → 384.6, shared GPU) | −0.9% @32, 0.0% @1 | **rel 0.42 @32, 0.06 @1** | left a `route_quant_fused` 112/top-2 JIT specialization + `topk.py` change that breaks numerics at small batch; required gain was 7% (3σ under the busy co-tenant) | rejected on both gates; `best_tree` unchanged |
 | KDA 20 | FAIL (infra) | — | — | — | agent ended near its seed (+15 lines `kimi_k3.py`); tried bf16-input MoE dispatch (383 µs, no gain), PDL-off, a variant that failed CHECK (rel 0.37) | judge's replay hit **CUDA OOM** (17 MB free): the co-tenant sglang scheduler grew to 167 GB on GPU 7. Not an agent result. Loop paused 20:25; auto-resumes (`resume_k3_loop_when_free.sh`) when an authorized GPU has room |
 
+## Accuracy hardening (2026-09-24 16:05–16:27)
+
+Both final best trees re-judged against **fresh pristine goldens under seeds 1 and 2** (new weights,
+state, inputs; 5-rep timings vs the pristine tree at every point):
+
+| tree | seed | CHECK (max_rel_err per point) | speedup vs pristine |
+|---|---|---|---|
+| MLA best | 1 | 0.006 / 0.008 / 0.004 | −16.8% @1×1M, −3.5% @128×8k, −4.7% @16×64k |
+| MLA best | 2 | 0.010 / 0.010 / 0.005 | −16.8%, −3.5%, −5.0% |
+| KDA best | 1 | 0.009 / 0.0 / 0.0 | −5.7% @128, −7.3% @32, −8.9% @1 |
+| KDA best | 2 | 0.011 / 0.011 / 0.0 | −6.1%, −7.1%, −8.9% |
+
+All PASS; the speedups reproduce under new seeds. Caveat stands: this is layer-level kernel equivalence
+(≤ 2% relative error on bf16 outputs + exact post-step state), not an end-to-end model-quality eval.
+The MLA case now also carries a **mixed-context-length** point (`16,65536,mix`: 64k/48k/32k/16k) so
+uniform-length shortcuts like round 25's `is_var_seq=False` fail CHECK; the round-25 tree is being
+re-judged on it (see below).
+
 ## Artifacts
 
 `iter_opt_eval_k3_{kda,mla}/trial_<k>_{verdict.json,agent.log,opt_run/,tree_judged.patch}`,
