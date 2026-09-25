@@ -202,7 +202,7 @@ Prefill rounds start after B12b.
 | KDA-b512 Claude (r1) | 1 | 512×8k 708.0 → 584.2 (−17.5%) | 256: −6.5%, 128: −6.7% | 0.016 | PASS |
 | KDA-b512 Claude (r1) | 2 | 512×8k 719.1 → 591.2 (−17.8%) | 256: −6.4%, 128: −6.4% | 0.016 | PASS |
 | MLA-b512 Claude (r3) | 2 | 512×8k 1006.1 → 891.3 (−11.4%) | 256: −8.2%, mixed 16×64k: −11.7% | 0.011 | PASS |
-| MLA-b512 Claude (r3) | 1 | pending (first attempt lost to a judge container-name collision, fixed) | | | |
+| MLA-b512 Claude (r3) | 1 | 512×8k 990.4 → 871.8 (−12.0%) | 256: −8.3%, mixed 16×64k: −11.1% | 0.012 | PASS (re-run after a judge container-name collision, fixed) |
 | MLA-prefill Claude (r2) | 1 | 1×16k @ prefix 48k 12172.6 → 11311.5 (−7.1%) | first chunk −0.2%, 4×4k −3.7% | 0.014 | PASS |
 | MLA-prefill Claude (r2) | 2 | 12152.1 → 11232.4 (−7.6%) | first chunk −2.8%, 4×4k −3.6% | 0.017 | PASS |
 
