@@ -169,7 +169,8 @@ def build_config_dir(experts, ep, num_layers=8, out_dir="/tmp/k3_cfg",
 
 
 def bootstrap(cfg_dir, moe_backend="bf16", attn_type="kda", target_layer=5,
-              attention_backend="triton", page_size=1, kv_cache_dtype="auto"):
+              attention_backend="triton", page_size=1, kv_cache_dtype="auto",
+              bf16_gemm_init=False, bf16_gemm_backend=None):
     """Publish ServerArgs (role=scheduler), build ModelConfig, init distributed +
     model-parallel + dp-attention (tp=1, world=1, EP off).
 
@@ -209,8 +210,28 @@ def bootstrap(cfg_dir, moe_backend="bf16", attn_type="kda", target_layer=5,
         sa_kwargs["decode_attention_backend"] = attention_backend
     if moe_backend != "bf16":
         sa_kwargs["moe_runner_backend"] = moe_backend
+    if bf16_gemm_backend is not None:
+        sa_kwargs["bf16_gemm_backend"] = bf16_gemm_backend
     sa = ServerArgs(**sa_kwargs)
     set_global_server_args_for_scheduler(sa)  # publish(role="scheduler")
+
+    if bf16_gemm_init:
+        # Production: Scheduler.__init__ calls initialize_bf16_gemm_config() (scheduler.py:1001),
+        # which resolves --bf16-gemm-backend auto -> "cutedsl" on SM100, so UnquantizedLinearMethod
+        # and K3's _k3_bf16_gemm dispatch eligible bf16 GEMM shapes to the CuTe-DSL TGV / split-K
+        # kernels (use_cutedsl_bf16_gemm). Without this call get_bf16_gemm_backend() stays AUTO
+        # (is_cutedsl() False) and every bf16 GEMM runs cuBLAS -- the state of all runs before
+        # 2026-09-24 23:00 (found by VibeSim B12 while matching the prefill runners to the layer).
+        from sglang.srt.layers.quantization.unquant import (
+            initialize_bf16_gemm_config, get_bf16_gemm_backend,
+        )
+        initialize_bf16_gemm_config()
+        log(f"[boot] bf16 GEMM backend initialized as in the production scheduler: "
+            f"{get_bf16_gemm_backend()}")
+    else:
+        from sglang.srt.layers.quantization.unquant import get_bf16_gemm_backend
+        log(f"[boot] bf16 GEMM backend NOT initialized (driver legacy): {get_bf16_gemm_backend()} "
+            f"-> bf16 GEMMs run cuBLAS; pass --bf16-gemm-init for the production dispatch")
 
     if moe_backend != "bf16":
         from sglang.srt.layers.moe.utils import (
@@ -1732,6 +1753,13 @@ def main():
     ap.add_argument("--cuda-graph", action="store_true",
                     help="also capture the decode step in a CUDA graph and time "
                          "replays (us_step_graph); eager us_step is still reported")
+    ap.add_argument("--bf16-gemm-init", action="store_true",
+                    help="call sglang's initialize_bf16_gemm_config() as the production scheduler "
+                         "does (auto -> cutedsl TGV/split-K dispatch on SM100 for eligible bf16 GEMM "
+                         "shapes); default off = the legacy driver behaviour (all bf16 GEMMs cuBLAS)")
+    ap.add_argument("--bf16-gemm-backend", type=str, default="",
+                    choices=["", "auto", "cutedsl", "torch"],
+                    help="override --bf16-gemm-backend passed to ServerArgs (default: sglang's auto)")
     ap.add_argument("--seed", type=int, default=0,
                     help="seed for weights, state/KV, and the decode input")
     ap.add_argument("--capture", type=str, default="",
@@ -1779,7 +1807,8 @@ def main():
         f"split={args.split} moe_backend={args.moe_backend} "
         f"attention_backend={args.attention_backend if args.attn_type == 'mla' else 'n/a'} "
         f"page_size={args.page_size} attn_heads={args.attn_heads} cuda_graph={args.cuda_graph} "
-        f"kv_cache_dtype={args.kv_cache_dtype} mamba_ssm_dtype={args.mamba_ssm_dtype}")
+        f"kv_cache_dtype={args.kv_cache_dtype} mamba_ssm_dtype={args.mamba_ssm_dtype} "
+        f"bf16_gemm_init={args.bf16_gemm_init}")
     log(f"torch={torch.__version__}  dev={torch.cuda.get_device_name(0)}")
     import sglang
     log(f"sglang={getattr(sglang, '__version__', '??')}")
@@ -1795,7 +1824,9 @@ def main():
     sa, mc, cfg = bootstrap(cfg_dir, moe_backend=args.moe_backend,
                             attn_type=args.attn_type, target_layer=args.layer_idx,
                             attention_backend=args.attention_backend,
-                            page_size=args.page_size, kv_cache_dtype=sa_kv_dtype)
+                            page_size=args.page_size, kv_cache_dtype=sa_kv_dtype,
+                            bf16_gemm_init=args.bf16_gemm_init,
+                            bf16_gemm_backend=args.bf16_gemm_backend or None)
     layer = build_layer(cfg, args.layer_idx, moe_backend=args.moe_backend,
                         attn_type=args.attn_type, seed=args.seed)
     assert not (args.capture and args.replay), "use --capture or --replay, not both"
