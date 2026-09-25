@@ -41,29 +41,40 @@ def sh(argv, timeout=3600, check=False):
     return out
 
 
-# A point is (B, L, mixed). `mixed` = per-request context lengths L, 3L/4, L/2, L/4 (MLA
-# only; the driver's "B,L,mix" syntax). Config points may be [B, L] or [B, L, "mix"].
+# A point is (B, L, tag). tag: "" (uniform decode), "mix" (per-request context lengths L, 3L/4,
+# L/2, L/4; MLA only), "pf" / "pf<prefix>" (chunked prefill: B requests x L new tokens each on a
+# <prefix>-token cached context; eager timing). Config points: [B, L], [B, L, "mix"],
+# [B, L, "pf"], [B, L, "pf49152"]. Keys/golden names are "B,L<tag>" (unchanged for decode points).
+def _norm_tag(t):
+    t = str(t).strip().lower() if t is not None else ""
+    if t in ("mixed", "true", "1"):
+        t = "mix"
+    if t in ("false", "0", "none"):
+        t = ""
+    return t
+
+
 def _pt(p):
     p = list(p)
-    mixed = len(p) > 2 and str(p[2]).lower() in ("mix", "mixed", "true", "1")
-    return (int(p[0]), int(p[1]), mixed)
+    return (int(p[0]), int(p[1]), _norm_tag(p[2]) if len(p) > 2 else "")
 
 
 def pt_key(p):
-    return f"{p[0]},{p[1]}" + ("mix" if p[2] else "")
+    return f"{p[0]},{p[1]}{p[2]}"
 
 
 def golden_name(p):
-    return f"golden_B{p[0]}_L{p[1]}{'mix' if p[2] else ''}.pt"
+    return f"golden_B{p[0]}_L{p[1]}{p[2]}.pt"
 
 
 def parse_json_lines(out):
-    """Driver stdout -> {(B,L,mixed): summary dict} from the `JSON {...}` lines."""
+    """Driver stdout -> {(B,L,tag): summary dict} from the `JSON {...}` lines."""
     res = {}
     for line in out.splitlines():
         if line.startswith("JSON "):
             d = json.loads(line[5:])
-            res[(int(d["B"]), int(d["seq_len"]), bool(d.get("mixed", False)))] = d
+            tag = _norm_tag(d.get("tag")) if d.get("tag") is not None else ("mix" if d.get("mixed") else "")
+            res[(int(d["B"]), int(d["seq_len"]), tag)] = d
     return res
 
 
@@ -74,7 +85,7 @@ def points_of(cfg):
 
 
 def point_arg(points):
-    return ";".join(f"{b},{l}" + (",mix" if m else "") for b, l, m in points)
+    return ";".join(f"{b},{l}" + (f",{t}" if t else "") for b, l, t in points)
 
 
 def case_key(cfg, driver_path):

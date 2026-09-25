@@ -841,19 +841,218 @@ class MLAState:
         torch.cuda.empty_cache()
 
 
+def _extend_fields(n_req, chunk, prefix, dev):
+    """ForwardMode.EXTEND metadata for n_req requests that each extend `chunk` new tokens on top
+    of a `prefix`-token cached context (one chunked-prefill step of a long prompt when n_req=1
+    and prefix>0; a mixed batch of first chunks when prefix=0). Field set/dtypes as
+    ForwardBatch.init_new + compute_position_torch build them."""
+    T = n_req * chunk
+    ext = torch.full((n_req,), chunk, device=dev, dtype=torch.int32)
+    pre = torch.full((n_req,), prefix, device=dev, dtype=torch.int32)
+    start = torch.arange(n_req, device=dev, dtype=torch.int32) * chunk
+    positions = (prefix + torch.arange(chunk, device=dev, dtype=torch.int64)).repeat(n_req)
+    fields = dict(extend_num_tokens=T, extend_seq_lens=ext, extend_prefix_lens=pre,
+                  extend_start_loc=start, extend_prefix_lens_cpu=[prefix] * n_req,
+                  extend_seq_lens_cpu=[chunk] * n_req)
+    return fields, positions
+
+
+class KDAPrefillState(KDAState):
+    """Chunked-prefill (ForwardMode.EXTEND) variant of KDAState: n_req requests each extend
+    `chunk` tokens on a `prefix`-token context. KDAAttnBackend.forward_extend runs the conv
+    (causal_conv1d_fn, initial state iff has_initial_state = prefix > 0) and chunk_kda, which
+    reads ssm_states[cache_indices] as the initial state and writes the final state back in
+    place. prefix > 0: the seeded non-zero state stands for what earlier chunks left. prefix == 0:
+    a first chunk -- the scheduler hands the kernels a zeroed slot, so both states are zeroed."""
+
+    def __init__(self, cfg, sa, n_req, chunk, prefix, device="cuda", seed=0):
+        super().__init__(cfg, sa, n_req, device=device, seed=seed)
+        self.chunk, self.prefix = int(chunk), int(prefix)
+        if self.prefix == 0:
+            with torch.no_grad():
+                for t in (self.conv, self.temporal, self._conv0, self._temporal0):
+                    t.zero_()
+
+    def make_forward_batch(self, cfg, seq_len=None):
+        from sglang.srt.model_executor.forward_batch_info import (
+            ForwardBatch, ForwardMode,
+        )
+        n, C, P = self.B, self.chunk, self.prefix
+        dev = "cuda"
+        T = n * C
+        ext, positions = _extend_fields(n, C, P, dev)
+        fb = ForwardBatch(
+            forward_mode=ForwardMode.EXTEND,
+            batch_size=n,
+            input_ids=torch.randint(0, cfg.vocab_size, (T,), device=dev, dtype=torch.int64),
+            req_pool_indices=torch.arange(n, device=dev, dtype=torch.int64),
+            seq_lens=torch.full((n,), P + C, device=dev, dtype=torch.int64),
+            seq_lens_cpu=torch.full((n,), P + C, dtype=torch.int64),
+            seq_lens_sum=int(n * (P + C)),
+            out_cache_loc=torch.arange(T, device=dev, dtype=torch.int64),  # no KV pool for KDA
+            positions=positions,
+            **ext,
+        )
+        fb.req_to_token_pool = self.req_pool
+        fb.token_to_kv_pool = None
+        fb.mamba_track_indices = None
+        fb.mamba_track_mask = None
+        fb._original_batch_size = n
+        fb.spec_info = None
+        self.kda.init_forward_metadata(fb)   # EXTEND: query_start_loc from extend_start_loc
+        return fb
+
+
+class MLAPrefillState:
+    """Chunked-prefill (EXTEND) analogue of MLAState: n_req requests, each with `prefix` cached
+    latent-KV tokens (seeded, with planted high-norm rows) followed by `chunk` new tokens whose
+    fp8 latent KV the step writes at out_cache_loc (the golden compares those rows).
+
+    Production K3 prefill on Blackwell runs the trtllm_mla backend (the DCP recipe pairs it with
+    cutedsl_mla for decode), whose handler picks MHA_CHUNKED_KV: the layer writes the new rows
+    (set_mla_kv_buffer), runs the TRT-LLM ragged attention (fp8 q/k/v for an fp8 KV cache) over
+    the chunk, and for prefix > 0 attends each prefix KV chunk (gathered + kv_b_proj) and merges
+    the partial results (merge_state). The backend object carries its own name so the layer's
+    dispatch does not fall back to the triton handler for the unregistered "cutedsl_mla"."""
+
+    def __init__(self, cfg, mc, sa, layer_idx, n_req, chunk, prefix, device="cuda",
+                 attention_backend="trtllm_mla", page_size=64, kv_dtype=torch.bfloat16, seed=0):
+        from sglang.srt.mem_cache.memory_pool import (
+            MLATokenToKVPool, ReqToTokenPool,
+        )
+        from sglang.srt.mem_cache.kv_index_translator import KVIndexTranslator
+        from sglang.srt.layers.attention.attention_registry import ATTENTION_BACKENDS
+
+        self.B, self.L, self.chunk, self.prefix = n_req, chunk, int(chunk), int(prefix)
+        self.mixed = False
+        Ltot = self.prefix + self.chunk
+        assert self.prefix % page_size == 0 and Ltot % page_size == 0, \
+            f"prefix {prefix} and prefix+chunk {Ltot} must be multiples of page_size {page_size}"
+        self.Ltot = Ltot
+        prefill_backend = "trtllm_mla" if attention_backend == "cutedsl_mla" else attention_backend
+        self.attention_backend = prefill_backend
+        self.page_size = page_size
+        n_tokens = n_req * Ltot
+        self.kv_dtype = kv_dtype
+        self.kv_pool = MLATokenToKVPool(
+            size=n_tokens, page_size=page_size, dtype=kv_dtype,
+            kv_lora_rank=cfg.kv_lora_rank, qk_rope_head_dim=cfg.qk_rope_head_dim,
+            layer_num=1, device=device, enable_memory_saver=False,
+            start_layer=layer_idx, end_layer=layer_idx + 1,
+        )
+        _sl = self.kv_pool.start_layer
+        self.kv_pool.get_v_head_dim = (
+            lambda: self.kv_pool.get_value_buffer(_sl).shape[-1]
+        )
+        gen = torch.Generator(device=device)
+        gen.manual_seed(seed + 23)
+        self.slot0 = page_size
+        with torch.no_grad():
+            kb = self.kv_pool.kv_buffer[0]
+            kb.zero_()
+            for r in range(n_req):
+                if self.prefix > 0:
+                    base = self.slot0 + r * Ltot
+                    rows = kb[base:base + self.prefix]
+                    rows.copy_(torch.randn(rows.shape, device=device, dtype=torch.bfloat16,
+                                           generator=gen) * 0.02)
+                    n_plant = min(64, self.prefix)
+                    offs = (torch.arange(n_plant, device=device) * (self.prefix // n_plant)
+                            + torch.randint(0, max(1, self.prefix // n_plant), (n_plant,),
+                                            device=device, generator=gen))
+                    kb[base + offs] = (kb[base + offs].to(torch.bfloat16) * 32.0).to(kb.dtype)
+            # the step writes the chunk rows of every request
+            self.write_locs = (self.slot0 + self.prefix
+                               + torch.arange(n_req, device=device).view(n_req, 1) * Ltot
+                               + torch.arange(self.chunk, device=device).view(1, self.chunk)
+                               ).reshape(-1)
+            self._kv0_rows = kb[self.write_locs].clone()
+        self.kv_bytes = kb.numel() * kb.element_size()
+
+        self.req_pool = ReqToTokenPool(
+            size=n_req, max_context_len=Ltot, device=device, enable_memory_saver=False,
+        )
+        rows = torch.arange(n_req, device=device, dtype=torch.int32).view(n_req, 1) * Ltot
+        cols = torch.arange(Ltot, device=device, dtype=torch.int32).view(1, Ltot)
+        self.req_pool.req_to_token[1:n_req + 1, :Ltot] = self.slot0 + rows + cols
+        self.translator = KVIndexTranslator(
+            req_to_token=self.req_pool.req_to_token, token_to_kv_pool_allocator=None,
+            token_to_kv_pool=self.kv_pool, page_size=page_size, device=device,
+        )
+        model_runner = SimpleNamespace(
+            server_args=sa, device=device, gpu_id=0, is_draft_worker=False,
+            use_mla_backend=True, dtype=torch.bfloat16, max_running_requests=n_req,
+            req_to_token_pool=self.req_pool, token_to_kv_pool=self.kv_pool,
+            token_to_kv_pool_allocator=None, kv_index_translator=self.translator,
+            sliding_window_size=None, page_size=page_size, kv_cache_dtype=kv_dtype,
+            model_config=mc,
+        )
+        self.backend = ATTENTION_BACKENDS[prefill_backend](model_runner)
+        # DeepseekV2AttentionMLA.dispatch_attn_forward_method prefers the name stamped on the
+        # backend object (ModelRunner stamps it); AttentionBackendRegistry.get_handler falls
+        # back to the TRITON handler for unknown names such as "cutedsl_mla".
+        self.backend.prefill_attention_backend_str = prefill_backend
+        log(f"[mla-prefill] {type(self.backend).__name__} built (prefill backend="
+            f"{prefill_backend} page_size={page_size} kv_dtype={kv_dtype}); n_req={n_req} "
+            f"chunk={self.chunk} prefix={self.prefix} kv={self.kv_bytes/1e9:.3f}GB")
+
+    def reset(self):
+        with torch.no_grad():
+            self.kv_pool.kv_buffer[0][self.write_locs] = self._kv0_rows
+
+    def state_after(self):
+        """The KV rows the step wrote (chunk rows of every request)."""
+        return {"kv_rows": self.kv_pool.kv_buffer[0][self.write_locs].clone()}
+
+    def make_forward_batch(self, cfg):
+        from sglang.srt.model_executor.forward_batch_info import (
+            ForwardBatch, ForwardMode,
+        )
+        n, C, P, Ltot = self.B, self.chunk, self.prefix, self.Ltot
+        dev = "cuda"
+        T = n * C
+        ext, positions = _extend_fields(n, C, P, dev)
+        fb = ForwardBatch(
+            forward_mode=ForwardMode.EXTEND,
+            batch_size=n,
+            input_ids=torch.randint(0, cfg.vocab_size, (T,), device=dev, dtype=torch.int64),
+            req_pool_indices=torch.arange(n, device=dev, dtype=torch.int64) + 1,  # rows 1..n
+            seq_lens=torch.full((n,), Ltot, device=dev, dtype=torch.int64),
+            seq_lens_cpu=torch.full((n,), Ltot, dtype=torch.int64),
+            seq_lens_sum=int(n * Ltot),
+            out_cache_loc=self.write_locs.clone(),
+            positions=positions,
+            **ext,
+        )
+        fb.req_to_token_pool = self.req_pool
+        fb.token_to_kv_pool = self.kv_pool
+        fb.attn_backend = self.backend
+        fb.spec_info = None
+        self.backend.init_forward_metadata(fb)
+        # A real step builds a fresh ForwardBatch, so the prefix-chunk plan
+        # (prepare_chunked_prefix_cache_info: chunking + kv-index gather) runs every step;
+        # clearing num_prefix_chunks before each call keeps that work in the timed step.
+        fb._k3_pre_step = lambda: setattr(fb, "num_prefix_chunks", None)
+        return fb
+
+    def free(self):
+        del self.backend, self.kv_pool, self.req_pool, self.translator
+        torch.cuda.empty_cache()
+
+
 class KDADecodeShim:
     """ForwardContext.attn_backend shim: RadixLinearAttention.forward calls
-    get_attn_backend().forward(layer=, forward_batch=, mixed_qkv=, a=, b=);
-    always DECODE here, so dispatch straight to KDAAttnBackend.forward_decode."""
+    get_attn_backend().forward(layer=, forward_batch=, mixed_qkv=, a=, b=); dispatch on the
+    forward mode like HybridLinearAttnBackend.forward (decode -> forward_decode, extend ->
+    forward_extend = chunk_kda prefill)."""
 
     def __init__(self, kda):
         self.kda = kda
 
     def forward(self, layer, forward_batch, mixed_qkv, a, b, **kw):
-        return self.kda.forward_decode(
-            layer=layer, forward_batch=forward_batch,
-            mixed_qkv=mixed_qkv, a=a, b=b,
-        )
+        fn = (self.kda.forward_decode if forward_batch.forward_mode.is_decode()
+              else self.kda.forward_extend)
+        return fn(layer=layer, forward_batch=forward_batch, mixed_qkv=mixed_qkv, a=a, b=b)
 
 
 @contextlib.contextmanager
@@ -892,6 +1091,9 @@ def call_layer(layer, fb, positions, hidden, ar=None):
     the pending prefix_sum and `attn_res` the snapshot bank; without it, the plain
     residual path."""
     za = make_zero_allocator()
+    hook = getattr(fb, "_k3_pre_step", None)   # per-step batch prep a fresh ForwardBatch would redo
+    if hook is not None:
+        hook()
     return layer.forward(
         positions=positions,
         hidden_states=hidden,
@@ -1007,9 +1209,11 @@ def graph_capture_and_time(layer, backend, backend_for_ctx, fb, positions, hidde
     return out
 
 
-def _point_path(path, B, L, mixed=False):
-    """Per-point file name: fill {B}/{L} if present, else insert _B{B}_L{L}[mix] before the ext."""
-    tag = f"{L}mix" if mixed else str(L)
+def _point_path(path, B, L, tag=""):
+    """Per-point file name: fill {B}/{L} if present, else insert _B{B}_L{L}<tag> before the ext.
+    tag: "" | "mix" | "pf" | "pf<prefix>" (a legacy bool `mixed` is accepted as "mix")."""
+    tag = "mix" if tag is True else (tag or "")
+    tag = f"{L}{tag}"
     if "{B}" in path or "{L}" in path:
         return path.replace("{B}", str(B)).replace("{L}", tag)
     root, ext = os.path.splitext(path)
@@ -1212,15 +1416,38 @@ def time_split(layer, fb, positions, hidden, iters, warmup, attn_type="kda"):
 def time_point(cfg, sa, layer, B, seq_len, iters, warmup, split=False,
                attn_type="kda", mc=None, layer_idx=5, attention_backend="triton",
                cuda_graph=False, page_size=1, kv_dtype=torch.bfloat16, seed=0,
-               golden=None, profile_kernels_out=None, nvtx_align=None, mixed=False):
+               golden=None, profile_kernels_out=None, nvtx_align=None, tag=""):
     """golden: None | {"mode": "capture"|"replay", "path": str, "rel_err_max": float}.
-    mixed: MLA only -- per-request context lengths L, 3L/4, L/2, L/4 (see MLAState)."""
+    tag: "" (uniform decode) | "mix" (MLA only: per-request context lengths L, 3L/4, L/2, L/4,
+    see MLAState) | "pf" / "pf<prefix>" (chunked prefill: B requests x seq_len NEW tokens each
+    on a <prefix>-token cached context, see KDAPrefillState / MLAPrefillState; timed eagerly)."""
+    tag = "mix" if tag is True else (tag or "")
+    prefill = tag.startswith("pf")
+    prefix = int(tag[2:]) if (prefill and len(tag) > 2) else 0
+    mixed = (tag == "mix") and attn_type == "mla"
     res = {"B": B, "seq_len": seq_len, "ok": False, "attn_type": attn_type, "seed": seed,
-           "mixed": bool(mixed and attn_type == "mla")}
+           "mixed": mixed, "tag": ("mix" if mixed else (tag if prefill else "")),
+           "prefill": prefill}
+    if prefill:
+        res.update(prefix_len=prefix, num_tokens=B * seq_len)
     st = None
     graph_keepalive = None
     try:
-        if attn_type == "mla":
+        if prefill and attn_type == "mla":
+            st = MLAPrefillState(cfg, mc, sa, layer_idx, B, seq_len, prefix,
+                                 attention_backend=attention_backend, page_size=page_size,
+                                 kv_dtype=kv_dtype, seed=seed)
+            res["page_size"] = page_size
+            res["kv_dtype"] = str(kv_dtype)
+            fb = st.make_forward_batch(cfg)
+            backend_for_ctx = st.backend
+            res["attention_backend"] = st.attention_backend
+            res["attention_backend_class"] = type(st.backend).__name__
+        elif prefill:
+            st = KDAPrefillState(cfg, sa, B, seq_len, prefix, seed=seed)
+            fb = st.make_forward_batch(cfg)
+            backend_for_ctx = KDADecodeShim(st.kda)
+        elif attn_type == "mla":
             st = MLAState(cfg, mc, sa, layer_idx, B, seq_len, mixed=mixed,
                           attention_backend=attention_backend, page_size=page_size,
                           kv_dtype=kv_dtype, seed=seed)
@@ -1234,11 +1461,12 @@ def time_point(cfg, sa, layer, B, seq_len, iters, warmup, split=False,
             st = KDAState(cfg, sa, B, seed=seed)
             fb = st.make_forward_batch(cfg, seq_len)
             backend_for_ctx = KDADecodeShim(st.kda)
-        hidden = gen_hidden(seed, B)
+        n_rows = B * seq_len if prefill else B      # tokens in the step
+        hidden = gen_hidden(seed, n_rows)
         positions = fb.positions
         # Production K3 runs the attention-residual stream (attn_res_block_size=12);
         # build its per-layer state so the layer takes _forward_attn_residual.
-        ar = AttnResState(layer, B, seed) if getattr(layer, "use_attn_residuals", False) else None
+        ar = AttnResState(layer, n_rows, seed) if getattr(layer, "use_attn_residuals", False) else None
         if ar is not None:
             res["attn_res"] = {"block_num": ar.block_num, "valid_blocks": ar.nvb0,
                                "write_layer": ar.is_write_layer}
@@ -1253,8 +1481,10 @@ def time_point(cfg, sa, layer, B, seq_len, iters, warmup, split=False,
             res["finite"] = bool(torch.isfinite(hs).all().item())
 
             res["us_step"] = _cuda_time(lambda: call_layer(layer, fb, positions, hidden, ar), iters)
-            res["us_token"] = res["us_step"] / B
-            if attn_type == "mla":
+            res["us_token"] = res["us_step"] / n_rows
+            if attn_type == "mla" and prefill:
+                res["kv_gb"] = st.kv_bytes / 1e9
+            elif attn_type == "mla":
                 res["kv_gb"] = st.kv_bytes / 1e9
                 # per-layer MLA-KV read = B*L*(kv_lora_rank+qk_rope)*elem_bytes.
                 res["mla_kv_read_bytes"] = int(B) * int(seq_len) * 576 * (
@@ -1265,13 +1495,19 @@ def time_point(cfg, sa, layer, B, seq_len, iters, warmup, split=False,
             res["peak_gb"] = torch.cuda.max_memory_allocated() / 1e9
             res["ok"] = True
 
-            if split:
+            if split and prefill:
+                log("[split] eager attn/moe/norms split is decode-only; skipped for a prefill point")
+            elif split:
                 res.update(time_split(layer, fb, positions, hidden, iters, warmup,
                                       attn_type=attn_type))
                 if attn_type == "mla" and "us_attn" in res and res["floor_us"] > 0:
                     res["attn_over_floor"] = res["us_attn"] / res["floor_us"]
 
-        if cuda_graph:
+        if cuda_graph and prefill:
+            # sglang does not graph-capture chunked prefill; the eager step is the metric.
+            res["graph_ok"] = False
+            res["graph_skipped"] = "prefill points are timed eagerly"
+        elif cuda_graph:
             # After eager + split so their metadata/timing are untouched by the
             # static graph buffers. Failure is reported, never silently downgraded.
             try:
@@ -1302,12 +1538,13 @@ def time_point(cfg, sa, layer, B, seq_len, iters, warmup, split=False,
                     with forward_ctx(backend_for_ctx), torch.inference_mode():
                         call_layer(layer, fb, positions, hidden, ar)
             prof = profile_kernels(fn)
-            prof.update({"point": [B, seq_len], "latency_us": res["latency_us"],
+            prof.update({"point": [B, seq_len] + ([res["tag"]] if res["tag"] else []),
+                         "latency_us": res["latency_us"],
                          "latency_mode": res["latency_mode"], "attn_type": attn_type})
             res["kernel_profile"] = {k: prof[k] for k in ("total_kernel_us", "num_launches")}
             res["kernel_profile_top"] = prof["kernels"][:12]
             os.makedirs(os.path.dirname(os.path.abspath(profile_kernels_out)), exist_ok=True)
-            ppath = _point_path(profile_kernels_out, B, seq_len)
+            ppath = _point_path(profile_kernels_out, B, seq_len, res["tag"])
             json.dump(prof, open(ppath, "w"), indent=1)
             log(f"[profile] {ppath}: {prof['num_launches']:.0f} launches/step, "
                 f"kernel sum {prof['total_kernel_us']:.1f}us "
@@ -1328,18 +1565,21 @@ def time_point(cfg, sa, layer, B, seq_len, iters, warmup, split=False,
             graph, static_out = graph_keepalive if graph_keepalive else (None, None)
             out, state = correctness_step(layer, st, fb, positions, hidden, seed,
                                           backend_for_ctx, graph, static_out, ar=ar)
-            gpath = _point_path(golden["path"], B, seq_len, res["mixed"])
+            gpath = _point_path(golden["path"], B, seq_len, res["tag"])
             if golden["mode"] == "capture":
                 torch.save({"B": B, "seq_len": seq_len, "seed": seed, "attn_type": attn_type,
-                            "mixed": res["mixed"],
+                            "mixed": res["mixed"], "tag": res["tag"],
                             "latency_mode": res["latency_mode"], "out": out.cpu(),
                             "state": {k: v.cpu() for k, v in state.items()}}, gpath)
                 res["golden_path"] = gpath
                 log(f"saved golden -> {gpath}")
             else:
                 ref = torch.load(gpath, map_location="cuda")
-                assert ref["B"] == B and ref["seq_len"] == seq_len and ref["seed"] == seed, \
-                    f"golden {gpath} is for B={ref['B']} L={ref['seq_len']} seed={ref['seed']}"
+                rtag = ref.get("tag", "mix" if ref.get("mixed") else "")
+                assert (ref["B"] == B and ref["seq_len"] == seq_len and ref["seed"] == seed
+                        and rtag == res["tag"]), \
+                    (f"golden {gpath} is for B={ref['B']} L={ref['seq_len']} tag={rtag!r} "
+                     f"seed={ref['seed']}")
                 chk = _tensor_diff(out, ref["out"].cuda())
                 state_chk = {k: _tensor_diff(state[k], ref["state"][k].cuda())
                              for k in state}
@@ -1368,7 +1608,8 @@ def time_point(cfg, sa, layer, B, seq_len, iters, warmup, split=False,
                           f" a/floor={res.get('attn_over_floor', float('nan')):.2f}x")
         memstr = (f"kv={res['kv_gb']:.3f}GB" if attn_type == "mla"
                   else f"state={res.get('state_mb', 0):.1f}MB")
-        log(f"[time] B={B:5d} L={seq_len:9d}  us/step={res['us_step']:9.2f}  "
+        log(f"[time] B={B:5d} L={seq_len:9d}{(' ' + res['tag']) if res['tag'] else ''}  "
+            f"us/step={res['us_step']:9.2f}  "
             f"us/tok={res['us_token']:8.3f}  {memstr}  "
             f"peak={res['peak_gb']:.2f}GB  finite={res['finite']}  "
             f"shape={res['out_shape']}{extra}")
@@ -1582,14 +1823,19 @@ def main():
     }
 
     if args.point:
-        # one or more "B,L" points separated by ";" (e.g. "1,1048576;16,65536");
-        # "B,L,mix" = mixed per-request context lengths (MLA; see MLAState).
+        # one or more "B,L[,tag]" points separated by ";" (e.g. "1,1048576;16,65536,mix").
+        # tags: "mix" = mixed per-request context lengths (MLA; see MLAState);
+        # "pf" / "pf<prefix>" = chunked prefill of B requests x L new tokens on a <prefix>-token
+        # context (see KDAPrefillState / MLAPrefillState), e.g. "1,16384,pf49152".
         pts = []
         for tok in args.point.split(";"):
             parts = tok.split(",")
             B, L = int(parts[0]), int(parts[1])
-            mixed = len(parts) > 2 and parts[2].strip().lower() in ("mix", "mixed")
-            pts.append((B, L, mixed))
+            tag = parts[2].strip().lower() if len(parts) > 2 else ""
+            if tag in ("mixed", "true", "1"):
+                tag = "mix"
+            assert tag == "" or tag == "mix" or tag.startswith("pf"), f"unknown point tag {tag!r}"
+            pts.append((B, L, tag))
         rungs = [("adhoc", pts)]
     else:
         rungs = default_ladder(attn_type=args.attn_type)
@@ -1601,7 +1847,7 @@ def main():
         log(f"\n---- rung {name} ----")
         for pt in points:
             B, L = pt[0], pt[1]
-            mixed = bool(pt[2]) if len(pt) > 2 else False
+            tag = pt[2] if len(pt) > 2 else ""
             r = time_point(cfg, sa, layer, B, L, args.iters, args.warmup,
                            split=args.split, attn_type=args.attn_type, mc=mc,
                            layer_idx=args.layer_idx,
@@ -1611,16 +1857,17 @@ def main():
                            profile_kernels_out=args.profile_kernels,
                            nvtx_align=({"dir": args.nvtx_align, "steps": args.nvtx_align_steps}
                                        if args.nvtx_align else None),
-                           mixed=mixed)
+                           tag=tag)
             r["rung"] = name
             results["points"].append(r)
             # Machine-readable per-point line (what the judge parses).
             summary = {k: r.get(k) for k in (
-                "B", "seq_len", "mixed", "ok", "latency_us", "latency_mode", "us_step",
+                "B", "seq_len", "mixed", "tag", "prefill", "prefix_len", "num_tokens", "ok",
+                "latency_us", "latency_mode", "us_step",
                 "us_step_graph", "us_attn", "us_moe", "us_norms", "finite",
                 "graph_finite", "attention_backend", "attn_heads", "seed", "error")}
             summary["attn_heads"] = args.attn_heads
-            summary["point"] = [r["B"], r["seq_len"]] + (["mix"] if r.get("mixed") else [])
+            summary["point"] = [r["B"], r["seq_len"]] + ([r["tag"]] if r.get("tag") else [])
             if "correctness" in r:
                 summary["correctness"] = {k: v for k, v in r["correctness"].items()
                                           if k != "state"}

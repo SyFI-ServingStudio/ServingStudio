@@ -6,9 +6,10 @@ You are optimizing a **real $FRAMEWORK checkout** at `$CHECKOUT` (the Python pac
 
 - **Model:** $MODEL_NAME.
 - **Workload:** $WORKLOAD.
-- **Objective:** **minimize $METRIC**. Change the real source so the layer's decode step runs
-  faster under CUDA-graph replay, and prove the change **does not alter the layer's numerical
-  output or its post-step state**.
+- **Objective:** **minimize $METRIC**. Change the real source so the layer's step runs faster
+  (decode points: CUDA-graph replay time; chunked-prefill points `B,L,pf[<prefix>]`: eager step
+  time, since sglang does not graph-capture prefill), and prove the change **does not alter the
+  layer's numerical output or its post-step state** (KDA conv/recurrent state, MLA written KV rows).
 
 You are NOT told which operator, kernel, or code path to change, and NOT given a target
 number. You must **derive** what to optimize from measurement and analysis — not from reading
@@ -70,8 +71,9 @@ python3 /tmp/kimi_single_layer_decode.py --point "$POINTS" $ARGS --capture /tmp/
 # 3) after editing, replay: speed AND correctness (per point: `JSON {...}` and `CHECK {...}`):
 python3 /tmp/kimi_single_layer_decode.py --point "$POINTS" $ARGS --replay /tmp/golden.pt
 ```
-- Every point prints a `JSON {"latency_us": ..., "latency_mode": "graph", ...}` line; the
-  judged number is `latency_us` in graph mode. `--split` adds eager attn/moe/norms times.
+- Every point prints a `JSON {"latency_us": ..., "latency_mode": "graph"|"eager", ...}` line; the
+  judged number is `latency_us` (graph mode for decode points, eager for prefill points, whose
+  `point` carries the `pf<prefix>` tag). `--split` adds eager attn/moe/norms times (decode only).
 - **Measure before and after with the IDENTICAL command** (same flags, same points, same
   `--iters/--warmup`), and treat a run that also carries `--split` or `--profile-kernels` as a
   *diagnostic*, not a timing reference: those extra phases perturb the graph-replay number by
