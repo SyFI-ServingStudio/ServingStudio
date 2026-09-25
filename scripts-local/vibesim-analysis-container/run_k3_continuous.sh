@@ -13,7 +13,7 @@
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 GPU_IDX="$1"; CASE="$2"; K0="$3"; N="$4"; SEED="${5:-}"
-case "$GPU_IDX" in 2|3|7) ;; *) echo "!! GPU $GPU_IDX not authorized (only 2,3,7)"; exit 1;; esac
+case "$GPU_IDX" in [0-7]) ;; *) echo "!! bad GPU index $GPU_IDX"; exit 1;; esac   # 2026-09-25: any free GPU (user)
 export DOCKER_GPU_ARG="\"device=$GPU_IDX\"" AGENT_TIMEOUT="${AGENT_TIMEOUT:-2700}" MIN_IMPROVEMENT=0
 OUT="$HERE/iter_opt_eval_k3_${CASE}"; BEST="$OUT/best_tree"; HIST="$OUT/rounds.jsonl"
 mkdir -p "$OUT"

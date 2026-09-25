@@ -17,20 +17,7 @@ oracles_up () {
 }
 until oracles_up; do echo "$(date +%T) prefill oracles 8805/8806 not up yet -> wait 300s"; sleep 300; done
 echo "==== $(date +%F_%T) prefill oracles up"
-declare -A IDLE_STREAK=([2]=0 [3]=0)
-GPU_IDX=""
-while [ -z "$GPU_IDX" ]; do
-  for g in 3 2; do
-    used="$(nvidia-smi -i "$g" --query-gpu=memory.used --format=csv,noheader,nounits | tr -d ' ')"
-    if [ "${used:-99999}" -lt 1000 ]; then IDLE_STREAK[$g]=$((IDLE_STREAK[$g] + 1)); else IDLE_STREAK[$g]=0; fi
-    if [ "${IDLE_STREAK[$g]}" -ge "$IDLE_CHECKS" ]; then GPU_IDX="$g"; break; fi
-  done
-  [ -n "$GPU_IDX" ] && break
-  used7="$(nvidia-smi -i 7 --query-gpu=memory.used --format=csv,noheader,nounits | tr -d ' ')"
-  total7="$(nvidia-smi -i 7 --query-gpu=memory.total --format=csv,noheader,nounits | tr -d ' ')"
-  if [ $((total7 - used7)) -ge 61440 ]; then GPU_IDX=7; export K3_SHARED_GPU=1; break; fi
-  echo "$(date +%T) GPUs 2/3 busy, GPU 7 free=$((total7 - used7)) MiB -> wait 120s"; sleep 120
-done
+GPU_IDX="$("$HERE/pick_free_gpu.sh" "${K3_GPU_EXCLUDE:-}")"   # any free GPU (user policy 2026-09-25)
 echo "==== $(date +%F_%T) using GPU $GPU_IDX (shared=${K3_SHARED_GPU:-0})"
 export DOCKER_GPU_ARG="\"device=$GPU_IDX\""
 for c in mla kda; do
