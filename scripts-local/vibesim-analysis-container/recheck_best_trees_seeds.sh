@@ -2,13 +2,13 @@
 # Accuracy hardening: re-judge the final best trees against FRESH pristine goldens under extra
 # seeds (new weights/state/inputs). The continuous loop only ever checked seed 0. Verdict files:
 #   iter_opt_eval_k3_<case>/best_tree_seed<k>_verdict.json  (improvement is vs the PRISTINE tree)
-# Usage: recheck_best_trees_seeds.sh <gpu> <seed> [<seed> ...]
+# Usage: [CASES="mla kda"] recheck_best_trees_seeds.sh <gpu> <seed> [<seed> ...]   (CASES: e.g. "mla_b512_claude kda_b512_claude")
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
-GPU_IDX="$1"; shift
+GPU_IDX="$1"; shift; CASES="${CASES:-mla kda}"
 export DOCKER_GPU_ARG="\"device=$GPU_IDX\""
 for seed in "$@"; do
-  for case_name in mla kda; do
+  for case_name in $CASES; do
     OUT="$HERE/iter_opt_eval_k3_${case_name}"
     CFG="$OUT/issue_k3_${case_name}_seed${seed}.json"
     python3 - "$HERE/issue_k3_${case_name}.json" "$CFG" "$seed" <<'PY'
