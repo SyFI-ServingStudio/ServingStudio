@@ -61,6 +61,15 @@ NOTES = {
     ("mla", 25): "ACCEPTED: is_var_seq=False (FlashInfer persistent TRT-LLM MLA schedule) for the fp8 K3 layout + 16-warp KV-concat CTA at B=1 (+0.8%); verified on a mixed-length batch (rel 0.0046, -7.4% there)",
     ("mla", 26): "null: cutedsl_bf16_gemm.py tweak, 0.0%",
     ("mla", 27): "null: fused finalize+shared JIT kernel regressed and was reverted; flashinfer_trtllm.py tweak 0.0% (MLA plateau)",
+    ("kda_b512", 1): "Codex: null (+1.2% < 1.5% need under fill noise); MoE tuner ceiling, route+quant JITs inactive",
+    ("kda_b512", 2): "Codex: null 0.0%; bf16-act MXFP4 (no kernel), route+pack+quant, TMA stages, tuner ceiling",
+    ("kda_b512", 3): "Codex: null +0.1%; in-kernel TRT-LLM routing re-routed 2/512 tokens (CHECK FAIL), SiTU bf16 (no kernel)",
+    ("mla_b512", 1): "INFRA NOISE (concurrent VibeSim profiling on the GPU); not a result",
+    ("mla_b512", 2): "Codex: null 0.00%; tactic buckets, PDL, low-priority overlap (-1us), bf16 front GEMM (numerics FAIL)",
+    ("mla_b512", 3): "Codex: null +0.17%; route+quant cap 64->512 (-1.5us kept), TGV at m=512 8%/2% SLOWER (reverted)",
+    ("mla_b512", 4): "Codex: null 0.00%; PDL policy regressed, var-seq scheduler neutral",
+    ("kda_b512_claude", 1): "ACCEPTED (Claude Opus 5.5): one-shot MXFP4 MoE autotune when rows/expert>8 (= production warmup, HARNESS GAP ~9 pts) + vectorized bf16 state ld/st & launch_bounds in kda_fused_decode.cuh (92.6->83.0us, real) + bfa overlap limit 128->512: 675.2->600.4 @512, exact",
+    ("mla_b512_claude", 1): "ACCEPTED (Claude Opus 5.5): tuned MoE tactic (HARNESS GAP ~6.4 pts) + fp8 set_mla_kv_concat_q satfinite cvt + exact NOSAT fixup (17.8->8.0us, real): 976.3->904.6 @512, exact; merged-front split rejected (slower)",
 }
 CAMPAIGN1 = {("kda", k) for k in (4, 5, 6, 7)} | {("mla", k) for k in (4, 5, 6, 7)}
 
@@ -204,11 +213,12 @@ def write_index(out, hist):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default=str(HERE / "k3_opt_history"))
-    ap.add_argument("--cases", default="kda,mla,kda_b512,mla_b512,kda_prefill,mla_prefill")
+    ap.add_argument("--cases", default="kda,mla,kda_b512,mla_b512,kda_b512_claude,mla_b512_claude,kda_prefill,mla_prefill,kda_prefill_claude,mla_prefill_claude")
     a = ap.parse_args()
-    out = pathlib.Path(a.out)
-    if out.exists():
-        shutil.rmtree(out)
+    final = pathlib.Path(a.out)
+    # build into a sibling temp dir and rsync into place: the final dir is bind-mounted read-only into
+    # running agent containers, so it must never disappear while a trial is in flight.
+    out = final.parent / (final.name + ".build"); shutil.rmtree(out, ignore_errors=True)
     (out / "trials").mkdir(parents=True)
     hist = []
     for case in a.cases.split(","):
@@ -219,6 +229,9 @@ def main():
     if tech.exists():
         shutil.copy(tech, out / "TECHNIQUES.md")
     write_index(out, hist)
+    final.mkdir(exist_ok=True)
+    subprocess.run(["rsync", "-a", "--delete", str(out) + "/", str(final) + "/"], check=True)
+    shutil.rmtree(out); out = final
     n_pass = sum(1 for r in hist if r["verdict"] == "PASS")
     print(f"wrote {out}: {len(hist)} trials ({n_pass} PASS), "
           f"{sum(1 for p in out.rglob('agent_iterations.md'))} agent_iterations.md, "

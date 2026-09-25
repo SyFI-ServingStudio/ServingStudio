@@ -1,0 +1,979 @@
+diff -ruN -x __pycache__ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512/pristine_tree/kernels/jit/csrc/attention/kda_fused_decode.cuh /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512/trial_3_tree_judged/kernels/jit/csrc/attention/kda_fused_decode.cuh
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512/pristine_tree/kernels/jit/csrc/attention/kda_fused_decode.cuh	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512/trial_3_tree_judged/kernels/jit/csrc/attention/kda_fused_decode.cuh	2026-09-24 19:43:54.989320914 -0700
+@@ -42,6 +42,7 @@
+ 
+ #include <cstdint>
+ #include <cstdlib>
++#include <type_traits>
+ #include <cuda_bf16.h>
+ #include <cuda_runtime.h>
+ 
+@@ -153,36 +154,77 @@
+   return __float2bfloat16(value);
+ }
+ 
+-template <bool kUseCacheGlobalStore>
+-SGL_DEVICE void store_state_float4(float* ptr, float4 value) {
+-  if constexpr (kUseCacheGlobalStore) {
+-    __stcg(reinterpret_cast<float4*>(ptr), value);
++SGL_DEVICE float bf16_round(float value) {
++  return __bfloat162float(__float2bfloat16(value));
++}
++
++SGL_DEVICE float conv_silu_bf16(float value) {
++  return bf16_round(value / (1.0f + expf(-value)));
++}
++
++template <typename StateT>
++SGL_DEVICE float4 load_state4(const StateT* ptr) {
++  if constexpr (std::is_same_v<StateT, float>) {
++    return *reinterpret_cast<const float4*>(ptr);
++  } else {
++    return make_float4(
++        __bfloat162float(ptr[0]),
++        __bfloat162float(ptr[1]),
++        __bfloat162float(ptr[2]),
++        __bfloat162float(ptr[3]));
++  }
++}
++
++template <bool kUseCacheGlobalStore, typename StateT>
++SGL_DEVICE void store_state4(StateT* ptr, float4 value) {
++  if constexpr (std::is_same_v<StateT, float>) {
++    if constexpr (kUseCacheGlobalStore) {
++      __stcg(reinterpret_cast<float4*>(ptr), value);
++    } else {
++      *reinterpret_cast<float4*>(ptr) = value;
++    }
+   } else {
+-    *reinterpret_cast<float4*>(ptr) = value;
++    reinterpret_cast<__nv_bfloat162*>(ptr)[0] =
++        __float22bfloat162_rn(make_float2(value.x, value.y));
++    reinterpret_cast<__nv_bfloat162*>(ptr)[1] =
++        __float22bfloat162_rn(make_float2(value.z, value.w));
+   }
+ }
+ 
+-template <int kCopyThreads>
++template <int kCopyThreads, typename StateT>
+ SGL_DEVICE void
+-cp_async_state_chunk_for(float* s_state, const float* state, int slot, int i_hv, int64_t state_slot_stride, int chunk) {
+-  constexpr int kFloat4PerChunk = kChunkV * kDimK / 4;
++cp_async_state_chunk_for(
++    StateT* s_state,
++    const StateT* state,
++    int slot,
++    int i_hv,
++    int64_t state_slot_stride,
++    int chunk) {
++  constexpr int kElementsPerCopy = 16 / sizeof(StateT);
++  constexpr int kCopiesPerChunk = kChunkV * kDimK / kElementsPerCopy;
+   const int tid = threadIdx.x;
+   const int stage = chunk & 1;
+   const int v_base = chunk * kChunkV;
+   const int64_t slot_base = static_cast<int64_t>(slot) * state_slot_stride;
+-  for (int linear4 = tid; linear4 < kFloat4PerChunk; linear4 += kCopyThreads) {
+-    const int elem = linear4 * 4;
++  for (int linear = tid; linear < kCopiesPerChunk; linear += kCopyThreads) {
++    const int elem = linear * kElementsPerCopy;
+     const int row = elem / kDimK;
+     const int k = elem - row * kDimK;
+-    float* dst = s_state + (stage * kChunkV + row) * kDimK + k;
+-    const float* src = state + slot_base + ((i_hv * kDimV + v_base + row) * kDimK + k);
++    StateT* dst = s_state + (stage * kChunkV + row) * kDimK + k;
++    const StateT* src = state + slot_base + ((i_hv * kDimV + v_base + row) * kDimK + k);
+     ptx::cp_async_cg_16b(dst, src);
+   }
+   ptx::cp_async_commit_group();
+ }
+ 
+-SGL_DEVICE void
+-cp_async_state_chunk(float* s_state, const float* state, int slot, int i_hv, int64_t state_slot_stride, int chunk) {
++template <typename StateT>
++SGL_DEVICE void cp_async_state_chunk(
++    StateT* s_state,
++    const StateT* state,
++    int slot,
++    int i_hv,
++    int64_t state_slot_stride,
++    int chunk) {
+   cp_async_state_chunk_for<kThreads>(s_state, state, slot, i_hv, state_slot_stride, chunk);
+ }
+ 
+@@ -194,23 +236,23 @@
+ 
+ // 1D TMA bulk copy gmem -> smem; the issuing thread arrives with expect-tx on
+ // the mbarrier, completion is observed via ptx::mbar_wait_parity.
+-template <int kStageChunkV>
++template <int kStageChunkV, typename StateT>
+ SGL_DEVICE void tma_state_chunk_stage(
+-    float* s_state,
+-    const float* state,
++    StateT* s_state,
++    const StateT* state,
+     int slot,
+     int i_hv,
+     int64_t state_slot_stride,
+     int chunk,
+     int stage,
+     uint64_t* bar) {
+-  constexpr uint32_t kBytes = kStageChunkV * kDimK * sizeof(float);
+-  float* dst = s_state + stage * kStageChunkV * kDimK;
++  constexpr uint32_t kBytes = kStageChunkV * kDimK * sizeof(StateT);
++  StateT* dst = s_state + stage * kStageChunkV * kDimK;
+   // 16B-aligned for any slot iff state_slot_stride*sizeof(float) % 16 == 0
+   // (host gates TMA off otherwise); the intra-slot chunk offset is a multiple
+   // of kStageChunkV*kDimK*4, always 16B-aligned.
+   const int64_t slot_base = static_cast<int64_t>(slot) * state_slot_stride;
+-  const float* src = state + slot_base + ((i_hv * kDimV + chunk * kStageChunkV) * kDimK);
++  const StateT* src = state + slot_base + ((i_hv * kDimV + chunk * kStageChunkV) * kDimK);
+ #if KDA_FUSED_DECODE_HAS_TMA
+   ptx::fence_async_smem();
+   ptx::mbar_arrive_expect_tx(bar, kBytes);
+@@ -386,7 +428,8 @@
+     bool kApplyBetaSigmoid = true,
+     bool kUseTmaLoad = false,
+     int kTmaStages = kNumChunks,
+-    bool kUsePDL = false>
++    bool kUsePDL = false,
++    typename StateT = float>
+ // Shapes below use K3's per-TP-rank sizing (linear_attn_config: num_heads=96 over
+ // TP={8,16,32} -> H=HV={12,6,3} local heads; head_dim=128 -> kDimK=kDimV=128; kSeg = H*128;
+ // short_conv_kernel_size=4 -> kKernelWidth=4, kConvStateWidth=3). B is the live
+@@ -415,7 +458,7 @@
+     const int* __restrict__ ssm_state_indices,  // [B] recurrent-state slot per token; <0 marks a padded cuda-graph slot
+     const int* __restrict__ cu_seqlens,         // [B+1] token offsets into x_q/x_k/x_v/g/beta; unused under
+                                                 // kUseStaticDecodeLayout
+-    float* __restrict__ state,  // [slots, HV, 128, 128] recurrent KDA state h, inner [V,K] contiguous, slot pitch =
++    StateT* __restrict__ state,  // [slots, HV, 128, 128] recurrent KDA state h, inner [V,K] contiguous, slot pitch =
+                                 // state_slot_stride
+     __nv_bfloat16* __restrict__ out,  // [B, hv_count*128] fused-decode output, row i_n, col i_hv*128 + v
+     int B,                            // live decode batch size (token count for this launch)
+@@ -488,7 +531,8 @@
+ 
+   // Dynamic size: 2 cp.async stages (32KB) or kTmaStages TMA stages (16KB per
+   // stage; kTmaStages == kNumChunks means no buffer reuse).
+-  extern __shared__ __align__(16) float s_state[];
++  extern __shared__ __align__(16) unsigned char s_state_storage[];
++  StateT* s_state = reinterpret_cast<StateT*>(s_state_storage);
+   __shared__ float s_q[kDimK];
+   __shared__ float s_k[kDimK];
+   __shared__ float s_decay[kDimK];
+@@ -561,8 +605,8 @@
+       cs_k[cs_base + cs_w_stride] = k_shift1;
+       cs_k[cs_base + 2 * cs_w_stride] = k_new;
+ 
+-      s_q[k] = device::math::silu_fast(q_acc);
+-      s_k[k] = device::math::silu_fast(k_acc);
++      s_q[k] = conv_silu_bf16(q_acc);
++      s_k[k] = conv_silu_bf16(k_acc);
+ 
+       const float g_raw = bf16_load(g, bos * g_row_stride + i_hv * kDimK + k) + dt_bias[hk];
+       if constexpr (kUseLowerBound) {
+@@ -588,8 +632,8 @@
+       q_acc += bf16_load(x_q, bos * x_row_stride + hk) * fp32_at(w_q_t, (kKernelWidth - 1) * hkv_dim + hk);
+       k_acc += bf16_load(x_k, bos * x_row_stride + hk) * fp32_at(w_k_t, (kKernelWidth - 1) * hkv_dim + hk);
+ 
+-      s_q[k] = device::math::silu_fast(q_acc);
+-      s_k[k] = device::math::silu_fast(k_acc);
++      s_q[k] = conv_silu_bf16(q_acc);
++      s_k[k] = conv_silu_bf16(k_acc);
+ 
+       const float g_raw = bf16_load(g, bos * g_row_stride + i_hv * kDimK + k) + dt_bias[hk];
+       if constexpr (kUseLowerBound) {
+@@ -625,7 +669,7 @@
+       cs_v[cs_base + 0] = v_shift0;
+       cs_v[cs_base + cs_w_stride] = v_shift1;
+       cs_v[cs_base + 2 * cs_w_stride] = v_new;
+-      s_v[v] = device::math::silu_fast(v_acc);
++      s_v[v] = conv_silu_bf16(v_acc);
+ 
+       if constexpr (kApplyOnorm && kPreloadOnormParams) {
+         const int64_t onorm_idx = i_n * onormg_row_stride + i_hv * kDimV + v;
+@@ -645,7 +689,7 @@
+         v_acc += bf16_load(cs_v, cs_idx) * fp32_at(w_v_t, w * hvv_dim + hvv);
+       }
+       v_acc += bf16_load(x_v, bos * x_row_stride + hvv) * fp32_at(w_v_t, (kKernelWidth - 1) * hvv_dim + hvv);
+-      s_v[v] = device::math::silu_fast(v_acc);
++      s_v[v] = conv_silu_bf16(v_acc);
+ 
+       if constexpr (kApplyOnorm && kPreloadOnormParams) {
+         const int64_t onorm_idx = i_n * onormg_row_stride + i_hv * kDimV + v;
+@@ -719,7 +763,7 @@
+       }
+     }
+ 
+-    const float* state_stage = s_state + (kUseTmaLoad ? (chunk % kTmaStages) : (chunk & 1)) * kChunkV * kDimK;
++    const StateT* state_stage = s_state + (kUseTmaLoad ? (chunk % kTmaStages) : (chunk & 1)) * kChunkV * kDimK;
+ 
+ #pragma unroll
+     for (int row = 0; row < kRowsPerWarp; row += 2) {
+@@ -732,8 +776,8 @@
+       float dot_hk_a = 0.0f;
+       float dot_hk_b = 0.0f;
+ 
+-      const float4 raw_h_a = *reinterpret_cast<const float4*>(state_stage + v_row_a * kDimK + k_base);
+-      const float4 raw_h_b = *reinterpret_cast<const float4*>(state_stage + v_row_b * kDimK + k_base);
++      const float4 raw_h_a = load_state4(state_stage + v_row_a * kDimK + k_base);
++      const float4 raw_h_b = load_state4(state_stage + v_row_b * kDimK + k_base);
+       h_a_vals[0] = raw_h_a.x * r_decay[0];
+       h_a_vals[1] = raw_h_a.y * r_decay[1];
+       h_a_vals[2] = raw_h_a.z * r_decay[2];
+@@ -767,19 +811,19 @@
+       if constexpr (kComputeOutputBeforeStore) {
+         dot_hq_a = h_a_0 * r_q[0] + h_a_1 * r_q[1] + h_a_2 * r_q[2] + h_a_3 * r_q[3];
+         dot_hq_b = h_b_0 * r_q[0] + h_b_1 * r_q[1] + h_b_2 * r_q[2] + h_b_3 * r_q[3];
+-        store_state_float4<kUseCacheGlobalStore>(state + state_idx_a, make_float4(h_a_0, h_a_1, h_a_2, h_a_3));
+-        store_state_float4<kUseCacheGlobalStore>(state + state_idx_b, make_float4(h_b_0, h_b_1, h_b_2, h_b_3));
++        store_state4<kUseCacheGlobalStore>(state + state_idx_a, make_float4(h_a_0, h_a_1, h_a_2, h_a_3));
++        store_state4<kUseCacheGlobalStore>(state + state_idx_b, make_float4(h_b_0, h_b_1, h_b_2, h_b_3));
+       } else {
+-        store_state_float4<kUseCacheGlobalStore>(state + state_idx_a, make_float4(h_a_0, h_a_1, h_a_2, h_a_3));
+-        store_state_float4<kUseCacheGlobalStore>(state + state_idx_b, make_float4(h_b_0, h_b_1, h_b_2, h_b_3));
++        store_state4<kUseCacheGlobalStore>(state + state_idx_a, make_float4(h_a_0, h_a_1, h_a_2, h_a_3));
++        store_state4<kUseCacheGlobalStore>(state + state_idx_b, make_float4(h_b_0, h_b_1, h_b_2, h_b_3));
+         dot_hq_a = h_a_0 * r_q[0] + h_a_1 * r_q[1] + h_a_2 * r_q[2] + h_a_3 * r_q[3];
+         dot_hq_b = h_b_0 * r_q[0] + h_b_1 * r_q[1] + h_b_2 * r_q[2] + h_b_3 * r_q[3];
+       }
+ 
+       const Sum2 dot_hq = warp_reduce_sum_pair(dot_hq_a, dot_hq_b);
+       if (lane == 0) {
+-        s_o[v0] = dot_hq.x;
+-        s_o[v1] = dot_hq.y;
++        s_o[v0] = bf16_round(dot_hq.x);
++        s_o[v1] = bf16_round(dot_hq.y);
+         if constexpr (kApplyOnorm && kAccumulateOnormSumsq) {
+           o_sumsq += dot_hq.x * dot_hq.x + dot_hq.y * dot_hq.y;
+         }
+@@ -887,7 +931,13 @@
+ // and lower-bounded sigmoid) and selected at launch from the model config.
+ // kUseTmaLoad/kTmaStages select the 1D-TMA state-staging path in place of the
+ // cp.async fallback used for a misaligned recurrent-state slot stride.
+-template <int kFixedHeads, bool kUseLowerBound, bool kUsePDL, bool kUseTmaLoad = false, int kTmaStages = kNumChunks>
++template <
++    int kFixedHeads,
++    bool kUseLowerBound,
++    bool kUsePDL,
++    typename StateT = float,
++    bool kUseTmaLoad = false,
++    int kTmaStages = kNumChunks>
+ constexpr auto kda_fused_decode_k3_kernel = kda_decode_fusion_many_heads_kernel<
+     /*kApplyOnorm=*/true,
+     /*kUseStaticDecodeLayout=*/true,
+@@ -907,26 +957,28 @@
+     /*kApplyBetaSigmoid=*/true,
+     kUseTmaLoad,
+     kTmaStages,
+-    kUsePDL>;
++    kUsePDL,
++    StateT>;
+ 
+-template <int kFixedHeads, bool kUsePDL>
++template <int kFixedHeads, bool kUsePDL, typename StateT>
+ auto select_kda_fused_decode_k3_kernel(bool use_lower_bound, int tma_stages) {
+   if (tma_stages == 3) {
+-    return use_lower_bound ? kda_fused_decode_k3_kernel<kFixedHeads, true, kUsePDL, true, 3>
+-                           : kda_fused_decode_k3_kernel<kFixedHeads, false, kUsePDL, true, 3>;
++    return use_lower_bound ? kda_fused_decode_k3_kernel<kFixedHeads, true, kUsePDL, StateT, true, 3>
++                           : kda_fused_decode_k3_kernel<kFixedHeads, false, kUsePDL, StateT, true, 3>;
+   }
+   if (tma_stages == 4) {
+-    return use_lower_bound ? kda_fused_decode_k3_kernel<kFixedHeads, true, kUsePDL, true, 4>
+-                           : kda_fused_decode_k3_kernel<kFixedHeads, false, kUsePDL, true, 4>;
++    return use_lower_bound ? kda_fused_decode_k3_kernel<kFixedHeads, true, kUsePDL, StateT, true, 4>
++                           : kda_fused_decode_k3_kernel<kFixedHeads, false, kUsePDL, StateT, true, 4>;
+   }
+-  return use_lower_bound ? kda_fused_decode_k3_kernel<kFixedHeads, true, kUsePDL>
+-                         : kda_fused_decode_k3_kernel<kFixedHeads, false, kUsePDL>;
++  return use_lower_bound ? kda_fused_decode_k3_kernel<kFixedHeads, true, kUsePDL, StateT>
++                         : kda_fused_decode_k3_kernel<kFixedHeads, false, kUsePDL, StateT>;
+ }
+ 
+ template <bool kUsePDL>
+ struct KdaFusedDecodeKernel {
++  template <typename StateT>
+   static void
+-  run(const tvm::ffi::TensorView mixed_qkv,     // [B, 3*H*128] bf16, row-strided
++  run_impl(const tvm::ffi::TensorView mixed_qkv,     // [B, 3*H*128] bf16, row-strided
+       const tvm::ffi::TensorView a,             // [B, H*128] bf16 raw forget gate
+       const tvm::ffi::TensorView b,             // [B, H] bf16 raw beta logits
+       const tvm::ffi::TensorView conv_states,   // [slots, 3, conv_dim] bf16 pool
+@@ -938,7 +990,7 @@
+       const tvm::ffi::TensorView dt_bias,       // [H*128] fp32
+       const tvm::ffi::TensorView onorm_g,       // [B, H*128] bf16, row-strided
+       const tvm::ffi::TensorView onorm_weight,  // [128] fp32
+-      const tvm::ffi::TensorView state,         // [slots, H, 128, 128] fp32; inner-contiguous, any slot pitch
++      const tvm::ffi::TensorView state,         // [slots, H, 128, 128] state dtype; inner-contiguous, any slot pitch
+       const tvm::ffi::TensorView indices,       // [B] int32 (< 0 = padded slot)
+       const tvm::ffi::TensorView out,           // [B, H*128] bf16 dense
+       double scale,
+@@ -978,7 +1030,7 @@
+     // slot pitch from state.stride(0); only the inner [HV, V, K] contiguity
+     // (strides {V*K, K, 1}) is load-bearing here.
+     TensorMatcher({Slots_, kH, 128, 128})
+-        .with_dtype<fp32_t>()
++        .with_dtype<StateT>()
+         .with_device(device)
+         .with_strides({-1, 128 * 128, 128, 1})
+         .verify(state);
+@@ -1000,23 +1052,27 @@
+     // TMA 1D-bulk needs the per-slot source address (state + slot*stride) 16B
+     // aligned for every slot. state.data_ptr() is torch-aligned and each chunk
+     // offset is a multiple of kChunkV*kDimK*4 B, so alignment holds iff the slot
+-    // pitch itself is 16B-aligned, i.e. state_slot_stride % 4 == 0 (fp32). The
++    // pitch itself is 16B-aligned, i.e. state_slot_stride % (16 / sizeof(StateT)) == 0. The
+     // K3 envelope pitch (14,042,880 elems, %4==0) and the dense pitch both
+     // satisfy this; a pathological stride falls back to cp.async (still fully
+     // fused, just no TMA) rather than silently mis-addressing the descriptor.
+-    const bool tma_slot_stride_aligned = (state_slot_stride % 4) == 0;
++    const bool tma_slot_stride_aligned = (state_slot_stride % (16 / sizeof(StateT))) == 0;
+     if (tma_slot_stride_aligned) {
+       // Full-state staging (4 stages, 64KB, sync-free) wins while the grid
+       // is small enough that occupancy isn't the limiter; past that the
+       // 48KB 3-stage variant (one sync for the single stage reuse) benches
+       // fastest.
+-      tma_stages = B * static_cast<int>(kH) >= 512 ? 3 : 4;
++      if constexpr (std::is_same_v<StateT, float>) {
++        tma_stages = B * static_cast<int>(kH) >= 512 ? 3 : 4;
++      } else {
++        tma_stages = 4;
++      }
+     }
+-    auto kernel = kH == 3 ? select_kda_fused_decode_k3_kernel<3, kUsePDL>(use_lower_bound, tma_stages)
+-                          : (kH == 6 ? select_kda_fused_decode_k3_kernel<6, kUsePDL>(use_lower_bound, tma_stages)
+-                                     : select_kda_fused_decode_k3_kernel<12, kUsePDL>(use_lower_bound, tma_stages));
++    auto kernel = kH == 3 ? select_kda_fused_decode_k3_kernel<3, kUsePDL, StateT>(use_lower_bound, tma_stages)
++                          : (kH == 6 ? select_kda_fused_decode_k3_kernel<6, kUsePDL, StateT>(use_lower_bound, tma_stages)
++                                     : select_kda_fused_decode_k3_kernel<12, kUsePDL, StateT>(use_lower_bound, tma_stages));
+     const int smem_stages = tma_stages == 0 ? 2 : tma_stages;
+-    const size_t smem_bytes = static_cast<size_t>(smem_stages) * kChunkV * kDimK * sizeof(float);
++    const size_t smem_bytes = static_cast<size_t>(smem_stages) * kChunkV * kDimK * sizeof(StateT);
+     host::RuntimeDeviceCheck(
+         cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, static_cast<int>(smem_bytes)));
+ 
+@@ -1043,7 +1099,7 @@
+             static_cast<const fp32_t*>(onorm_weight.data_ptr()),
+             static_cast<const int32_t*>(indices.data_ptr()),
+             /*cu_seqlens=*/static_cast<const int32_t*>(nullptr),
+-            static_cast<fp32_t*>(state.data_ptr()),
++            static_cast<StateT*>(state.data_ptr()),
+             static_cast<__nv_bfloat16*>(out.data_ptr()),
+             B,
+             /*H=*/static_cast<int>(kH),
+@@ -1059,6 +1115,74 @@
+             conv_states.stride(1),
+             state_slot_stride);
+   }
++
++  static void
++  run(const tvm::ffi::TensorView mixed_qkv,
++      const tvm::ffi::TensorView a,
++      const tvm::ffi::TensorView b,
++      const tvm::ffi::TensorView conv_states,
++      const tvm::ffi::TensorView w_q_t,
++      const tvm::ffi::TensorView w_k_t,
++      const tvm::ffi::TensorView w_v_t,
++      const tvm::ffi::TensorView conv_bias,
++      const tvm::ffi::TensorView A_log,
++      const tvm::ffi::TensorView dt_bias,
++      const tvm::ffi::TensorView onorm_g,
++      const tvm::ffi::TensorView onorm_weight,
++      const tvm::ffi::TensorView state,
++      const tvm::ffi::TensorView indices,
++      const tvm::ffi::TensorView out,
++      double scale,
++      double onorm_eps,
++      double lower_bound,
++      bool use_lower_bound) {
++    using namespace host;
++    if (is_type<bf16_t>(state.dtype())) {
++      run_impl<bf16_t>(
++          mixed_qkv,
++          a,
++          b,
++          conv_states,
++          w_q_t,
++          w_k_t,
++          w_v_t,
++          conv_bias,
++          A_log,
++          dt_bias,
++          onorm_g,
++          onorm_weight,
++          state,
++          indices,
++          out,
++          scale,
++          onorm_eps,
++          lower_bound,
++          use_lower_bound);
++    } else if (is_type<fp32_t>(state.dtype())) {
++      run_impl<fp32_t>(
++          mixed_qkv,
++          a,
++          b,
++          conv_states,
++          w_q_t,
++          w_k_t,
++          w_v_t,
++          conv_bias,
++          A_log,
++          dt_bias,
++          onorm_g,
++          onorm_weight,
++          state,
++          indices,
++          out,
++          scale,
++          onorm_eps,
++          lower_bound,
++          use_lower_bound);
++    } else {
++      RuntimeCheck(false, "KDA fused decode state must be bfloat16 or float32, got ", state.dtype());
++    }
++  }
+ };
+ 
+ }  // namespace sglang
+diff -ruN -x __pycache__ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512/pristine_tree/kernels/jit/csrc/moe/route_quant_fused.cuh /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512/trial_3_tree_judged/kernels/jit/csrc/moe/route_quant_fused.cuh
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512/pristine_tree/kernels/jit/csrc/moe/route_quant_fused.cuh	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512/trial_3_tree_judged/kernels/jit/csrc/moe/route_quant_fused.cuh	2026-09-24 19:37:29.310486448 -0700
+@@ -9,9 +9,9 @@
+ // standalone route_radix body (same TU, same flags — no fast-math, which the
+ // routing bit-exactness contract requires and the quant math tolerates: its
+ // only transcendentals are explicit intrinsics and exact bit manipulation),
+-// and QuantTrait::run is the per_token_group_quant math. Specialized like
+-// route_radix itself: 896 experts, top-16, and a 3584-wide bf16 activation row
+-// (112 ue8m0 groups of 32 = 224 lanes, exactly the routing block width).
++// and QuantTrait::run is the per_token_group_quant math. The JIT exposes the
++// original 896-expert/top-16 shape and the production EP8 local 112/top-2
++// shape; both use the same 3584-wide activation quantization.
+ 
+ #include "../gemm/per_token_group_quant.cuh"
+ #include "route_radix.cuh"
+@@ -41,13 +41,32 @@
+ inline constexpr uint32_t kQuantGroupsPerRow_ = LargeRouterRadixTrait::kBlockSize / RouteQuantTrait::kNumLanes;
+ inline constexpr uint32_t kQuantHidden_ = kQuantGroupsPerRow_ * RouteQuantTrait::kGroupSize;  // 3584
+ 
+-template <bool kUsePDL, typename TScore, typename TX>
+-__global__ __launch_bounds__(LargeRouterRadixTrait::kBlockSize)  //
++struct LocalRouterRadixTrait : moe::radix::RadixSelectBase {
++  static constexpr uint32_t kNumExperts = 112;
++  static constexpr uint32_t kTopK = 2;
++  // The quant half needs one two-lane subwarp for each of the 112 groups.
++  // The router uses the first 112 scalar entries and masks the rest.
++  static constexpr uint32_t kBlockSize = 224;
++  static constexpr uint32_t kVecSize = 1;
++  static constexpr uint32_t kNumWarps = kBlockSize / 32;
++
++  struct Smem {
++    uint32_t warp_sum[3][kNumWarps];
++    MatchBin match[kRadixRounds];
++    uint32_t histogram[kRadixSize];
++    int32_t wid[kTopK];
++    uint32_t wkey[kTopK];
++    fp32_t wact[kTopK];
++  };
++};
++
++template <typename RouterTrait, bool kUsePDL, typename TScore, typename TX>
++__global__ __launch_bounds__(RouterTrait::kBlockSize)  //
+     void route_quant_fused_kernel(const __grid_constant__ RouteQuantFusedParams params) {
+   const auto M = static_cast<uint32_t>(params.route.M);
+   if (blockIdx.x < M) {
+-    __shared__ typename LargeRouterRadixTrait::Smem smem;
+-    route_radix_block<kUsePDL, TScore>(params.route, smem);
++    __shared__ typename RouterTrait::Smem smem;
++    route_radix_block<RouterTrait, kUsePDL, TScore>(params.route, smem);
+   } else {
+     // Quant CTAs read the same primary-kernel output (the fused-front GEMM)
+     // as the routing CTAs, so they carry their own PDL wait/trigger.
+@@ -138,7 +157,7 @@
+ 
+ #define SGL_ROUTE_QUANT_LAUNCH(TS, TX)                                    \
+   LaunchKernel(2 * M, LargeRouterRadixTrait::kBlockSize, device.unwrap()) \
+-      .enable_pdl(kUsePDL)(route_quant_fused_kernel<kUsePDL, TS, TX>, params)
++      .enable_pdl(kUsePDL)(route_quant_fused_kernel<LargeRouterRadixTrait, kUsePDL, TS, TX>, params)
+ 
+     if (score_dtype.is_type<fp32_t>()) {
+       if (x_dtype.is_type<fp32_t>()) {
+@@ -157,4 +176,116 @@
+   }
+ };
+ 
++// The local EP8 shape has different routing constants from the full-model
++// radix kernel. Keep a separate wrapper so the common JIT module can dispatch
++// without compiling a runtime-sized router.
++template <bool kUsePDL>
++struct RouteQuantFusedLocalKernel {
++  static void
++  run(const tvm::ffi::TensorView scores,
++      const tvm::ffi::TensorView bias,
++      const tvm::ffi::TensorView out_w,
++      const tvm::ffi::TensorView out_i,
++      const tvm::ffi::TensorView out_packed,
++      const tvm::ffi::TensorView x,
++      const tvm::ffi::TensorView out_q,
++      const tvm::ffi::TensorView out_s,
++      int64_t topk,
++      double routed_scaling_factor,
++      bool renormalize,
++      bool apply_scale) {
++    using namespace host;
++
++    auto M_ = SymbolicSize{"num_tokens"};
++    auto N_ = SymbolicSize{"num_experts"};
++    auto K_ = SymbolicSize{"topk"};
++    auto device = SymbolicDevice{};
++    device.set_options<kDLCUDA>();
++
++    auto score_dtype = SymbolicDType{};
++    TensorMatcher({M_, N_})
++        .with_dtype<bf16_t, fp32_t>(score_dtype)
++        .with_device(device)
++        .with_strides({-1, 1})
++        .verify(scores);
++    TensorMatcher({N_}).with_dtype<fp32_t>().with_device(device).verify(bias);
++    TensorMatcher({M_, K_}).with_dtype<fp32_t>().with_device(device).verify(out_w);
++    TensorMatcher({M_, K_}).with_dtype<int32_t>().with_device(device).verify(out_i);
++    TensorMatcher({M_, K_})
++        .with_dtype<int32_t>()
++        .with_strides({-1, 1})
++        .with_device(device)
++        .verify(out_packed);
++    auto x_dtype = SymbolicDType{};
++    TensorMatcher({M_, -1})
++        .with_dtype<bf16_t, fp32_t>(x_dtype)
++        .with_device(device)
++        .with_strides({-1, 1})
++        .verify(x);
++
++    RuntimeCheck(
++        N_.unwrap() == LocalRouterRadixTrait::kNumExperts &&
++            K_.unwrap() == LocalRouterRadixTrait::kTopK &&
++            topk == LocalRouterRadixTrait::kTopK,
++        "route_quant_fused local wrapper requires N=112, K=2");
++    RuntimeCheck(
++        scores.stride(0) % 4 == 0,
++        "route_quant_fused: scores row stride must be a multiple of 4");
++
++    // The activation row is shared with the full-model specialization, so its
++    // quantization layout and numerical path stay identical.
++    const auto quant_params =
++        x_dtype.is_type<fp32_t>()
++            ? build_quant_context<RouteQuantTraitT<fp32_t>, /*kMasked=*/false>(x, out_q, out_s).params
++            : build_quant_context<RouteQuantTraitT<bf16_t>, /*kMasked=*/false>(x, out_q, out_s).params;
++    RuntimeCheck(
++        quant_params.hidden_size == kQuantHidden_,
++        "route_quant_fused is specialized for a 3584-wide activation row");
++    RuntimeCheck(
++        quant_params.num_tokens == static_cast<uint32_t>(M_.unwrap()),
++        "route_quant_fused: scores and activations must have the same token count");
++
++    const auto M = static_cast<uint32_t>(M_.unwrap());
++    if (M == 0) return;
++
++    const auto params = RouteQuantFusedParams{
++        .route =
++            {scores.data_ptr(),
++             static_cast<const fp32_t*>(bias.data_ptr()),
++             static_cast<fp32_t*>(out_w.data_ptr()),
++             static_cast<int32_t*>(out_i.data_ptr()),
++             static_cast<int32_t*>(out_packed.data_ptr()),
++             static_cast<int>(M),
++             static_cast<long long>(scores.stride(0)),
++             static_cast<long long>(out_w.stride(0)),
++             static_cast<long long>(out_i.stride(0)),
++             static_cast<long long>(out_packed.stride(0)),
++             static_cast<float>(routed_scaling_factor),
++             renormalize ? 1 : 0,
++             apply_scale ? 1 : 0,
++             /*sorted=*/0},
++        .quant = quant_params,
++    };
++
++#define SGL_ROUTE_QUANT_LOCAL_LAUNCH(TS, TX)                                      \
++  LaunchKernel(2 * M, LocalRouterRadixTrait::kBlockSize, device.unwrap())         \
++      .enable_pdl(kUsePDL)(route_quant_fused_kernel<LocalRouterRadixTrait, kUsePDL, TS, TX>, params)
++
++    if (score_dtype.is_type<fp32_t>()) {
++      if (x_dtype.is_type<fp32_t>()) {
++        SGL_ROUTE_QUANT_LOCAL_LAUNCH(fp32_t, fp32_t);
++      } else {
++        SGL_ROUTE_QUANT_LOCAL_LAUNCH(fp32_t, bf16_t);
++      }
++    } else {
++      if (x_dtype.is_type<fp32_t>()) {
++        SGL_ROUTE_QUANT_LOCAL_LAUNCH(bf16_t, fp32_t);
++      } else {
++        SGL_ROUTE_QUANT_LOCAL_LAUNCH(bf16_t, bf16_t);
++      }
++    }
++#undef SGL_ROUTE_QUANT_LOCAL_LAUNCH
++  }
++};
++
+ }  // namespace sglang
+diff -ruN -x __pycache__ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512/pristine_tree/kernels/jit/csrc/moe/route_radix.cuh /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512/trial_3_tree_judged/kernels/jit/csrc/moe/route_radix.cuh
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512/pristine_tree/kernels/jit/csrc/moe/route_radix.cuh	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512/trial_3_tree_judged/kernels/jit/csrc/moe/route_radix.cuh	2026-09-24 19:37:29.311486364 -0700
+@@ -117,10 +117,11 @@
+ // Whole-CTA routing body, callable from other kernels (the fused
+ // route+quant launch runs it on its first M CTAs). Routes row `blockIdx.x`;
+ // every thread of the 224-wide CTA must enter (block barriers inside).
+-template <bool kUsePDL, typename TScore>
+-SGL_DEVICE void route_radix_block(const RouteRadixParams& params, typename LargeRouterRadixTrait::Smem& smem) {
++template <typename RouterTrait, bool kUsePDL, typename TScore>
++SGL_DEVICE void route_radix_block(
++    const RouteRadixParams& params, typename RouterTrait::Smem& smem) {
+   using namespace device;
+-  using T = LargeRouterRadixTrait;
++  using T = RouterTrait;
+   constexpr uint32_t kVecSize = T::kVecSize;
+   constexpr uint32_t kRadixLanes = T::kRadixSize / 2;  // 128: 2 bins per thread
+   enum { BAR_RESERVED = 0, BAR_SUM = 1 };
+@@ -135,33 +136,51 @@
+   // ---- Load + key transform: thread tx owns experts [4*tx, 4*tx+4) ----
+   uint32_t keys[kVecSize];
+   float act[kVecSize];  // raw sigmoid (weight source) — never NaN-sanitized
++  bool active[kVecSize];
+   {
+-    const auto scores = static_cast<const TScore*>(params.scores) + bx * params.scores_stride;
+-    AlignedVector<fp32x2_t, kVecSize / 2> bias_vec;
+-    // bf16: 2x bf16x2 (8B row loads); fp32: 2x fp32x2 (16B row loads). The
+-    // radix math below is fp32 either way — only the load width differs.
+-    AlignedVector<packed_t<TScore>, kVecSize / 2> scores_vec;
+-
+     // Bias may be produced by a preceding cast or fill kernel (the caller
+     // does not guarantee a frozen weight), so wait before loading either input.
+     PDLWaitPrimary<kUsePDL>();
+-    bias_vec.load(params.bias, tx);
+-    scores_vec.load(scores, tx);
++    if constexpr (kVecSize == 1) {
++      // Local EP shards have 112 experts. The 224-thread launch is retained
++      // for the quant half, so inactive threads participate in barriers but do
++      // not read past the score or bias rows.
++      const auto expert = tx;
++      if (expert < T::kNumExperts) {
++        const auto scores = static_cast<const TScore*>(params.scores) + bx * params.scores_stride;
++        const float score = static_cast<float>(scores[expert]);
++        const float sx = moe::radix::sigmoid_match(score);
++        act[0] = sx;
++        keys[0] = moe::radix::biased_to_key(
++            moe::radix::nan_floor(sx + static_cast<float>(params.bias[expert])));
++      } else {
++        act[0] = 0.0f;
++        keys[0] = 0u;
++      }
++    } else {
++      const auto scores = static_cast<const TScore*>(params.scores) + bx * params.scores_stride;
++      AlignedVector<fp32x2_t, kVecSize / 2> bias_vec;
++      // bf16: 2x bf16x2 (8B row loads); fp32: 2x fp32x2 (16B row loads). The
++      // radix math below is fp32 either way — only the load width differs.
++      AlignedVector<packed_t<TScore>, kVecSize / 2> scores_vec;
++      bias_vec.load(params.bias, tx);
++      scores_vec.load(scores, tx);
+ 
+ #pragma unroll
+-    for (uint32_t i = 0; i < kVecSize / 2; ++i) {
+-      fp32x2_t xy;
+-      if constexpr (std::is_same_v<TScore, fp32_t>) {
+-        xy = scores_vec[i];
+-      } else {
+-        xy = cast<fp32x2_t>(scores_vec[i]);
++      for (uint32_t i = 0; i < kVecSize / 2; ++i) {
++        fp32x2_t xy;
++        if constexpr (std::is_same_v<TScore, fp32_t>) {
++          xy = scores_vec[i];
++        } else {
++          xy = cast<fp32x2_t>(scores_vec[i]);
++        }
++        const auto [x, y] = xy;
++        const auto sx = moe::radix::sigmoid_match(x), sy = moe::radix::sigmoid_match(y);
++        keys[2 * i + 0] = moe::radix::biased_to_key(moe::radix::nan_floor(sx + bias_vec[i].x));
++        keys[2 * i + 1] = moe::radix::biased_to_key(moe::radix::nan_floor(sy + bias_vec[i].y));
++        act[2 * i + 0] = sx;
++        act[2 * i + 1] = sy;
+       }
+-      const auto [x, y] = xy;
+-      const auto sx = moe::radix::sigmoid_match(x), sy = moe::radix::sigmoid_match(y);
+-      keys[2 * i + 0] = moe::radix::biased_to_key(moe::radix::nan_floor(sx + bias_vec[i].x));
+-      keys[2 * i + 1] = moe::radix::biased_to_key(moe::radix::nan_floor(sy + bias_vec[i].y));
+-      act[2 * i + 0] = sx;
+-      act[2 * i + 1] = sy;
+     }
+   }
+ 
+@@ -170,10 +189,9 @@
+   //   active[i]      <=> key's top 8r bits == threshold's top 8r bits
+   //   total_active    = size of the active set
+   //   topk            = winners still to take from the active set (1..total_active)
+-  bool active[kVecSize];
+ #pragma unroll
+   for (uint32_t i = 0; i < kVecSize; ++i) {
+-    active[i] = true;
++    active[i] = tx * kVecSize + i < T::kNumExperts;
+   }
+ 
+   uint32_t total_active = T::kNumExperts;
+@@ -255,7 +273,8 @@
+   if (take_all_equals) {
+ #pragma unroll
+     for (uint32_t i = 0; i < kVecSize; ++i) {
+-      selected[i] = active[i] || (keys[i] & examined_mask) > threshold;
++      const bool valid = tx * kVecSize + i < T::kNumExperts;
++      selected[i] = valid && (active[i] || (keys[i] & examined_mask) > threshold);
+     }
+   } else {  // deterministic tie-break
+     uint32_t cnt = 0;
+@@ -268,7 +287,8 @@
+     for (uint32_t i = 0; i < kVecSize; ++i) {
+       const bool eq_win = active[i] && rank < topk;
+       if (active[i]) ++rank;
+-      selected[i] = eq_win || (keys[i] & examined_mask) > threshold;
++      const bool valid = tx * kVecSize + i < T::kNumExperts;
++      selected[i] = valid && (eq_win || (keys[i] & examined_mask) > threshold);
+     }
+   }
+ 
+@@ -324,11 +344,11 @@
+   }
+ }
+ 
+-template <bool kUsePDL, typename TScore>
+-__global__ __launch_bounds__(LargeRouterRadixTrait::kBlockSize)  //
++template <typename RouterTrait, bool kUsePDL, typename TScore>
++__global__ __launch_bounds__(RouterTrait::kBlockSize)  //
+     void route_radix_kernel(const __grid_constant__ RouteRadixParams params) {
+-  __shared__ typename LargeRouterRadixTrait::Smem smem;
+-  route_radix_block<kUsePDL, TScore>(params, smem);
++  __shared__ typename RouterTrait::Smem smem;
++  route_radix_block<RouterTrait, kUsePDL, TScore>(params, smem);
+ }
+ 
+ // ---------------------------------------------------------------------------
+@@ -642,10 +662,10 @@
+ 
+     if (score_dtype.is_type<fp32_t>()) {
+       LaunchKernel(M, LargeRouterRadixTrait::kBlockSize, device.unwrap())
+-          .enable_pdl(kUsePDL)(route_radix_kernel<kUsePDL, fp32_t>, params);
++          .enable_pdl(kUsePDL)(route_radix_kernel<LargeRouterRadixTrait, kUsePDL, fp32_t>, params);
+     } else {
+       LaunchKernel(M, LargeRouterRadixTrait::kBlockSize, device.unwrap())
+-          .enable_pdl(kUsePDL)(route_radix_kernel<kUsePDL, bf16_t>, params);
++          .enable_pdl(kUsePDL)(route_radix_kernel<LargeRouterRadixTrait, kUsePDL, bf16_t>, params);
+     }
+   }
+ };
+diff -ruN -x __pycache__ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512/pristine_tree/kernels/ops/attention/fla/fused_recurrent.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512/trial_3_tree_judged/kernels/ops/attention/fla/fused_recurrent.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512/pristine_tree/kernels/ops/attention/fla/fused_recurrent.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512/trial_3_tree_judged/kernels/ops/attention/fla/fused_recurrent.py	2026-09-23 06:51:33.279699466 -0700
+@@ -628,6 +628,8 @@
+     # part (~9.6 TB/s) where this triton kernel tops out at ~5 TB/s holding a
+     # [BV, K] register tile per warp. ULP-level output differences only
+     # (reduction order); small batches keep triton (launch-bound anyway).
++    # kda_packed_decode.cuh implements both the standard softplus gate and
++    # KDA's safe lower-bound gate; pass the bound through to that kernel.
+     if use_qk_l2norm_in_kernel:
+         from sglang.kernels.ops.attention import kda_packed_decode as kda_decode_cuda
+ 
+diff -ruN -x __pycache__ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512/pristine_tree/kernels/ops/attention/kda_fused_decode.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512/trial_3_tree_judged/kernels/ops/attention/kda_fused_decode.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512/pristine_tree/kernels/ops/attention/kda_fused_decode.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512/trial_3_tree_judged/kernels/ops/attention/kda_fused_decode.py	2026-09-24 02:52:24.452488193 -0700
+@@ -61,8 +61,8 @@
+     onorm_g: torch.Tensor,
+ ) -> bool:
+     """The kernel is compiled for the K3 KDA decode regime: H heads of 128,
+-    packed [T, 3*H*128] qkv rows, transposed [slots, 3, 3*H*128] conv pool, fp32
+-    [slots, H, 128, 128] ssm pool (inner-contiguous, any slot pitch — the
++    packed [T, 3*H*128] qkv rows, transposed [slots, 3, 3*H*128] conv pool, BF16
++    or FP32 [slots, H, 128, 128] ssm pool (inner-contiguous, any slot pitch — the
+     kernel reads the real slot stride), one token per request."""
+     if ssm_states.ndim < 4:
+         return False
+@@ -89,7 +89,7 @@
+         and b.dtype == torch.bfloat16
+         and onorm_g.dtype == torch.bfloat16
+         and conv_states.dtype == torch.bfloat16
+-        and ssm_states.dtype == torch.float32
++        and ssm_states.dtype in (torch.bfloat16, torch.float32)
+         and cache_indices.dtype == torch.int32
+         and mixed_qkv.stride(-1) == 1
+         and a.stride(-1) == 1
+diff -ruN -x __pycache__ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512/pristine_tree/kernels/ops/moe/moe_route_quant_fused.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512/trial_3_tree_judged/kernels/ops/moe/moe_route_quant_fused.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512/pristine_tree/kernels/ops/moe/moe_route_quant_fused.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512/trial_3_tree_judged/kernels/ops/moe/moe_route_quant_fused.py	2026-09-24 19:37:57.302152686 -0700
+@@ -39,6 +39,9 @@
+ # the win itself, which is launch overhead) only makes sense at small decode
+ # batches. Above the cap the callers run the unfused chain.
+ _MAX_TOKENS = 64
++_LOCAL_NUM_EXPERTS = 112
++_LOCAL_TOPK = 2
++_LOCAL_MAX_TOKENS = 512
+ 
+ 
+ @cache_once
+@@ -48,7 +51,10 @@
+         "moe_route_quant_fused",
+         *args,
+         cuda_files=["moe/route_quant_fused.cuh"],
+-        cuda_wrappers=[("run", f"RouteQuantFusedKernel<{args}>::run")],
++        cuda_wrappers=[
++            ("run", f"RouteQuantFusedKernel<{args}>::run"),
++            ("run_local", f"RouteQuantFusedLocalKernel<{args}>::run"),
++        ],
+         # No fast-math: the routing half must stay bit-identical to
+         # route_radix (see its module comment); the quant half's math is
+         # fast-math-independent (explicit intrinsics + bit manipulation).
+@@ -75,11 +81,28 @@
+ ) -> bool:
+     """route_radix coverage plus the quant half: [M<=64, 3584] bf16 rows with
+     32B-aligned starts (base and stride), same token count as the scores."""
++    route_covered = moe_route_radix.covered(scores, bias, topk) or (
++        scores.dim() == 2
++        and scores.size(1) == _LOCAL_NUM_EXPERTS
++        and int(topk) == _LOCAL_TOPK
++        and scores.dtype in (torch.bfloat16, torch.float32)
++        and bias.dtype == torch.float32
++        and scores.stride(1) == 1
++        and scores.stride(0) % 4 == 0
++        and bias.is_contiguous()
++    )
+     return (
+-        moe_route_radix.covered(scores, bias, topk)
++        route_covered
+         and x.dim() == 2
+         and x.shape[0] == scores.shape[0]
+-        and 0 < x.shape[0] <= _MAX_TOKENS
++        and (
++            0 < x.shape[0] <= _MAX_TOKENS
++            or (
++                scores.size(1) == _LOCAL_NUM_EXPERTS
++                and int(topk) == _LOCAL_TOPK
++                and x.shape[0] == _LOCAL_MAX_TOKENS
++            )
++        )
+         and x.shape[1] == _HIDDEN
+         and x.dtype in (torch.bfloat16, torch.float32)
+         and x.stride(1) == 1
+@@ -108,7 +131,8 @@
+     out_packed = torch.empty((M, topk), dtype=torch.int32, device=device)
+     out_q = torch.empty((M, _HIDDEN), dtype=torch.float8_e4m3fn, device=device)
+     out_s = torch.empty((M, _NUM_GROUPS // 4), dtype=torch.int32, device=device)
+-    _jit_module().run(
++    run = _jit_module().run_local if scores.size(1) == _LOCAL_NUM_EXPERTS else _jit_module().run
++    run(
+         scores,
+         bias,
+         out_w,
+diff -ruN -x __pycache__ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512/pristine_tree/srt/layers/attention/linear/kda_backend.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512/trial_3_tree_judged/srt/layers/attention/linear/kda_backend.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512/pristine_tree/srt/layers/attention/linear/kda_backend.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512/trial_3_tree_judged/srt/layers/attention/linear/kda_backend.py	2026-09-23 06:11:15.556367933 -0700
+@@ -735,11 +735,9 @@
+             conv_state_indices=cache_indices,
+         )
+ 
+-        # The packed kernel assumes one token per request.
+-        if (
+-            self.kernel_dispatcher.supports_packed_decode
+-            and getattr(layer, "lower_bound", None) is None
+-        ):
++        # The packed kernel assumes one token per request. Its Triton KDA
++        # implementation also handles the KDA safe gate (lower_bound).
++        if self.kernel_dispatcher.supports_packed_decode:
+             assert qkv.shape[0] == cache_indices.shape[0], (
+                 "KDA packed decode requires one token per sequence (T=1): "
+                 f"got {qkv.shape[0]} tokens for {cache_indices.shape[0]} requests."
+diff -ruN -x __pycache__ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512/pristine_tree/srt/layers/moe/topk.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512/trial_3_tree_judged/srt/layers/moe/topk.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512/pristine_tree/srt/layers/moe/topk.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512/trial_3_tree_judged/srt/layers/moe/topk.py	2026-09-24 19:37:29.311486364 -0700
+@@ -1896,8 +1896,34 @@
+             # router, which subsumes the jit grouped_topk.cuh kernel here.
+             from sglang.kernels.ops.moe.moe_fused_gate import moe_fused_gate as jit_gate
+ 
++            # K3's EP-local 112-expert shape lands in this generic branch
++            # (the large 896-expert route+quant fast path has a separate
++            # dispatch above). If the MoE layer staged the routed activation,
++            # let the shape-specialized handoff fuse routing, TRT-LLM packing,
++            # and MXFP8 quantization; unsupported shapes fall through to the
++            # original Triton router.
++            _gating = (
++                gating_output
++                if gating_output.dtype == torch.bfloat16
++                else gating_output.to(dtype=torch.float32)
++            )
++            from sglang.srt.layers.moe import route_quant_handoff
++
++            fused = route_quant_handoff.try_route_quant_fused(
++                _gating,
++                correction_bias.to(dtype=torch.float32),
++                topk,
++                num_fused_shared_experts=num_fused_shared_experts,
++                renormalize=renormalize,
++                routed_scaling_factor=routed_scaling_factor,
++                apply_routed_scaling_factor_on_output=bool(
++                    apply_routed_scaling_factor_on_output
++                ),
++            )
++            if fused is not None:
++                return fused
+             return jit_gate(
+-                gating_output,
++                _gating,
+                 correction_bias.to(torch.float32),
+                 topk,
+                 scoring_func="sigmoid",
+diff -ruN -x __pycache__ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512/pristine_tree/srt/models/kimi_k3.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512/trial_3_tree_judged/srt/models/kimi_k3.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512/pristine_tree/srt/models/kimi_k3.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512/trial_3_tree_judged/srt/models/kimi_k3.py	2026-09-24 20:00:10.703498050 -0700
+@@ -196,6 +196,20 @@
+             (x.shape[0], weight.shape[0]), dtype=out_dtype, device=x.device
+         )
+     if x.dtype == torch.bfloat16 and weight.dtype == torch.bfloat16:
++        if (
++            out_dtype is None
++            and weight.shape == (7168, 6144)
++            and x.shape[0] <= 128
++            and x.is_contiguous()
++        ):
++            from sglang.kernels.ops.gemm.cutedsl_bf16_gemm import (
++                cutedsl_bf16_gemm,
++                cutedsl_bf16_gemm_out,
++            )
++
++            if out is None:
++                return cutedsl_bf16_gemm(x, weight)
++            return cutedsl_bf16_gemm_out(x, weight, out)
+         from sglang.srt.layers.quantization.unquant import get_bf16_gemm_backend
+ 
+         if get_bf16_gemm_backend().is_cutedsl():
+@@ -1318,8 +1332,27 @@
+                     prefix_sum,
+                 )
+         else:  # single collective over the flat [latent | shared] pair
+-            self._forward_shared(gate_up, shared_output)
++            # With one rank there is no collective to overlap, so issue the
++            # independent shared-down GEMM on the existing side stream while
++            # the routed MXFP4 path uses the current stream. Keep the
++            # multi-rank and AR-fusion schedules unchanged.
++            overlap_shared = (
++                self.alt_stream is not None
++                and self.tp_size == 1
++                and not k3_ar_fusion.enabled()
++            )
++            shared_event = None
++            if overlap_shared:
++                current_stream = torch.cuda.current_stream()
++                self.alt_stream.wait_stream(current_stream)
++                with torch.cuda.stream(self.alt_stream):
++                    self._forward_shared(gate_up, shared_output)
++                    shared_event = self.alt_stream.record_event()
++            else:
++                self._forward_shared(gate_up, shared_output)
+             self._forward_routed(hidden_states, router_logits, routed_input, latent)
++            if shared_event is not None:
++                current_stream.wait_event(shared_event)
+             if self.fuse_ar_norm and k3_ar_fusion.enabled():
+                 fused_norm = True
+                 k3_ar_fusion.all_reduce_norm(

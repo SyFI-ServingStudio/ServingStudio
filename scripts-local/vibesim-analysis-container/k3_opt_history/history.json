@@ -636,6 +636,186 @@
   "dir": "trials/kda_25"
  },
  {
+  "case": "kda_b512",
+  "trial": 1,
+  "verdict": "FAIL",
+  "reason": "failed: latency_improved",
+  "continuous_round": true,
+  "campaign1_unrealistic_routing": false,
+  "points": {
+   "512,8192": {
+    "before_us": 685.6,
+    "after_us": 677.4,
+    "improvement": 0.012,
+    "check": true,
+    "rel_err": 0.016597509271534656
+   },
+   "256,8192": {
+    "before_us": 482.9,
+    "after_us": 480.8,
+    "improvement": 0.0043,
+    "check": true,
+    "rel_err": 0.01453488281954215
+   },
+   "128,8192": {
+    "before_us": 380.5,
+    "after_us": 378.4,
+    "improvement": 0.0055,
+    "check": true,
+    "rel_err": 0.012605041169408998
+   }
+  },
+  "files": [
+   "kernels/jit/csrc/attention/kda_fused_decode.cuh",
+   "kernels/jit/csrc/moe/route_quant_fused.cuh",
+   "kernels/jit/csrc/moe/route_radix.cuh",
+   "kernels/ops/attention/kda_fused_decode.py",
+   "kernels/ops/moe/moe_route_quant_fused.py",
+   "kernels/ops/attention/fla/fused_recurrent.py",
+   "srt/models/kimi_k3.py",
+   "srt/layers/moe/topk.py",
+   "srt/layers/attention/linear/kda_backend.py"
+  ],
+  "diff_lines": 978,
+  "incremental_diff_lines": 978,
+  "note": "Codex: null (+1.2% < 1.5% need under fill noise); MoE tuner ceiling, route+quant JITs inactive",
+  "dir": "trials/kda_b512_1"
+ },
+ {
+  "case": "kda_b512",
+  "trial": 2,
+  "verdict": "FAIL",
+  "reason": "failed: latency_improved",
+  "continuous_round": true,
+  "campaign1_unrealistic_routing": false,
+  "points": {
+   "512,8192": {
+    "before_us": 677.3,
+    "after_us": 677.3,
+    "improvement": 0.0,
+    "check": true,
+    "rel_err": 0.016597509271534656
+   },
+   "256,8192": {
+    "before_us": 482.8,
+    "after_us": 482.8,
+    "improvement": 0.0001,
+    "check": true,
+    "rel_err": 0.015019378913526888
+   },
+   "128,8192": {
+    "before_us": 378.4,
+    "after_us": 378.4,
+    "improvement": 0.0001,
+    "check": true,
+    "rel_err": 0.012605041169408998
+   }
+  },
+  "files": [
+   "kernels/jit/csrc/attention/kda_fused_decode.cuh",
+   "kernels/jit/csrc/moe/route_quant_fused.cuh",
+   "kernels/ops/attention/kda_fused_decode.py",
+   "kernels/ops/moe/moe_route_quant_fused.py",
+   "kernels/ops/attention/fla/fused_recurrent.py",
+   "srt/models/kimi_k3.py",
+   "srt/layers/moe/topk.py",
+   "srt/layers/attention/linear/kda_backend.py"
+  ],
+  "diff_lines": 798,
+  "incremental_diff_lines": 798,
+  "note": "Codex: null 0.0%; bf16-act MXFP4 (no kernel), route+pack+quant, TMA stages, tuner ceiling",
+  "dir": "trials/kda_b512_2"
+ },
+ {
+  "case": "kda_b512",
+  "trial": 3,
+  "verdict": "FAIL",
+  "reason": "failed: latency_improved",
+  "continuous_round": true,
+  "campaign1_unrealistic_routing": false,
+  "points": {
+   "512,8192": {
+    "before_us": 677.3,
+    "after_us": 676.6,
+    "improvement": 0.001,
+    "check": true,
+    "rel_err": 0.016597509271534656
+   },
+   "256,8192": {
+    "before_us": 482.8,
+    "after_us": 482.8,
+    "improvement": 0.0001,
+    "check": true,
+    "rel_err": 0.015019378913526888
+   },
+   "128,8192": {
+    "before_us": 378.4,
+    "after_us": 378.4,
+    "improvement": 0.0001,
+    "check": true,
+    "rel_err": 0.012605041169408998
+   }
+  },
+  "files": [
+   "kernels/jit/csrc/attention/kda_fused_decode.cuh",
+   "kernels/jit/csrc/moe/route_quant_fused.cuh",
+   "kernels/jit/csrc/moe/route_radix.cuh",
+   "kernels/ops/attention/kda_fused_decode.py",
+   "kernels/ops/moe/moe_route_quant_fused.py",
+   "kernels/ops/attention/fla/fused_recurrent.py",
+   "srt/models/kimi_k3.py",
+   "srt/layers/moe/topk.py",
+   "srt/layers/attention/linear/kda_backend.py"
+  ],
+  "diff_lines": 979,
+  "incremental_diff_lines": 979,
+  "note": "Codex: null +0.1%; in-kernel TRT-LLM routing re-routed 2/512 tokens (CHECK FAIL), SiTU bf16 (no kernel)",
+  "dir": "trials/kda_b512_3"
+ },
+ {
+  "case": "kda_b512_claude",
+  "trial": 1,
+  "verdict": "PASS",
+  "reason": "all gates passed",
+  "continuous_round": true,
+  "campaign1_unrealistic_routing": false,
+  "points": {
+   "512,8192": {
+    "before_us": 675.2,
+    "after_us": 600.4,
+    "improvement": 0.1108,
+    "check": true,
+    "rel_err": 0.016597509271534656
+   },
+   "256,8192": {
+    "before_us": 482.7,
+    "after_us": 472.4,
+    "improvement": 0.0211,
+    "check": true,
+    "rel_err": 0.015019378913526888
+   },
+   "128,8192": {
+    "before_us": 380.2,
+    "after_us": 378.2,
+    "improvement": 0.0054,
+    "check": true,
+    "rel_err": 0.012605041169408998
+   }
+  },
+  "files": [
+   "kernels/jit/csrc/attention/kda_fused_decode.cuh",
+   "kernels/ops/attention/kda_fused_decode.py",
+   "kernels/ops/attention/fla/fused_recurrent.py",
+   "srt/models/kimi_k3.py",
+   "srt/layers/attention/linear/kda_backend.py",
+   "srt/layers/moe/moe_runner/flashinfer_trtllm.py"
+  ],
+  "diff_lines": 873,
+  "incremental_diff_lines": 873,
+  "note": "ACCEPTED (Claude Opus 5.5): one-shot MXFP4 MoE autotune when rows/expert>8 (= production warmup, HARNESS GAP ~9 pts) + vectorized bf16 state ld/st & launch_bounds in kda_fused_decode.cuh (92.6->83.0us, real) + bfa overlap limit 128->512: 675.2->600.4 @512, exact",
+  "dir": "trials/kda_b512_claude_1"
+ },
+ {
   "case": "mla",
   "trial": 1,
   "verdict": "FAIL",
@@ -1300,5 +1480,236 @@
   "incremental_diff_lines": 14,
   "note": "null: fused finalize+shared JIT kernel regressed and was reverted; flashinfer_trtllm.py tweak 0.0% (MLA plateau)",
   "dir": "trials/mla_27"
+ },
+ {
+  "case": "mla_b512",
+  "trial": 1,
+  "verdict": "FAIL",
+  "reason": "failed: latency_improved",
+  "continuous_round": true,
+  "campaign1_unrealistic_routing": false,
+  "points": {
+   "512,8192": {
+    "before_us": 3485.2,
+    "after_us": 3476.0,
+    "improvement": 0.0027,
+    "check": true,
+    "rel_err": 0.012048191996903325
+   },
+   "256,8192": {
+    "before_us": 640.6,
+    "after_us": 644.7,
+    "improvement": -0.0065,
+    "check": true,
+    "rel_err": 0.013157893813481137
+   },
+   "16,65536mix": {
+    "before_us": 275.9,
+    "after_us": 280.1,
+    "improvement": -0.0153,
+    "check": true,
+    "rel_err": 0.004566209712057738
+   }
+  },
+  "files": [
+   "kernels/jit/csrc/elementwise/set_mla_kv_concat_q.cuh",
+   "kernels/jit/csrc/moe/route_quant_fused.cuh",
+   "kernels/jit/csrc/moe/route_radix.cuh",
+   "kernels/ops/attention/set_mla_kv_concat_q.py",
+   "kernels/ops/moe/moe_route_quant_fused.py",
+   "srt/models/kimi_k3.py",
+   "srt/layers/attention/trtllm_mla_backend.py",
+   "srt/layers/attention/cutedsl_mla_backend.py",
+   "srt/layers/moe/topk.py"
+  ],
+  "diff_lines": 571,
+  "incremental_diff_lines": 571,
+  "note": "INFRA NOISE (concurrent VibeSim profiling on the GPU); not a result",
+  "dir": "trials/mla_b512_1"
+ },
+ {
+  "case": "mla_b512",
+  "trial": 2,
+  "verdict": "FAIL",
+  "reason": "failed: latency_improved",
+  "continuous_round": true,
+  "campaign1_unrealistic_routing": false,
+  "points": {
+   "512,8192": {
+    "before_us": 978.4,
+    "after_us": 978.4,
+    "improvement": 0.0,
+    "check": true,
+    "rel_err": 0.012048191996903325
+   },
+   "256,8192": {
+    "before_us": 638.4,
+    "after_us": 638.5,
+    "improvement": -0.0001,
+    "check": true,
+    "rel_err": 0.013157893813481137
+   },
+   "16,65536mix": {
+    "before_us": 271.9,
+    "after_us": 273.9,
+    "improvement": -0.0074,
+    "check": true,
+    "rel_err": 0.004566209712057738
+   }
+  },
+  "files": [
+   "kernels/jit/csrc/elementwise/set_mla_kv_concat_q.cuh",
+   "kernels/jit/csrc/moe/route_quant_fused.cuh",
+   "kernels/jit/csrc/moe/route_radix.cuh",
+   "kernels/ops/attention/set_mla_kv_concat_q.py",
+   "kernels/ops/moe/moe_route_quant_fused.py",
+   "srt/models/kimi_k3.py",
+   "srt/layers/attention/trtllm_mla_backend.py",
+   "srt/layers/attention/cutedsl_mla_backend.py",
+   "srt/layers/moe/topk.py"
+  ],
+  "diff_lines": 719,
+  "incremental_diff_lines": 719,
+  "note": "Codex: null 0.00%; tactic buckets, PDL, low-priority overlap (-1us), bf16 front GEMM (numerics FAIL)",
+  "dir": "trials/mla_b512_2"
+ },
+ {
+  "case": "mla_b512",
+  "trial": 3,
+  "verdict": "FAIL",
+  "reason": "failed: latency_improved",
+  "continuous_round": true,
+  "campaign1_unrealistic_routing": false,
+  "points": {
+   "512,8192": {
+    "before_us": 978.3,
+    "after_us": 976.6,
+    "improvement": 0.0017,
+    "check": true,
+    "rel_err": 0.012048191996903325
+   },
+   "256,8192": {
+    "before_us": 638.5,
+    "after_us": 637.6,
+    "improvement": 0.0014,
+    "check": true,
+    "rel_err": 0.01206140266235771
+   },
+   "16,65536mix": {
+    "before_us": 273.8,
+    "after_us": 273.8,
+    "improvement": 0.0002,
+    "check": true,
+    "rel_err": 0.004566209712057738
+   }
+  },
+  "files": [
+   "kernels/jit/csrc/elementwise/set_mla_kv_concat_q.cuh",
+   "kernels/jit/csrc/moe/route_quant_fused.cuh",
+   "kernels/jit/csrc/moe/route_radix.cuh",
+   "kernels/ops/attention/set_mla_kv_concat_q.py",
+   "kernels/ops/moe/moe_route_quant_fused.py",
+   "srt/models/kimi_k3.py",
+   "srt/layers/attention/trtllm_mla_backend.py",
+   "srt/layers/attention/cutedsl_mla_backend.py",
+   "srt/layers/moe/topk.py"
+  ],
+  "diff_lines": 590,
+  "incremental_diff_lines": 590,
+  "note": "Codex: null +0.17%; route+quant cap 64->512 (-1.5us kept), TGV at m=512 8%/2% SLOWER (reverted)",
+  "dir": "trials/mla_b512_3"
+ },
+ {
+  "case": "mla_b512",
+  "trial": 4,
+  "verdict": "FAIL",
+  "reason": "failed: latency_improved",
+  "continuous_round": true,
+  "campaign1_unrealistic_routing": false,
+  "points": {
+   "512,8192": {
+    "before_us": 978.4,
+    "after_us": 978.4,
+    "improvement": 0.0,
+    "check": true,
+    "rel_err": 0.012048191996903325
+   },
+   "256,8192": {
+    "before_us": 638.5,
+    "after_us": 638.5,
+    "improvement": 0.0001,
+    "check": true,
+    "rel_err": 0.013157893813481137
+   },
+   "16,65536mix": {
+    "before_us": 271.9,
+    "after_us": 273.9,
+    "improvement": -0.0072,
+    "check": true,
+    "rel_err": 0.004566209712057738
+   }
+  },
+  "files": [
+   "kernels/jit/csrc/elementwise/set_mla_kv_concat_q.cuh",
+   "kernels/jit/csrc/moe/route_quant_fused.cuh",
+   "kernels/jit/csrc/moe/route_radix.cuh",
+   "kernels/ops/attention/set_mla_kv_concat_q.py",
+   "kernels/ops/moe/moe_route_quant_fused.py",
+   "srt/models/kimi_k3.py",
+   "srt/layers/attention/trtllm_mla_backend.py",
+   "srt/layers/attention/cutedsl_mla_backend.py",
+   "srt/layers/moe/topk.py"
+  ],
+  "diff_lines": 588,
+  "incremental_diff_lines": 588,
+  "note": "Codex: null 0.00%; PDL policy regressed, var-seq scheduler neutral",
+  "dir": "trials/mla_b512_4"
+ },
+ {
+  "case": "mla_b512_claude",
+  "trial": 1,
+  "verdict": "PASS",
+  "reason": "all gates passed",
+  "continuous_round": true,
+  "campaign1_unrealistic_routing": false,
+  "points": {
+   "512,8192": {
+    "before_us": 976.3,
+    "after_us": 904.6,
+    "improvement": 0.0734,
+    "check": true,
+    "rel_err": 0.012048191996903325
+   },
+   "256,8192": {
+    "before_us": 638.3,
+    "after_us": 617.8,
+    "improvement": 0.0321,
+    "check": true,
+    "rel_err": 0.013157893813481137
+   },
+   "16,65536mix": {
+    "before_us": 271.8,
+    "after_us": 270.7,
+    "improvement": 0.0041,
+    "check": true,
+    "rel_err": 0.004566209712057738
+   }
+  },
+  "files": [
+   "kernels/jit/csrc/elementwise/set_mla_kv_concat_q.cuh",
+   "kernels/jit/csrc/moe/route_quant_fused.cuh",
+   "kernels/jit/csrc/moe/route_radix.cuh",
+   "kernels/ops/attention/set_mla_kv_concat_q.py",
+   "kernels/ops/moe/moe_route_quant_fused.py",
+   "srt/models/kimi_k3.py",
+   "srt/layers/attention/trtllm_mla_backend.py",
+   "srt/layers/attention/cutedsl_mla_backend.py",
+   "srt/layers/moe/topk.py",
+   "srt/layers/moe/moe_runner/flashinfer_trtllm.py"
+  ],
+  "diff_lines": 900,
+  "incremental_diff_lines": 900,
+  "note": "ACCEPTED (Claude Opus 5.5): tuned MoE tactic (HARNESS GAP ~6.4 pts) + fp8 set_mla_kv_concat_q satfinite cvt + exact NOSAT fixup (17.8->8.0us, real): 976.3->904.6 @512, exact; merged-front split rejected (slower)",
+  "dir": "trials/mla_b512_claude_1"
  }
 ]
