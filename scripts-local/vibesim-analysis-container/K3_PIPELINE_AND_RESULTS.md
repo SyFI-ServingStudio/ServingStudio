@@ -62,6 +62,10 @@ copy, goldens, or oracle; its tree is reduced to a source diff and re-applied on
 
 ## 3. Results
 
+> **Sign convention (whole document):** every Δ / percentage is the *change in step latency*, so **negative = faster**
+> (e.g. −12.1% means 304.6 → 267.7 µs). Percentages after a `before → after` arrow describe that arrow. The judge's
+> JSON field `improvement` uses the opposite sign (positive = faster); `rounds.jsonl` and verdict files carry that form.
+
 ### Campaign 2 — realistic workload (final)
 
 Baselines (judge medians, σ < 1 µs): KDA 403.0 / 262.7 / 139.7 µs (B=128/32/1);
@@ -69,7 +73,7 @@ MLA 304.6 (1×1M) / 493.0 (128×8k) / 302.5 (16×64k) µs.
 
 | trial                                  | verdict          | primary                                | secondaries     | numerics                              | change                                                           |
 | -------------------------------------- | ---------------- | -------------------------------------- | --------------- | ------------------------------------- | ---------------------------------------------------------------- |
-| **MLA 8**                        | **PASS**   | **−12.1%** (304.6 → 267.7 µs) | +1.6%, +0.7%    | rel_err 0.0 / 0.014 / 0.005, state ok | non-DCP decode`cute-dsl` → TRT-LLM MLA (15 lines)             |
+| **MLA 8**                        | **PASS**   | **−12.1%** (304.6 → 267.7 µs) | −1.6%, −0.7%    | rel_err 0.0 / 0.014 / 0.005, state ok | non-DCP decode`cute-dsl` → TRT-LLM MLA (15 lines)             |
 | KDA 8                                  | FAIL (gate)      | −3.1%                                 | −4.7%, −5.9%  | 0.0 everywhere                        | shared-`down` GEMM → CuteDSL bf16 GEMM + side-stream overlap  |
 | KDA 9                                  | FAIL (gate)      | −0.3%                                 | −2.3%, 0.0%    | ≤ 0.013                              | 589-line bf16 port of the fused KDA CUDA kernel (works, no gain) |
 | KDA 10                                 | FAIL (by 0.4 pt) | **−4.6%**                       | −5.4%, 0.0%    | 0.0 everywhere                        | packed KDA decode fast path + overlap                            |
@@ -90,18 +94,18 @@ tree, the judge measures that round's baseline from the same tree and accepts an
 
 | round | verdict | primary | new change | note |
 |---|---|---|---|---|
-| MLA 20 | PASS | 267.7 → 265.7 µs @1×1M (+0.75%) | `route_quant_fused` JIT specialized for the 112-expert/top-2 shape | harness-specific (production is 896/top-16) |
+| MLA 20 | PASS | 267.7 → 265.7 µs @1×1M (−0.75%) | `route_quant_fused` JIT specialized for the 112-expert/top-2 shape | harness-specific (production is 896/top-16) |
 | KDA 20 | FAIL (infra) | — | — | judge OOM: a 167 GB co-tenant on the shared GPU |
-| MLA 21 | PASS | 267.8 → 263.7 (+1.5%); +3.2% @128×8k | fp32-output front GEMM (15984×7168 / 6016×7168, m ≤ 16) → CuTe TGV instead of cuBLAS | production-relevant |
+| MLA 21 | PASS | 267.8 → 263.7 (−1.5%); −3.2% @128×8k | fp32-output front GEMM (15984×7168 / 6016×7168, m ≤ 16) → CuTe TGV instead of cuBLAS | production-relevant |
 | KDA 21 | FAIL (correctness) | — | route+quant specialization broke numerics at B=32/1 (rel 0.42) | rejected on both gates; 3σ was 7% under a busy co-tenant |
 | MLA 22 | FAIL (null) | 0.0% | — | |
-| **KDA 22** | **PASS** | **384.4 → 379.4 µs @B=128 (+1.3%)**; +2.5% @32, +3.1% @1 | bf16-state port of the fused KDA decode JIT kernel (`.cuh` + `.py`) | the lever trials 7/9/10 kept attempting finally pays off |
-| MLA 23 | PASS | 265.7 → 261.6 (+1.5%) | `latent_up` (7168×3584) and `shared_down` (7168×6144) → BF16 TGV kernel | |
-| KDA 23 | FAIL (null) | +0.3% (below the 0.5% floor) | — | five ideas rejected cleanly |
-| MLA 24 | PASS | 261.6 → 255.4 (+2.4%); +2.2% @128×8k, +3.4% @16×64k | shared/routed alt-stream overlap in `KimiK3MoE._forward_fused` | |
+| **KDA 22** | **PASS** | **384.4 → 379.4 µs @B=128 (−1.3%)**; −2.5% @32, −3.1% @1 | bf16-state port of the fused KDA decode JIT kernel (`.cuh` + `.py`) | the lever trials 7/9/10 kept attempting finally pays off |
+| MLA 23 | PASS | 265.7 → 261.6 (−1.5%) | `latent_up` (7168×3584) and `shared_down` (7168×6144) → BF16 TGV kernel | |
+| KDA 23 | FAIL (null) | −0.3% (below the 0.5% floor) | — | five ideas rejected cleanly |
+| MLA 24 | PASS | 261.6 → 255.4 (−2.4%); −2.2% @128×8k, −3.4% @16×64k | shared/routed alt-stream overlap in `KimiK3MoE._forward_fused` | |
 | KDA 24 | FAIL (null) | 0.0% | — | tree returned to the seed |
-| MLA 25 | PASS | 255.4 → 253.5 (+0.8%) | `is_var_seq=False` (FlashInfer's persistent TRT-LLM MLA schedule) for the K3 fp8 MLA layout + 16-warp CTA for the B=1 KV-concat grid | initially flagged as a uniform-length overfit; **re-judged on a new mixed-context-length point (64k/48k/32k/16k): passes, rel 0.0046, −7.4% there** — the flag is a scheduling choice, per-request lengths are honoured |
-| KDA 25 | FAIL (null) | +0.3% (below the 0.56% needed) | — | KDA plateau (rounds 23–25) |
+| MLA 25 | PASS | 255.4 → 253.5 (−0.8%) | `is_var_seq=False` (FlashInfer's persistent TRT-LLM MLA schedule) for the K3 fp8 MLA layout + 16-warp CTA for the B=1 KV-concat grid | initially flagged as a uniform-length overfit; **re-judged on a new mixed-context-length point (64k/48k/32k/16k): passes, rel 0.0046, −7.4% there** — the flag is a scheduling choice, per-request lengths are honoured |
+| KDA 25 | FAIL (null) | −0.3% (below the 0.56% needed) | — | KDA plateau (rounds 23–25) |
 | MLA 26 | FAIL (null) | 0.0% | `cutedsl_bf16_gemm.py` tweak, no effect | |
 | MLA 27 | FAIL (null) | 0.0% | fused finalize+shared JIT kernel (regressed, reverted); `flashinfer_trtllm.py` tweak | MLA plateau; loop stopped |
 
@@ -148,9 +152,9 @@ irrelevant at 512×8k, and the small-m GEMM levers stop engaging), exactly the h
 
 | round | verdict | what was tried | note |
 |---|---|---|---|
-| KDA-b512 1 | FAIL (null) | TRT-LLM MoE tuner ceiling at 2× rows; two route+quant JIT specialisations that never engaged | +1.2% at B=512 against a 1.5% requirement (3σ inflated by concurrent VibeSim JIT fills) |
+| KDA-b512 1 | FAIL (null) | TRT-LLM MoE tuner ceiling at 2× rows; two route+quant JIT specialisations that never engaged | 1.2% faster at B=512 against a 1.5% requirement (3σ inflated by concurrent VibeSim JIT fills) |
 | KDA-b512 2 | FAIL (null, 0.0%) | bf16-activation MXFP4 path (no SM100 kernel at B≥256); route+pack+quant extension; KDA TMA stage counts; MoE tuner ceiling | all exact, all neutral |
-| KDA-b512 3 | FAIL (null, +0.1%) | route-fusion stack; TMA stages; in-kernel TRT-LLM routing (slower and re-routed 2 of 512 tokens → strict CHECK rejected it); MXFP4×bf16 SiTU (no kernel) | KDA at B=512 is on the same closed MXFP4-cubin wall as at B=128 (57% of the step, R0 961 vs R5 53 µs) |
+| KDA-b512 3 | FAIL (null, −0.1%) | route-fusion stack; TMA stages; in-kernel TRT-LLM routing (slower and re-routed 2 of 512 tokens → strict CHECK rejected it); MXFP4×bf16 SiTU (no kernel) | KDA at B=512 is on the same closed MXFP4-cubin wall as at B=128 (57% of the step, R0 961 vs R5 53 µs) |
 | MLA-b512 1 | infra noise | — | B=512 baseline reps 2104/995/3363/3530/3419 µs while Codex B12 kernel-profiled on the same GPU; not a result |
 | MLA-b512 2 | FAIL (null, 0.00%) | MoE tactic buckets, PDL toggle, low-priority-stream overlap (−1 µs), bf16 front GEMM (rejected on correctness) | clean measurement (pristine 991.7, σ 0.4) |
 | MLA-b512 3 | pending | bf16-activation MoE ×2 (no kernel); route+quant cap 64→512 (exact, −1.5 µs, kept); variable-schedule attention (null); tuning ceiling 512→1024 (null); TGV for the m=512 front GEMM (+8% slower) and for shared-down (+2% slower), both reverted | confirms the TGV lever is small-m only |
@@ -261,14 +265,14 @@ of `lmsysorg/sglang:v0.5.20` with `patch -p1`.
 
 ### MLA layer — six accepted levers, in acceptance order (cumulative 304.6 → 253.5 µs @1×1M, −16.8%)
 
-| patch | files | key change | Δ when accepted |
+| patch | files | key change | Δ latency when accepted |
 |---|---|---|---|
 | `sglang/mla/01_r08_cutedsl_to_trtllm_mla_decode.patch` | `srt/layers/attention/cutedsl_mla_backend.py` (5 lines) | non-DCP decode: `backend="cute-dsl"` → `"trtllm-gen"` (DCP keeps the explicit CuteDSL path in `_run_decode_kernel`) | −12.1% |
-| `sglang/mla/02_r20_route_quant_fused_112_top2.patch` | `kernels/jit/csrc/moe/route_quant_fused.cuh`, `route_radix.cuh`, `kernels/ops/moe/moe_route_quant_fused.py`, `srt/layers/moe/topk.py`, `kernels/ops/attention/set_mla_kv_concat_q.py` (277 lines) | fused route+quant JIT specialised to `kNumExperts = 112`, `kTopK = 2` (the EP8 rank's local shape; production routes 896/top-16 globally — harness-specific) | +0.75% |
-| `sglang/mla/03_r21_front_fp32_gemm_cute_tgv.patch` | `srt/models/kimi_k3.py` (16 lines) | in `_k3_bf16_gemm`: fp32-output front GEMMs `(15984,7168)`/`(6016,7168)` at `m ≤ 16` → `cutedsl_bf16_gemm_out` instead of cuBLAS (fp32 accumulator kept, routing stays exact) | +1.5% (+3.2% @128×8k) |
-| `sglang/mla/04_r23_latent_up_shared_down_bf16_tgv.patch` | `srt/models/kimi_k3.py` (33 lines) | `latent_up` `(7168,3584)` and `shared_down` `(7168,6144)` at `m ≤ 16` → CuTe TGV (`cutedsl_bf16_gemm[_out]`); `routed_expert_up_proj` routed through `_k3_bf16_gemm` | +1.5% |
-| `sglang/mla/05_r24_shared_routed_alt_stream_overlap.patch` | `srt/models/kimi_k3.py` (12 lines) | `KimiK3MoE._forward_fused`: `_forward_shared` on `self.alt_stream` while `_forward_routed` runs on the current stream; `wait_stream` join before the collective | +2.4% |
-| `sglang/mla/06_r25_is_var_seq_persistent_kvconcat_warps.patch` | `srt/layers/attention/trtllm_mla_backend.py`, `kernels/ops/attention/set_mla_kv_concat_q.py`, `kernels/jit/csrc/elementwise/set_mla_kv_concat_q.cuh` (26 lines) | `extra_kwargs["is_var_seq"] = False` for the fp8 K3 layout (FlashInfer: `is_persistent = not is_var_seq`, a schedule choice — verified on mixed lengths); 16-warp CTA for the 13-item B=1 KV-concat grid | +0.8% |
+| `sglang/mla/02_r20_route_quant_fused_112_top2.patch` | `kernels/jit/csrc/moe/route_quant_fused.cuh`, `route_radix.cuh`, `kernels/ops/moe/moe_route_quant_fused.py`, `srt/layers/moe/topk.py`, `kernels/ops/attention/set_mla_kv_concat_q.py` (277 lines) | fused route+quant JIT specialised to `kNumExperts = 112`, `kTopK = 2` (the EP8 rank's local shape; production routes 896/top-16 globally — harness-specific) | −0.75% |
+| `sglang/mla/03_r21_front_fp32_gemm_cute_tgv.patch` | `srt/models/kimi_k3.py` (16 lines) | in `_k3_bf16_gemm`: fp32-output front GEMMs `(15984,7168)`/`(6016,7168)` at `m ≤ 16` → `cutedsl_bf16_gemm_out` instead of cuBLAS (fp32 accumulator kept, routing stays exact) | −1.5% (−3.2% @128×8k) |
+| `sglang/mla/04_r23_latent_up_shared_down_bf16_tgv.patch` | `srt/models/kimi_k3.py` (33 lines) | `latent_up` `(7168,3584)` and `shared_down` `(7168,6144)` at `m ≤ 16` → CuTe TGV (`cutedsl_bf16_gemm[_out]`); `routed_expert_up_proj` routed through `_k3_bf16_gemm` | −1.5% |
+| `sglang/mla/05_r24_shared_routed_alt_stream_overlap.patch` | `srt/models/kimi_k3.py` (12 lines) | `KimiK3MoE._forward_fused`: `_forward_shared` on `self.alt_stream` while `_forward_routed` runs on the current stream; `wait_stream` join before the collective | −2.4% |
+| `sglang/mla/06_r25_is_var_seq_persistent_kvconcat_warps.patch` | `srt/layers/attention/trtllm_mla_backend.py`, `kernels/ops/attention/set_mla_kv_concat_q.py`, `kernels/jit/csrc/elementwise/set_mla_kv_concat_q.cuh` (26 lines) | `extra_kwargs["is_var_seq"] = False` for the fp8 K3 layout (FlashInfer: `is_persistent = not is_var_seq`, a schedule choice — verified on mixed lengths); 16-warp CTA for the 13-item B=1 KV-concat grid | −0.8% |
 
 `sglang/mla_best_tree_vs_pristine.patch` is the cumulative patch (9 files, 361 changed lines).
 
@@ -277,7 +281,7 @@ of `lmsysorg/sglang:v0.5.20` with `patch -p1`.
 | patch | files | key change | Δ |
 |---|---|---|---|
 | `sglang/kda/01_stacked_fastpath_overlap_cutedsl_gemm_warps.patch` | `srt/layers/attention/linear/kda_backend.py`, `srt/models/kimi_k3.py`, `kernels/ops/attention/fla/fused_recurrent.py` (44 lines) | packed KDA decode fast path no longer excluded for `lower_bound` layers (the kernel implements the safe gate); shared `down` `(7168,6144)` at `m ≤ 128` → CuTe bf16 GEMM; shared-down issued on the side stream (single-rank, no AR fusion) with an event join; `num_warps` tuning of the recurrent kernel | −4.8% (stacked from trials 8/10/11) |
-| `sglang/kda/02_r22_bf16_state_fused_kda_decode_kernel.patch` | `kernels/jit/csrc/attention/kda_fused_decode.cuh`, `kernels/ops/attention/kda_fused_decode.py` (242 lines) | bf16-state port of the fused conv+delta-rule+gated-norm decode kernel: `__nv_bfloat162` state loads/stores, `bf16_round`/`conv_silu_bf16` to match the unfused chain's rounding, `covered()` accepts the bf16 state (cookbook `--mamba-ssm-dtype bfloat16`) | +1.3% (@B=32 +2.5%, @B=1 +3.1%) |
+| `sglang/kda/02_r22_bf16_state_fused_kda_decode_kernel.patch` | `kernels/jit/csrc/attention/kda_fused_decode.cuh`, `kernels/ops/attention/kda_fused_decode.py` (242 lines) | bf16-state port of the fused conv+delta-rule+gated-norm decode kernel: `__nv_bfloat162` state loads/stores, `bf16_round`/`conv_silu_bf16` to match the unfused chain's rounding, `covered()` accepts the bf16 state (cookbook `--mamba-ssm-dtype bfloat16`) | −1.3% (@B=32 −2.5%, @B=1 −3.1%) |
 
 `sglang/kda_best_tree_vs_pristine.patch` cumulative (5 files, 286 lines).
 

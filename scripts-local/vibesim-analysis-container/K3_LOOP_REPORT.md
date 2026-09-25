@@ -11,6 +11,8 @@ CUDA-graph replay time of the decode step; correctness = output + post-step stat
 Campaign complete 2026-09-23 22:16: 8 judged trials (KDA 4–7, MLA 4–7), KDA 7 re-judged (v2),
 B8 rows filled, oracles re-baked on the post-B8 predictions.
 
+> **Sign convention in this report:** percentages written next to a `before → after` arrow follow the arrow; standalone percentages in the campaign-3/4 round tables and in `rounds.jsonl` are the judge's `improvement` = (before − after)/before, i.e. **positive = faster**. The clean write-up `K3_PIPELINE_AND_RESULTS.md` uses latency change (negative = faster) throughout.
+
 ## Pipeline controls (trials 1–3 of each case, Milestone 1 C1)
 
 | case | control | expected | result |
