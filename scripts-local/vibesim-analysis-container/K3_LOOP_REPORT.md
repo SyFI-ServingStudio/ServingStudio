@@ -260,6 +260,8 @@ consistent); the b512 and prefill cases run with `--bf16-gemm-init` from here on
 
 **Claude b512 round 2 (03:49–04:44):** KDA FAIL-by-noise (603.5→595.3 @512, +1.4%, exact; σ 7.3 µs → 3.65% required; fused-kernel prologue hoist + quad-row warp reduction, kernel 80.4→76.6 µs); MLA PASS 904.6→888.0 @512 (+1.8%): tail split of the persistent MLA decode kernel's last wave (68 trailing requests split into 136 half-KV pseudo-requests, LSE merge; new `kernels/ops/attention/mla_decode_tail_split.py`). Round 3 started 04:42. Driver autotune now caches tactics on disk to remove the per-rep tactic re-pick noise.
 
+**Claude MLA-b512 round 3 (04:42–05:23): PASS** 887.3→877.8 @512 (+1.1%), 619.8→609.2 @256, mixed 269.5→261.5 (+3.0%): output-gate GEMM overlapped into the MLA decode kernel tail + pending residual add fused into the attn-res TMA kernel; exact. Claude MLA-b512 campaign done: 976.3→877.8 µs (3/3 PASS).
+
 **Second fidelity gap (03:20, found by both Claude Opus 5.5 b512 agents):** no FlashInfer autotune warmup in the driver → fallback MXFP4 MoE tactic; new `--flashinfer-autotune`; pristine legacy → production (GPU 6): KDA 755.1→693.6 @512, 516.6→501.2 @256, 407.0→406.9 @128; MLA 991.6→930.2 @512, 662.0→650.5 @256, 295.3→294.3 mixed; B ≤ 128 unchanged. Claude round-1 PASSes on b512 are this warmup (harness-gap reproduction).
 
 **Chunked prefill.** Driver point tag `B,L,pf[<prefix>]` (ForwardMode.EXTEND; KDA runs `chunk_kda` with the

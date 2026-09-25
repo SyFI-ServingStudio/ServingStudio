@@ -1802,5 +1802,56 @@
   "incremental_diff_lines": 490,
   "note": "ACCEPTED (Claude): tail split of the persistent MLA decode kernel's last wave (B=148*3+68 -> split 68 trailing requests into 136 half-KV pseudo-requests, LSE merge; mla_decode_tail_split.py): 904.6->888.0 @512, exact",
   "dir": "trials/mla_b512_claude_2"
+ },
+ {
+  "case": "mla_b512_claude",
+  "trial": 3,
+  "verdict": "PASS",
+  "reason": "all gates passed",
+  "continuous_round": true,
+  "campaign1_unrealistic_routing": false,
+  "points": {
+   "512,8192": {
+    "before_us": 887.3,
+    "after_us": 877.8,
+    "improvement": 0.0107,
+    "check": true,
+    "rel_err": 0.012048191996903325
+   },
+   "256,8192": {
+    "before_us": 619.8,
+    "after_us": 609.2,
+    "improvement": 0.017,
+    "check": true,
+    "rel_err": 0.013157893813481137
+   },
+   "16,65536mix": {
+    "before_us": 269.5,
+    "after_us": 261.5,
+    "improvement": 0.0299,
+    "check": true,
+    "rel_err": 0.004566209712057738
+   }
+  },
+  "files": [
+   "kernels/jit/csrc/elementwise/set_mla_kv_concat_q.cuh",
+   "kernels/jit/csrc/moe/route_quant_fused.cuh",
+   "kernels/jit/csrc/moe/route_radix.cuh",
+   "kernels/jit/csrc/kimi_k3/attn_res/fused_tma.cuh",
+   "kernels/ops/attention/set_mla_kv_concat_q.py",
+   "kernels/ops/attention/mla_decode_tail_split.py",
+   "kernels/ops/kimi_k3/attn_res.py",
+   "kernels/ops/moe/moe_route_quant_fused.py",
+   "srt/models/kimi_k3.py",
+   "srt/layers/attn_residual.py",
+   "srt/layers/attention/trtllm_mla_backend.py",
+   "srt/layers/attention/cutedsl_mla_backend.py",
+   "srt/layers/moe/topk.py",
+   "srt/layers/moe/moe_runner/flashinfer_trtllm.py"
+  ],
+  "diff_lines": 1726,
+  "incremental_diff_lines": 428,
+  "note": "ACCEPTED (Claude): output-gate GEMM launched into the MLA decode kernel's tail wave + pending residual add fused into the attn-res TMA kernel (addend in the TMA ring): 887.3->877.8 @512, mixed -3.0%, exact",
+  "dir": "trials/mla_b512_claude_3"
  }
 ]

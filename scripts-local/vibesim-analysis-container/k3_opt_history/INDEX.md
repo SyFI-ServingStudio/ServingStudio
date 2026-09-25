@@ -1,6 +1,6 @@
 # Kimi-K3 optimization history (warm start index)
 
-*generated 2026-09-25 04:46:38 by build_opt_history.py; read TECHNIQUES.md first*
+*generated 2026-09-25 05:28:13 by build_opt_history.py; read TECHNIQUES.md first*
 
 Each row is one judged trial/round. `Δ` = latency change per point (positive = faster), `chk` = output+state match vs the pristine goldens. Continuous rounds start from the previous accepted tree; their `incremental.diff` is what that round changed. Campaign-1 rows (c1) ran on a workload with collapsed MoE routing -- directions are valid, effect sizes are not.
 
@@ -50,6 +50,7 @@ Each row is one judged trial/round. `Δ` = latency change per point (positive = 
 | mla_b512 | 4 | FAIL | 512,8192: 978.4→978.4 (+0.0%, ok); 256,8192: 638.5→638.5 (+0.0%, ok); 16,65536mix: 271.9→273.9 (-0.7%, ok) | set_mla_kv_concat_q.cuh, route_quant_fused.cuh, route_radix.cuh, set_mla_kv_concat_q.py, moe_route_quant_fused.py, kimi_k3.py, trtllm_mla_backend.py, cutedsl_ml | Codex: null 0.00%; PDL policy regressed, var-seq scheduler neutral | `trials/mla_b512_4` |
 | mla_b512_claude | 1 | PASS | 512,8192: 976.3→904.6 (+7.3%, ok); 256,8192: 638.3→617.8 (+3.2%, ok); 16,65536mix: 271.8→270.7 (+0.4%, ok) | set_mla_kv_concat_q.cuh, route_quant_fused.cuh, route_radix.cuh, set_mla_kv_concat_q.py, moe_route_quant_fused.py, kimi_k3.py, trtllm_mla_backend.py, cutedsl_ml | ACCEPTED (Claude Opus 5.5): tuned MoE tactic (HARNESS GAP ~6.4 pts) + fp8 set_mla_kv_concat_q satfinite cvt + exact NOSAT fixup (17.8->8.0us, real): 976.3->904.6 @512, exact; merged-front split rejected (slower) | `trials/mla_b512_claude_1` |
 | mla_b512_claude | 2 | PASS | 512,8192: 904.6→888.0 (+1.8%, ok); 256,8192: 617.8→618.8 (-0.2%, ok); 16,65536mix: 269.7→269.7 (+0.0%, ok) | set_mla_kv_concat_q.cuh, route_quant_fused.cuh, route_radix.cuh, set_mla_kv_concat_q.py, mla_decode_tail_split.py, moe_route_quant_fused.py, kimi_k3.py, trtllm_ | ACCEPTED (Claude): tail split of the persistent MLA decode kernel's last wave (B=148*3+68 -> split 68 trailing requests into 136 half-KV pseudo-requests, LSE merge; mla_decode_tail_split.py): 904.6->888.0 @512, exact | `trials/mla_b512_claude_2` |
+| mla_b512_claude | 3 | PASS | 512,8192: 887.3→877.8 (+1.1%, ok); 256,8192: 619.8→609.2 (+1.7%, ok); 16,65536mix: 269.5→261.5 (+3.0%, ok) | set_mla_kv_concat_q.cuh, route_quant_fused.cuh, route_radix.cuh, fused_tma.cuh, set_mla_kv_concat_q.py, mla_decode_tail_split.py, attn_res.py, moe_route_quant_f | ACCEPTED (Claude): output-gate GEMM launched into the MLA decode kernel's tail wave + pending residual add fused into the attn-res TMA kernel (addend in the TMA ring): 887.3->877.8 @512, mixed -3.0%, exact | `trials/mla_b512_claude_3` |
 
 ## How to use
 
