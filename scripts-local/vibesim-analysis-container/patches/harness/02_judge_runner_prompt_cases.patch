@@ -1,0 +1,1109 @@
+diff --git a/scripts-local/vibesim-analysis-container/agent_task_k3_opt.md b/scripts-local/vibesim-analysis-container/agent_task_k3_opt.md
+new file mode 100644
+index 0000000..05cc100
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/agent_task_k3_opt.md
+@@ -0,0 +1,137 @@
++# Task: minimize $METRIC
++
++You are optimizing a **real $FRAMEWORK checkout** at `$CHECKOUT` (the Python package is
++`$CHECKOUT/python/sglang`, imported directly from that tree), running on one NVIDIA **B200**
++(`CUDA_VISIBLE_DEVICES=0`).
++
++- **Model:** $MODEL_NAME.
++- **Workload:** $WORKLOAD.
++- **Objective:** **minimize $METRIC**. Change the real source so the layer's step runs faster
++  (decode points: CUDA-graph replay time; chunked-prefill points `B,L,pf[<prefix>]`: eager step
++  time, since sglang does not graph-capture prefill), and prove the change **does not alter the
++  layer's numerical output or its post-step state** (KDA conv/recurrent state, MLA written KV rows).
++
++You are NOT told which operator, kernel, or code path to change, and NOT given a target
++number. You must **derive** what to optimize from measurement and analysis — not from reading
++code alone. Anything the layer executes is in scope (attention, MoE routing/dispatch/
++activation-quant, projections, norms, the layer's dataflow, Triton and JIT-CUDA kernels under
++`python/sglang/kernels`), as long as the checked numerics stay within tolerance.
++
++## The rule of the loop: measure, simulate, THEN analyze
++Whenever you obtain a new profile of the layer (the initial one, or one after an edit), route
++it through VibeSim before drawing conclusions: build/fetch the prediction, then run the
++analysis verbs. Never decide from raw numbers by eye.
++
++## VibeSim roofline analysis API (read-only, no GPU) — `$ORACLE_URL/api/v1/<verb>`
++Query args as URL params. Verbs:
++- `workspace-info` — the action space and **how to read the analysis outputs** (what each
++  rung and ratio means). **Call this first.**
++- `simulate` — build/fetch the timing prediction of this layer/workload
++  (`prediction=.:before` is the initial one).
++- `analyze?level=operator|run_summary|iteration` — time breakdown of a prediction.
++- `optimality?prediction=<id>&scope=iter` — per-node roofline ladder (R0/R5/R6/R7) plus a
++  `necessary_share` per node. Use it to decide which node is the best candidate to change.
++- `kernels?prediction=<id>` — per-leaf drill-down, incl. `has_cached_alternative`.
++
++Once analysis points you at a node, map it to the **source** under `$CHECKOUT/python/sglang`
++that produces it, then confirm with the profiler's per-kernel table (below) that the kernels
++you expect are the ones actually launched.
++
++## Prior optimization history (warm start) — `$OPT_HISTORY` (read-only)
++This layer has already been optimized on other workload points by earlier agents.
++- `$OPT_HISTORY/TECHNIQUES.md` — the accepted levers (most are already applied in the tree you
++  start from) and the dead ends, each with the reason it failed. **Read this first.**
++- `$OPT_HISTORY/INDEX.md` — every judged trial with per-point before→after numbers and a
++  one-line note; `$OPT_HISTORY/history.json` is the same, machine-readable.
++- `$OPT_HISTORY/trials/<case>_<k>/incremental.diff` — the minimal patch of an accepted round
++  (the fastest way to transfer a lever); `agent_iterations.md` — every hypothesis that trial
++  tried, with its measured result. `grep -ril <kernel or file> $OPT_HISTORY/trials/*/agent_iterations.md`
++  before touching a kernel shows what was already tried around it.
++The workload here differs from those runs. Check whether each inherited lever still holds on
++these points (e.g. small-m GEMM kernels must not engage at large m; decode-only paths do not run
++in prefill) and treat dead ends as hints, not verdicts — re-measure. In each `hypothesis.md` cite
++the prior trial(s) you built on or ruled out.
++
++## Measurement tool — `/tmp/kimi_single_layer_decode.py`
++Builds exactly ONE decoder layer of this model in the production per-GPU shape with seeded
++weights/state, drives real decode steps through the framework's own attention backends and
++MoE kernels, captures the step in a CUDA graph and times replays. Always pass the fixed
++workload flags `$DRIVER_ARGS`.
++
++```bash
++cd /tmp
++ARGS="$DRIVER_ARGS"
++# 1) latency + per-kernel table (what actually launches, how long each kernel takes):
++python3 /tmp/kimi_single_layer_decode.py --point "$POINTS" $ARGS --split \
++    --profile-kernels /workspace/opt_run/iter_NN/profile.json --json-out /workspace/opt_run/iter_NN/run.json
++
++# 2) golden BEFORE you edit (reference output + post-step state your change must preserve):
++python3 /tmp/kimi_single_layer_decode.py --point "$POINTS" $ARGS --capture /tmp/golden.pt
++
++# 3) after editing, replay: speed AND correctness (per point: `JSON {...}` and `CHECK {...}`):
++python3 /tmp/kimi_single_layer_decode.py --point "$POINTS" $ARGS --replay /tmp/golden.pt
++```
++- Every point prints a `JSON {"latency_us": ..., "latency_mode": "graph"|"eager", ...}` line; the
++  judged number is `latency_us` (graph mode for decode points, eager for prefill points, whose
++  `point` carries the `pf<prefix>` tag). `--split` adds eager attn/moe/norms times (decode only).
++- **Measure before and after with the IDENTICAL command** (same flags, same points, same
++  `--iters/--warmup`), and treat a run that also carries `--split` or `--profile-kernels` as a
++  *diagnostic*, not a timing reference: those extra phases perturb the graph-replay number by
++  ~10%. The judge re-measures your tree and the tree you started from with the plain fixed
++  flags, 5 repetitions each, and credits any improvement on the first point that clears 3 sigma
++  (at least 0.5%) without regressing the others — so a before/after pair taken with different
++  flags will mislead you about your own progress.
++- **This is a continuing optimization.** The tree you start from may already contain accepted
++  changes from earlier rounds (diff it against `original/` copies you keep, or read it): keep
++  them working, build on them, and look for the *next* improvement. There is no target number —
++  every verified gain counts, and the judge's correctness reference is always the ORIGINAL
++  model's output, so accuracy cannot be traded away across rounds.
++- `CHECK {... "pass": ...}`: output and post-step state must match the golden
++  (`max_rel_err <= 0.02`, no NaN). **A change that speeds things up but alters the output or
++  state FAILS**, on every point in `$POINTS` (the first point is the one scored for speed; the
++  others must not regress). Prefill points (`pf` tag) are judged per token instead (`rule` in
++  the CHECK line): at most 0.5% of the rows may exceed the tolerance, the 99th-percentile row
++  error and the mean drift must stay small, and the post-step state must match — because the
++  MoE/GEMM autotuners pick among near-equal tactics at m = thousands, which flips the routing
++  of ~0.1% of the tokens between processes. A `max_rel_err` of ~0.3 on a prefill point with
++  `rows_over_tol` of a few is therefore normal; `pass` is what counts.
++- Do NOT edit the driver or pass different workload flags: the judge re-measures with its own
++  copy and the fixed flags on a pristine container; only your edits under
++  `$CHECKOUT/python/sglang` carry over.
++
++## Reload after every edit (~1 min)
++The package is imported from the source tree, so edits take effect in the next process, but
++stale bytecode and a layer that no longer builds are the two silent failure modes. After each
++edit run:
++```bash
++$REBUILD_CMD
++```
++It clears `__pycache__` and runs a one-point smoke that must print `LAYER_SMOKE_OK`. If it
++does not, your change is NOT valid no matter how good an isolated number looks; fix it first.
++The smoke covers ONE small point only: before you finish, re-run the replay at **every** point in
++`$POINTS` — the judge measures all of them, and a kernel that runs at B=1 but rejects the B=128 or
++long-context shape (dtype/layout guards inside the kernels are common) is scored as a hard FAIL.
++
++## Organize your work by iteration
++Create `/workspace/opt_run/iter_00/`, `iter_01/`, … For each iteration write, in that folder:
++- `profile.json` — the per-kernel table + latencies you measured this iteration.
++- `analysis.md` — the VibeSim prediction id you built + what the analysis showed (which node,
++  its ladder/`necessary_share`, and why you did or did not target it).
++- `hypothesis.md` — what you will change and why the output/state stay identical.
++- `diff.patch` — `diff -ru` of the source you changed this iteration (against a copy you
++  keep of the original files).
++- `result.json` — post-edit `JSON` lines + the replay `CHECK` results.
++Keep a top-level `/workspace/opt_run/log.md` summarizing each iteration in one line.
++
++## Loop until done
++1. Profile current code → build a VibeSim prediction of it → run `optimality`/`analyze`.
++2. Pick the node most worth changing; map it to source; capture a golden.
++3. Form a correctness-preserving hypothesis, edit the real source, reload (smoke).
++4. Replay: confirm `latency_us` dropped on the first point AND `CHECK pass:true` on all points.
++5. Re-profile, re-simulate, re-analyze: has the bottleneck moved, or is the remaining time on
++   the top node no longer improvable by a code change? If there is still headroom and you have
++   iterations left, go to 2. If not, you are done.
++
++## Report
++End with: the node(s) you changed, the source files you edited, and your per-iteration
++before→after `latency_us` per point with the final CHECK results.
+diff --git a/scripts-local/vibesim-analysis-container/issue_k3_kda.json b/scripts-local/vibesim-analysis-container/issue_k3_kda.json
+new file mode 100644
+index 0000000..287ee63
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/issue_k3_kda.json
+@@ -0,0 +1,54 @@
++{
++  "_note": "Kimi-K3 open-ended optimizer case: ONE KDA (Kimi Delta Attention, linear-attn) decoder layer of Kimi-K3 on sglang v0.5.20, B200, in the cookbook production shape (attention TP8 rank = 12 heads, EP8 rank = 112 mxfp4 routed experts, bf16 KDA state). Metric = CUDA-graph replay time of the decode step. No PR answer key: the judge scores improvement over the pristine tree with a correctness gate (output + post-step recurrent state vs a seeded golden).",
++  "case": "k3_kda",
++  "mode": "open_ended",
++  "framework": "sglang",
++  "codex_image": "rga-local/sglang-k3:v0520-codex",
++  "before_image": "lmsysorg/sglang:v0.5.20",
++  "judge": "judge_k3.py",
++  "task_template": "agent_task_k3_opt.md",
++  "driver": "kimi_single_layer_decode.py",
++  "driver_args": "--attn-type kda --moe-backend flashinfer_mxfp4 --attn-heads 12 --mamba-ssm-dtype bfloat16 --experts 112 --ep 8 --local-topk 2 --hidden-scale 1.0 --cuda-graph --iters 40 --warmup 10",
++  "points": {
++    "primary": [
++      128,
++      8192
++    ],
++    "secondary": [
++      [
++        32,
++        8192
++      ],
++      [
++        1,
++        8192
++      ]
++    ]
++  },
++  "reps": 5,
++  "min_improvement": 0.0,
++  "rel_err_max": 0.02,
++  "seed": 0,
++  "edit_tree": {
++    "container_path": "/sgl-workspace/sglang/python/sglang"
++  },
++  "mounts": [
++    "/raid/hf/hub:/raid/hf/hub:ro",
++    "/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/k3_opt_history:/workspace/opt_history:ro"
++  ],
++  "shm_size": "32g",
++  "codex_model": "gpt-5.6-luna",
++  "render": {
++    "METRIC": "CUDA-graph decode-step latency of one Kimi-K3 KDA decoder layer",
++    "FRAMEWORK": "sglang",
++    "CHECKOUT": "/sgl-workspace/sglang",
++    "MODEL_NAME": "Kimi-K3 (moonshotai/Kimi-K3): one KDA (linear-attention) decoder layer, as it runs on one B200 of the production TP8/EP8 deployment (12 attention heads, 112 local mxfp4 experts, bf16 recurrent state)",
++    "WORKLOAD": "batched decode, one token per request per step: B=128 requests at context 8192 (primary), plus B=32 and B=1 at 8192 (must not regress)",
++    "DRIVER_ARGS": "--attn-type kda --moe-backend flashinfer_mxfp4 --attn-heads 12 --mamba-ssm-dtype bfloat16 --experts 112 --ep 8 --local-topk 2 --hidden-scale 1.0 --cuda-graph --iters 40 --warmup 10",
++    "POINTS": "128,8192;32,8192;1,8192",
++    "INSTALL_CMD": "true",
++    "REBUILD_CMD": "find /sgl-workspace/sglang/python/sglang -name __pycache__ -prune -exec rm -rf {} + ; cd /tmp && python3 /tmp/kimi_single_layer_decode.py --point 1,8192 --attn-type kda --moe-backend flashinfer_mxfp4 --attn-heads 12 --mamba-ssm-dtype bfloat16 --experts 112 --ep 8 --local-topk 2 --hidden-scale 1.0 --cuda-graph --iters 5 --warmup 2 && echo LAYER_SMOKE_OK",
++    "ORACLE_URL": "http://172.17.0.1:8801",
++    "OPT_HISTORY": "/workspace/opt_history"
++  }
++}
+diff --git a/scripts-local/vibesim-analysis-container/issue_k3_kda_b512.json b/scripts-local/vibesim-analysis-container/issue_k3_kda_b512.json
+new file mode 100644
+index 0000000..9365f9d
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/issue_k3_kda_b512.json
+@@ -0,0 +1,54 @@
++{
++  "_note": "Kimi-K3 open-ended optimizer case: ONE KDA (Kimi Delta Attention, linear-attn) decoder layer of Kimi-K3 on sglang v0.5.20, B200, in the cookbook production shape (attention TP8 rank = 12 heads, EP8 rank = 112 mxfp4 routed experts, bf16 KDA state). LARGE-BATCH variant (B=512/256 decode, the DP-attention regime where the MXFP4 MoE turns compute-bound). Metric = CUDA-graph replay time of the decode step. No PR answer key: the judge scores improvement over the pristine tree with a correctness gate (output + post-step recurrent state vs a seeded golden). Driver runs with --bf16-gemm-init (production scheduler's bf16 GEMM backend init: auto -> cutedsl TGV/split-K dispatch on SM100); the original decode cases keep the legacy cuBLAS-only dispatch (measured effect <= 0.7%).",
++  "case": "k3_kda_b512",
++  "mode": "open_ended",
++  "framework": "sglang",
++  "codex_image": "rga-local/sglang-k3:v0520-codex",
++  "before_image": "lmsysorg/sglang:v0.5.20",
++  "judge": "judge_k3.py",
++  "task_template": "agent_task_k3_opt.md",
++  "driver": "kimi_single_layer_decode.py",
++  "driver_args": "--attn-type kda --moe-backend flashinfer_mxfp4 --attn-heads 12 --mamba-ssm-dtype bfloat16 --experts 112 --ep 8 --local-topk 2 --hidden-scale 1.0 --cuda-graph --iters 40 --warmup 10 --bf16-gemm-init",
++  "points": {
++    "primary": [
++      512,
++      8192
++    ],
++    "secondary": [
++      [
++        256,
++        8192
++      ],
++      [
++        128,
++        8192
++      ]
++    ]
++  },
++  "reps": 5,
++  "min_improvement": 0.0,
++  "rel_err_max": 0.02,
++  "seed": 0,
++  "edit_tree": {
++    "container_path": "/sgl-workspace/sglang/python/sglang"
++  },
++  "mounts": [
++    "/raid/hf/hub:/raid/hf/hub:ro",
++    "/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/k3_opt_history:/workspace/opt_history:ro"
++  ],
++  "shm_size": "32g",
++  "codex_model": "gpt-5.6-luna",
++  "render": {
++    "METRIC": "CUDA-graph decode-step latency of one Kimi-K3 KDA decoder layer",
++    "FRAMEWORK": "sglang",
++    "CHECKOUT": "/sgl-workspace/sglang",
++    "MODEL_NAME": "Kimi-K3 (moonshotai/Kimi-K3): one KDA (linear-attention) decoder layer, as it runs on one B200 of the production TP8/EP8 deployment (12 attention heads, 112 local mxfp4 experts, bf16 recurrent state)",
++    "WORKLOAD": "batched decode, one token per request per step: B=512 requests at context 8192 (primary: the large-batch regime where the routed MXFP4 MoE sees ~1024 local rows and stops being weight-bandwidth-bound), plus B=256 and B=128 at 8192 (must not regress)",
++    "DRIVER_ARGS": "--attn-type kda --moe-backend flashinfer_mxfp4 --attn-heads 12 --mamba-ssm-dtype bfloat16 --experts 112 --ep 8 --local-topk 2 --hidden-scale 1.0 --cuda-graph --iters 40 --warmup 10 --bf16-gemm-init",
++    "POINTS": "512,8192;256,8192;128,8192",
++    "INSTALL_CMD": "true",
++    "REBUILD_CMD": "find /sgl-workspace/sglang/python/sglang -name __pycache__ -prune -exec rm -rf {} + ; cd /tmp && python3 /tmp/kimi_single_layer_decode.py --point 1,8192 --attn-type kda --moe-backend flashinfer_mxfp4 --attn-heads 12 --mamba-ssm-dtype bfloat16 --experts 112 --ep 8 --local-topk 2 --hidden-scale 1.0 --cuda-graph --iters 5 --warmup 2 --bf16-gemm-init && echo LAYER_SMOKE_OK",
++    "ORACLE_URL": "http://172.17.0.1:8803",
++    "OPT_HISTORY": "/workspace/opt_history"
++  }
++}
+diff --git a/scripts-local/vibesim-analysis-container/issue_k3_kda_prefill.json b/scripts-local/vibesim-analysis-container/issue_k3_kda_prefill.json
+new file mode 100644
+index 0000000..a5104f3
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/issue_k3_kda_prefill.json
+@@ -0,0 +1,57 @@
++{
++  "_note": "Kimi-K3 open-ended optimizer case, CHUNKED PREFILL variant: ONE KDA decoder layer on sglang v0.5.20, B200, cookbook production shape (12 KDA heads/rank, bf16 recurrent state, EP8 rank = 112 mxfp4 routed experts, local top-2 share). Points are prefill chunks (ForwardMode.EXTEND): B requests x L NEW tokens each on a <prefix>-token context; the K3 B200 default chunked_prefill_size is 16384. Metric = eager step time (sglang does not graph-capture prefill). Correctness = output + post-chunk conv/recurrent state vs a seeded golden from the pristine tree. Driver runs with --bf16-gemm-init (production scheduler's bf16 GEMM backend init: auto -> cutedsl TGV/split-K dispatch on SM100); the original decode cases keep the legacy cuBLAS-only dispatch (measured effect <= 0.7%).",
++  "case": "k3_kda_prefill",
++  "mode": "open_ended",
++  "framework": "sglang",
++  "codex_image": "rga-local/sglang-k3:v0520-codex",
++  "before_image": "lmsysorg/sglang:v0.5.20",
++  "judge": "judge_k3.py",
++  "task_template": "agent_task_k3_opt.md",
++  "driver": "kimi_single_layer_decode.py",
++  "driver_args": "--attn-type kda --moe-backend flashinfer_mxfp4 --attn-heads 12 --mamba-ssm-dtype bfloat16 --experts 112 --ep 8 --local-topk 2 --hidden-scale 1.0 --cuda-graph --iters 40 --warmup 10 --bf16-gemm-init",
++  "points": {
++    "primary": [
++      1,
++      16384,
++      "pf"
++    ],
++    "secondary": [
++      [
++        1,
++        16384,
++        "pf49152"
++      ],
++      [
++        4,
++        4096,
++        "pf"
++      ]
++    ]
++  },
++  "reps": 5,
++  "min_improvement": 0.0,
++  "rel_err_max": 0.02,
++  "seed": 0,
++  "edit_tree": {
++    "container_path": "/sgl-workspace/sglang/python/sglang"
++  },
++  "mounts": [
++    "/raid/hf/hub:/raid/hf/hub:ro",
++    "/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/k3_opt_history:/workspace/opt_history:ro"
++  ],
++  "shm_size": "32g",
++  "codex_model": "gpt-5.6-luna",
++  "render": {
++    "METRIC": "eager chunked-prefill step latency of one Kimi-K3 KDA decoder layer",
++    "FRAMEWORK": "sglang",
++    "CHECKOUT": "/sgl-workspace/sglang",
++    "MODEL_NAME": "Kimi-K3 (moonshotai/Kimi-K3): one KDA (linear-attention) decoder layer, as it runs on one B200 of the production TP8/EP8 deployment (12 attention heads, 112 local mxfp4 experts, bf16 recurrent state)",
++    "WORKLOAD": "chunked prefill (ForwardMode.EXTEND), one chunk per step: 1 request x 16,384 new tokens as the FIRST chunk of a prompt (primary; the B200 default chunked_prefill_size; the routed MXFP4 MoE sees ~32k local rows and is GEMM-bound, KDA runs the chunked scan chunk_kda), plus the same 16k chunk as the 4th chunk of a 64k prompt (prefix 49,152 tokens: conv + recurrent state carried in) and a mixed batch of 4 requests x 4,096 first-chunk tokens (must not regress)",
++    "DRIVER_ARGS": "--attn-type kda --moe-backend flashinfer_mxfp4 --attn-heads 12 --mamba-ssm-dtype bfloat16 --experts 112 --ep 8 --local-topk 2 --hidden-scale 1.0 --cuda-graph --iters 40 --warmup 10 --bf16-gemm-init",
++    "POINTS": "1,16384,pf;1,16384,pf49152;4,4096,pf",
++    "INSTALL_CMD": "true",
++    "REBUILD_CMD": "find /sgl-workspace/sglang/python/sglang -name __pycache__ -prune -exec rm -rf {} + ; cd /tmp && python3 /tmp/kimi_single_layer_decode.py --point 1,2048,pf --attn-type kda --moe-backend flashinfer_mxfp4 --attn-heads 12 --mamba-ssm-dtype bfloat16 --experts 112 --ep 8 --local-topk 2 --hidden-scale 1.0 --cuda-graph --iters 5 --warmup 2 --bf16-gemm-init && echo LAYER_SMOKE_OK",
++    "ORACLE_URL": "http://172.17.0.1:8805",
++    "OPT_HISTORY": "/workspace/opt_history"
++  }
++}
+diff --git a/scripts-local/vibesim-analysis-container/issue_k3_mla.json b/scripts-local/vibesim-analysis-container/issue_k3_mla.json
+new file mode 100644
+index 0000000..527a7b6
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/issue_k3_mla.json
+@@ -0,0 +1,55 @@
++{
++  "_note": "Kimi-K3 open-ended optimizer case: ONE MLA (dense full-attention) decoder layer of Kimi-K3 on sglang v0.5.20, B200, in the cookbook production shape (attention TP8 rank = 12 heads, cutedsl_mla decode backend with page 64 and fp8_e4m3 latent KV, EP8 rank = 112 mxfp4 routed experts). Metric = CUDA-graph replay time of the decode step. No PR answer key: improvement over the pristine tree + correctness (output + written KV row vs a seeded golden with planted high-norm keys).",
++  "case": "k3_mla",
++  "mode": "open_ended",
++  "framework": "sglang",
++  "codex_image": "rga-local/sglang-k3:v0520-codex",
++  "before_image": "lmsysorg/sglang:v0.5.20",
++  "judge": "judge_k3.py",
++  "task_template": "agent_task_k3_opt.md",
++  "driver": "kimi_single_layer_decode.py",
++  "driver_args": "--attn-type mla --moe-backend flashinfer_mxfp4 --attention-backend cutedsl_mla --attn-heads 12 --kv-cache-dtype fp8_e4m3 --experts 112 --ep 8 --local-topk 2 --hidden-scale 1.0 --cuda-graph --iters 40 --warmup 10",
++  "points": {
++    "primary": [
++      1,
++      1048576
++    ],
++    "secondary": [
++      [
++        128,
++        8192
++      ],
++      [
++        16,
++        65536,
++        "mix"
++      ]
++    ]
++  },
++  "reps": 5,
++  "min_improvement": 0.0,
++  "rel_err_max": 0.02,
++  "seed": 0,
++  "edit_tree": {
++    "container_path": "/sgl-workspace/sglang/python/sglang"
++  },
++  "mounts": [
++    "/raid/hf/hub:/raid/hf/hub:ro",
++    "/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/k3_opt_history:/workspace/opt_history:ro"
++  ],
++  "shm_size": "32g",
++  "codex_model": "gpt-5.6-luna",
++  "render": {
++    "METRIC": "CUDA-graph decode-step latency of one Kimi-K3 MLA decoder layer",
++    "FRAMEWORK": "sglang",
++    "CHECKOUT": "/sgl-workspace/sglang",
++    "MODEL_NAME": "Kimi-K3 (moonshotai/Kimi-K3): one MLA (dense multi-head latent attention) decoder layer, as it runs on one B200 of the production TP8/EP8 deployment (12 attention heads, cutedsl_mla decode over a paged fp8 latent KV, 112 local mxfp4 experts)",
++    "WORKLOAD": "decode, one token per request per step: B=1 request at context 1,048,576 (primary: long-context decode), plus B=128 at 8192 and a MIXED-length batch of B=16 whose requests have contexts 65,536 / 49,152 / 32,768 / 16,384 (must not regress; requests in a real decode batch do not share a context length)",
++    "DRIVER_ARGS": "--attn-type mla --moe-backend flashinfer_mxfp4 --attention-backend cutedsl_mla --attn-heads 12 --kv-cache-dtype fp8_e4m3 --experts 112 --ep 8 --local-topk 2 --hidden-scale 1.0 --cuda-graph --iters 40 --warmup 10",
++    "POINTS": "1,1048576;128,8192;16,65536,mix",
++    "INSTALL_CMD": "true",
++    "REBUILD_CMD": "find /sgl-workspace/sglang/python/sglang -name __pycache__ -prune -exec rm -rf {} + ; cd /tmp && python3 /tmp/kimi_single_layer_decode.py --point 1,8192 --attn-type mla --moe-backend flashinfer_mxfp4 --attention-backend cutedsl_mla --attn-heads 12 --kv-cache-dtype fp8_e4m3 --experts 112 --ep 8 --local-topk 2 --hidden-scale 1.0 --cuda-graph --iters 5 --warmup 2 && echo LAYER_SMOKE_OK",
++    "ORACLE_URL": "http://172.17.0.1:8802",
++    "OPT_HISTORY": "/workspace/opt_history"
++  }
++}
+diff --git a/scripts-local/vibesim-analysis-container/issue_k3_mla_b512.json b/scripts-local/vibesim-analysis-container/issue_k3_mla_b512.json
+new file mode 100644
+index 0000000..ffea6a7
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/issue_k3_mla_b512.json
+@@ -0,0 +1,55 @@
++{
++  "_note": "Kimi-K3 open-ended optimizer case: ONE MLA (dense full-attention) decoder layer of Kimi-K3 on sglang v0.5.20, B200, in the cookbook production shape (attention TP8 rank = 12 heads, cutedsl_mla decode backend with page 64 and fp8_e4m3 latent KV, EP8 rank = 112 mxfp4 routed experts). LARGE-BATCH variant (B=512/256 decode at 8k). Metric = CUDA-graph replay time of the decode step. No PR answer key: improvement over the pristine tree + correctness (output + written KV row vs a seeded golden with planted high-norm keys). Driver runs with --bf16-gemm-init (production scheduler's bf16 GEMM backend init: auto -> cutedsl TGV/split-K dispatch on SM100); the original decode cases keep the legacy cuBLAS-only dispatch (measured effect <= 0.7%).",
++  "case": "k3_mla_b512",
++  "mode": "open_ended",
++  "framework": "sglang",
++  "codex_image": "rga-local/sglang-k3:v0520-codex",
++  "before_image": "lmsysorg/sglang:v0.5.20",
++  "judge": "judge_k3.py",
++  "task_template": "agent_task_k3_opt.md",
++  "driver": "kimi_single_layer_decode.py",
++  "driver_args": "--attn-type mla --moe-backend flashinfer_mxfp4 --attention-backend cutedsl_mla --attn-heads 12 --kv-cache-dtype fp8_e4m3 --experts 112 --ep 8 --local-topk 2 --hidden-scale 1.0 --cuda-graph --iters 40 --warmup 10 --bf16-gemm-init",
++  "points": {
++    "primary": [
++      512,
++      8192
++    ],
++    "secondary": [
++      [
++        256,
++        8192
++      ],
++      [
++        16,
++        65536,
++        "mix"
++      ]
++    ]
++  },
++  "reps": 5,
++  "min_improvement": 0.0,
++  "rel_err_max": 0.02,
++  "seed": 0,
++  "edit_tree": {
++    "container_path": "/sgl-workspace/sglang/python/sglang"
++  },
++  "mounts": [
++    "/raid/hf/hub:/raid/hf/hub:ro",
++    "/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/k3_opt_history:/workspace/opt_history:ro"
++  ],
++  "shm_size": "32g",
++  "codex_model": "gpt-5.6-luna",
++  "render": {
++    "METRIC": "CUDA-graph decode-step latency of one Kimi-K3 MLA decoder layer",
++    "FRAMEWORK": "sglang",
++    "CHECKOUT": "/sgl-workspace/sglang",
++    "MODEL_NAME": "Kimi-K3 (moonshotai/Kimi-K3): one MLA (dense multi-head latent attention) decoder layer, as it runs on one B200 of the production TP8/EP8 deployment (12 attention heads, cutedsl_mla decode over a paged fp8 latent KV, 112 local mxfp4 experts)",
++    "WORKLOAD": "batched decode, one token per request per step: B=512 requests at context 8192 (primary: large-batch regime -- ~1024 local MoE rows, attention over 512 x 8k fp8 latent KV), plus B=256 at 8192 and a MIXED-length batch of B=16 with contexts 65,536 / 49,152 / 32,768 / 16,384 (must not regress)",
++    "DRIVER_ARGS": "--attn-type mla --moe-backend flashinfer_mxfp4 --attention-backend cutedsl_mla --attn-heads 12 --kv-cache-dtype fp8_e4m3 --experts 112 --ep 8 --local-topk 2 --hidden-scale 1.0 --cuda-graph --iters 40 --warmup 10 --bf16-gemm-init",
++    "POINTS": "512,8192;256,8192;16,65536,mix",
++    "INSTALL_CMD": "true",
++    "REBUILD_CMD": "find /sgl-workspace/sglang/python/sglang -name __pycache__ -prune -exec rm -rf {} + ; cd /tmp && python3 /tmp/kimi_single_layer_decode.py --point 1,8192 --attn-type mla --moe-backend flashinfer_mxfp4 --attention-backend cutedsl_mla --attn-heads 12 --kv-cache-dtype fp8_e4m3 --experts 112 --ep 8 --local-topk 2 --hidden-scale 1.0 --cuda-graph --iters 5 --warmup 2 --bf16-gemm-init && echo LAYER_SMOKE_OK",
++    "ORACLE_URL": "http://172.17.0.1:8804",
++    "OPT_HISTORY": "/workspace/opt_history"
++  }
++}
+diff --git a/scripts-local/vibesim-analysis-container/issue_k3_mla_prefill.json b/scripts-local/vibesim-analysis-container/issue_k3_mla_prefill.json
+new file mode 100644
+index 0000000..05d7b5f
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/issue_k3_mla_prefill.json
+@@ -0,0 +1,57 @@
++{
++  "_note": "Kimi-K3 open-ended optimizer case, CHUNKED PREFILL variant: ONE MLA decoder layer on sglang v0.5.20, B200, cookbook production shape (12 heads/rank, trtllm_mla prefill backend: MHA_CHUNKED_KV = TRT-LLM ragged fp8 attention over the chunk + chunked prefix-KV attention merged with merge_state, fp8_e4m3 latent KV written per token, EP8 rank = 112 mxfp4 experts). Points are prefill chunks (EXTEND): B requests x L NEW tokens on a <prefix>-token cached context. Metric = eager step time. Correctness = output + the written fp8 KV rows vs a seeded golden from the pristine tree. Driver runs with --bf16-gemm-init (production scheduler's bf16 GEMM backend init: auto -> cutedsl TGV/split-K dispatch on SM100); the original decode cases keep the legacy cuBLAS-only dispatch (measured effect <= 0.7%).",
++  "case": "k3_mla_prefill",
++  "mode": "open_ended",
++  "framework": "sglang",
++  "codex_image": "rga-local/sglang-k3:v0520-codex",
++  "before_image": "lmsysorg/sglang:v0.5.20",
++  "judge": "judge_k3.py",
++  "task_template": "agent_task_k3_opt.md",
++  "driver": "kimi_single_layer_decode.py",
++  "driver_args": "--attn-type mla --moe-backend flashinfer_mxfp4 --attention-backend cutedsl_mla --attn-heads 12 --kv-cache-dtype fp8_e4m3 --experts 112 --ep 8 --local-topk 2 --hidden-scale 1.0 --cuda-graph --iters 40 --warmup 10 --bf16-gemm-init",
++  "points": {
++    "primary": [
++      1,
++      16384,
++      "pf49152"
++    ],
++    "secondary": [
++      [
++        1,
++        16384,
++        "pf"
++      ],
++      [
++        4,
++        4096,
++        "pf"
++      ]
++    ]
++  },
++  "reps": 5,
++  "min_improvement": 0.0,
++  "rel_err_max": 0.02,
++  "seed": 0,
++  "edit_tree": {
++    "container_path": "/sgl-workspace/sglang/python/sglang"
++  },
++  "mounts": [
++    "/raid/hf/hub:/raid/hf/hub:ro",
++    "/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/k3_opt_history:/workspace/opt_history:ro"
++  ],
++  "shm_size": "32g",
++  "codex_model": "gpt-5.6-luna",
++  "render": {
++    "METRIC": "eager chunked-prefill step latency of one Kimi-K3 MLA decoder layer",
++    "FRAMEWORK": "sglang",
++    "CHECKOUT": "/sgl-workspace/sglang",
++    "MODEL_NAME": "Kimi-K3 (moonshotai/Kimi-K3): one MLA (dense multi-head latent attention) decoder layer, as it runs on one B200 of the production TP8/EP8 deployment (12 attention heads, cutedsl_mla decode over a paged fp8 latent KV, 112 local mxfp4 experts)",
++    "WORKLOAD": "chunked prefill (ForwardMode.EXTEND), one chunk per step: 1 request x 16,384 new tokens as the 4th chunk of a 64k prompt (primary: prefix 49,152 cached fp8 latent-KV tokens attended through the chunked-prefix path, plus causal attention within the chunk; the MoE sees ~32k local rows), plus the same 16k chunk as a FIRST chunk (prefix 0) and a mixed batch of 4 requests x 4,096 first-chunk tokens (must not regress)",
++    "DRIVER_ARGS": "--attn-type mla --moe-backend flashinfer_mxfp4 --attention-backend cutedsl_mla --attn-heads 12 --kv-cache-dtype fp8_e4m3 --experts 112 --ep 8 --local-topk 2 --hidden-scale 1.0 --cuda-graph --iters 40 --warmup 10 --bf16-gemm-init",
++    "POINTS": "1,16384,pf49152;1,16384,pf;4,4096,pf",
++    "INSTALL_CMD": "true",
++    "REBUILD_CMD": "find /sgl-workspace/sglang/python/sglang -name __pycache__ -prune -exec rm -rf {} + ; cd /tmp && python3 /tmp/kimi_single_layer_decode.py --point 1,2048,pf --attn-type mla --moe-backend flashinfer_mxfp4 --attention-backend cutedsl_mla --attn-heads 12 --kv-cache-dtype fp8_e4m3 --experts 112 --ep 8 --local-topk 2 --hidden-scale 1.0 --cuda-graph --iters 5 --warmup 2 --bf16-gemm-init && echo LAYER_SMOKE_OK",
++    "ORACLE_URL": "http://172.17.0.1:8806",
++    "OPT_HISTORY": "/workspace/opt_history"
++  }
++}
+diff --git a/scripts-local/vibesim-analysis-container/judge_k3.py b/scripts-local/vibesim-analysis-container/judge_k3.py
+new file mode 100644
+index 0000000..b9ce664
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/judge_k3.py
+@@ -0,0 +1,365 @@
++#!/usr/bin/env python3
++"""Open-ended judge for the Kimi-K3 single-decoder-layer case (no PR answer key).
++
++The optimization UNIT is one KimiK3DecoderLayer (KDA or MLA variant) driven by
++kimi_single_layer_decode.py (the "extractor" for this case) on ONE B200, in the
++production TP8-rank shape.  The judged METRIC is the CUDA-graph replay time of the
++decode step (`latency_us`, mode "graph").  Correctness = the step's output AND its
++post-step state (KDA recurrent state / written MLA KV row) must match a golden
++captured from the PRISTINE tree with the same seed (relative tolerance).
++
++Integrity model (the agent never touches anything the judge measures with):
++  * baseline + golden come from a fresh container of `before_image` (pristine sglang
++    tree, judge-owned driver copy, flashinfer cache mounted READ-ONLY);
++  * the agent's edited tree is reduced to its source diff (.py + JIT CUDA sources, see
++    SRC_EXT) against the pristine tree, applied onto a fresh copy of the pristine tree
++    (drops __pycache__/binaries/etc.),
++    and that copy is bind-mounted READ-ONLY over the sglang package in a second
++    fresh `before_image` container for the replay;
++  * every point is measured `reps` times; the primary point must improve by
++    max(min_improvement, 3*sigma_before/before); secondaries must not regress
++    beyond max(0.02, 3*sigma/before); every point must pass CHECK.
++
++Config keys (issue_k3_*.json): before_image, driver, driver_args, points{primary,
++secondary}, reps, min_improvement, rel_err_max, seed, edit_tree{container_path},
++mounts, shm_size.  Runner-provided args: --tree-dir (agent tree on host),
++--pristine-dir (pristine tree on host).
++
++Usage: judge_k3.py --agent-container NAME --config issue_k3_kda.json --tree-dir DIR
++                   --pristine-dir DIR [--golden-dir DIR] [--out verdict.json]
++"""
++import argparse, hashlib, json, os, pathlib, re, shutil, statistics, subprocess, sys, time
++
++HERE = pathlib.Path(__file__).resolve().parent
++
++
++def sh(argv, timeout=3600, check=False):
++    p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
++    out = "\n".join(l for l in (p.stdout + "\n" + p.stderr).splitlines() if "Wrapper:" not in l)
++    if check and p.returncode != 0:
++        raise RuntimeError(f"command failed ({p.returncode}): {' '.join(argv)}\n{out[-2000:]}")
++    return out
++
++
++# A point is (B, L, tag). tag: "" (uniform decode), "mix" (per-request context lengths L, 3L/4,
++# L/2, L/4; MLA only), "pf" / "pf<prefix>" (chunked prefill: B requests x L new tokens each on a
++# <prefix>-token cached context; eager timing). Config points: [B, L], [B, L, "mix"],
++# [B, L, "pf"], [B, L, "pf49152"]. Keys/golden names are "B,L<tag>" (unchanged for decode points).
++def _norm_tag(t):
++    t = str(t).strip().lower() if t is not None else ""
++    if t in ("mixed", "true", "1"):
++        t = "mix"
++    if t in ("false", "0", "none"):
++        t = ""
++    return t
++
++
++def _pt(p):
++    p = list(p)
++    return (int(p[0]), int(p[1]), _norm_tag(p[2]) if len(p) > 2 else "")
++
++
++def pt_key(p):
++    return f"{p[0]},{p[1]}{p[2]}"
++
++
++def golden_name(p):
++    return f"golden_B{p[0]}_L{p[1]}{p[2]}.pt"
++
++
++def parse_json_lines(out):
++    """Driver stdout -> {(B,L,tag): summary dict} from the `JSON {...}` lines."""
++    res = {}
++    for line in out.splitlines():
++        if line.startswith("JSON "):
++            d = json.loads(line[5:])
++            tag = _norm_tag(d.get("tag")) if d.get("tag") is not None else ("mix" if d.get("mixed") else "")
++            res[(int(d["B"]), int(d["seq_len"]), tag)] = d
++    return res
++
++
++def points_of(cfg):
++    prim = _pt(cfg["points"]["primary"])
++    secs = [_pt(p) for p in cfg["points"].get("secondary", [])]
++    return prim, secs
++
++
++def point_arg(points):
++    return ";".join(f"{b},{l}" + (f",{t}" if t else "") for b, l, t in points)
++
++
++def case_key(cfg, driver_path):
++    h = hashlib.sha1()
++    h.update(pathlib.Path(driver_path).read_bytes())
++    h.update(json.dumps({k: cfg.get(k) for k in (
++        "before_image", "driver_args", "points", "seed", "reps")}, sort_keys=True).encode())
++    return h.hexdigest()[:12]
++
++
++class Container:
++    """A fresh `before_image` container with the judge's env; optional read-only tree mount."""
++
++    def __init__(self, cfg, name, tree_mount=None):
++        self.cfg, self.name = cfg, name
++        gpu = os.environ.get("DOCKER_GPU_ARG") or f'"device={cfg.get("gpu", "3")}"'
++        argv = ["docker", "run", "-d", "--name", name, "--gpus", gpu,
++                "--shm-size", cfg.get("shm_size", "32g"),
++                "-e", "CUDA_VISIBLE_DEVICES=0", "-e", "HF_HUB_OFFLINE=1",
++                "-e", "SGLANG_OPT_FUSED_KDA_VERIFY=0", "-e", "TOKENIZERS_PARALLELISM=false",
++                "-v", "/raid/yilegu/flashinfer_cache:/root/.cache/flashinfer:ro"]
++        for m in cfg.get("mounts", []):
++            argv += ["-v", m]
++        if tree_mount is not None:
++            host, cpath = tree_mount
++            argv += ["-v", f"{host}:{cpath}:ro"]
++        argv += ["--workdir", "/tmp", cfg["before_image"], "sleep", "infinity"]
++        sh(["docker", "rm", "-f", name])
++        sh(argv, check=True)
++
++    def cp_in(self, src, dst):
++        sh(["docker", "cp", str(src), f"{self.name}:{dst}"], check=True)
++
++    def cp_out(self, src, dst):
++        sh(["docker", "cp", f"{self.name}:{src}", str(dst)], check=True)
++
++    def exec(self, argv, timeout=3600):
++        return sh(["docker", "exec", "--workdir", "/tmp", self.name] + argv, timeout=timeout)
++
++    def rm(self):
++        sh(["docker", "rm", "-f", self.name])
++
++
++def run_driver(cont, cfg, driver_name, points, extra):
++    argv = ["python3", f"/tmp/{driver_name}", "--point", point_arg(points),
++            "--seed", str(cfg.get("seed", 0))] + cfg["driver_args"].split() + extra
++    out = cont.exec(argv)
++    res = parse_json_lines(out)
++    missing = [p for p in points if p not in res]
++    if missing:
++        raise RuntimeError(f"driver produced no JSON line for {missing}:\n{out[-3000:]}")
++    return res, out
++
++
++def ensure_baseline(cfg, driver_path, golden_dir, points, key):
++    """Golden + baseline latencies from the pristine image (cached by case key)."""
++    gdir = pathlib.Path(golden_dir) / f"golden_k3_{key}"
++    meta = gdir / "baseline.json"
++    if meta.exists():
++        return gdir, json.loads(meta.read_text())
++    gdir.mkdir(parents=True, exist_ok=True)
++    cont = Container(cfg, f"judge_k3_golden_{int(time.time())}")
++    try:
++        cont.cp_in(driver_path, f"/tmp/{driver_path.name}")
++        cont.exec(["mkdir", "-p", "/tmp/golden"])
++        lat = {p: [] for p in points}
++        raw_tail = ""
++        for rep in range(int(cfg.get("reps", 5))):
++            extra = ["--capture", "/tmp/golden/golden.pt"] if rep == 0 else []
++            res, out = run_driver(cont, cfg, driver_path.name, points, extra)
++            raw_tail = out[-2000:]
++            for p in points:
++                if not res[p].get("ok"):
++                    raise RuntimeError(f"baseline point {p} failed: {res[p].get('error')}\n{out[-2000:]}")
++                lat[p].append(float(res[p]["latency_us"]))
++            if rep == 0:
++                if "saved golden" not in out:
++                    raise RuntimeError(f"golden capture missing:\n{out[-2000:]}")
++                for p in points:
++                    cont.cp_out(f"/tmp/golden/{golden_name(p)}", gdir)
++                mode = {p: res[p].get("latency_mode") for p in points}
++        base = {"points": {pt_key(p): {"lat": v, "median": statistics.median(v),
++                                       "sigma": statistics.pstdev(v) if len(v) > 1 else 0.0,
++                                       "latency_mode": mode[p]}
++                           for p, v in lat.items()},
++                "driver_args": cfg["driver_args"], "seed": cfg.get("seed", 0),
++                "before_image": cfg["before_image"], "raw_tail": raw_tail}
++        meta.write_text(json.dumps(base, indent=2))
++        return gdir, base
++    finally:
++        cont.rm()
++
++
++# Source files the agent may legitimately change. sglang JIT-compiles the CUDA sources under
++# kernels/jit/csrc at import time, so .cu/.cuh/.h edits are part of the edit surface (KDA
++# trial 7 extended kda_fused_decode.cuh to a bf16 state); only bytecode/binaries are dropped.
++SRC_EXT = (".py", ".cu", ".cuh", ".h", ".hpp", ".cc", ".cpp", ".inc", ".jinja")
++
++
++def _src_files(root):
++    for f in root.rglob("*"):
++        if f.is_file() and f.suffix in SRC_EXT and "__pycache__" not in f.relative_to(root).parts:
++            yield f
++
++
++def measure_tree(cfg, driver_path, points, tree_dir, reps):
++    """Latency-only measurement of an arbitrary (host) tree mounted read-only: the
++    continuous loop's per-round baseline is the CURRENT BEST tree, not the pristine one.
++    Goldens still come from the pristine tree, so correctness never drifts across rounds."""
++    cont = Container(cfg, f"judge_k3_base_{int(time.time())}",
++                     tree_mount=(str(tree_dir), cfg["edit_tree"]["container_path"]))
++    try:
++        cont.cp_in(driver_path, f"/tmp/{driver_path.name}")
++        lat = {p: [] for p in points}
++        mode = {}
++        for _ in range(reps):
++            res, out = run_driver(cont, cfg, driver_path.name, points, [])
++            for p in points:
++                if not res[p].get("ok"):
++                    raise RuntimeError(f"baseline tree failed at {p}: {res[p].get('error')}\n{out[-2000:]}")
++                lat[p].append(float(res[p]["latency_us"]))
++                mode[p] = res[p].get("latency_mode")
++        return {pt_key(p): {"lat": v, "median": statistics.median(v),
++                            "sigma": statistics.pstdev(v) if len(v) > 1 else 0.0,
++                            "latency_mode": mode[p]} for p, v in lat.items()}
++    finally:
++        cont.rm()
++
++
++def build_judged_tree(pristine, agent_tree, out_dir):
++    """Fresh pristine copy + the agent's source changes only. Returns (dir, patch_text, files)."""
++    pristine, agent_tree, out_dir = map(pathlib.Path, (pristine, agent_tree, out_dir))
++    if out_dir.exists():
++        shutil.rmtree(out_dir)
++    shutil.copytree(pristine, out_dir, symlinks=True,
++                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
++    changed = []
++    for f in _src_files(agent_tree):
++        rel = f.relative_to(agent_tree)
++        pf = pristine / rel
++        if not pf.exists() or pf.read_bytes() != f.read_bytes():
++            (out_dir / rel).parent.mkdir(parents=True, exist_ok=True)
++            shutil.copy2(f, out_dir / rel)
++            changed.append(str(rel))
++    # deletions of source files by the agent are honoured too
++    for pf in _src_files(pristine):
++        rel = pf.relative_to(pristine)
++        if not (agent_tree / rel).exists() and (out_dir / rel).exists():
++            (out_dir / rel).unlink()
++            changed.append(f"-{rel}")
++    patch = subprocess.run(["diff", "-ruN", "-x", "__pycache__", "-x", "*.pyc",
++                            str(pristine), str(out_dir)], capture_output=True, text=True).stdout
++    return out_dir, patch, changed
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--agent-container", required=True)
++    ap.add_argument("--config", required=True)
++    ap.add_argument("--tree-dir", required=True, help="agent's edited sglang package (host path)")
++    ap.add_argument("--pristine-dir", required=True, help="pristine sglang package (host path)")
++    ap.add_argument("--golden-dir", default="/raid/yilegu/eval_goldens")
++    ap.add_argument("--out", default=None)
++    ap.add_argument("--baseline-tree", default=None,
++                    help="continuous loop: measure the latency baseline from this (current best) "
++                         "tree instead of the pristine one; goldens stay pristine")
++    ap.add_argument("--min-improvement", type=float, default=None,
++                    help="override the config's min_improvement (0 = any 3-sigma gain counts)")
++    args = ap.parse_args()
++    cfg = json.loads(pathlib.Path(args.config).read_text())
++    prim, secs = points_of(cfg)
++    points = [prim] + secs
++    # Snapshot the judge's driver ONCE: baseline and replay containers must run the
++    # identical file (an edit landing between the two would otherwise be scored as a
++    # numerics change of the agent's tree).
++    src_driver = HERE / cfg.get("driver", "kimi_single_layer_decode.py")
++    key = case_key(cfg, src_driver)
++    snap_dir = pathlib.Path(args.golden_dir) / f"golden_k3_{key}"
++    snap_dir.mkdir(parents=True, exist_ok=True)
++    driver_path = snap_dir / src_driver.name
++    if not driver_path.exists():
++        shutil.copy2(src_driver, driver_path)
++    v = {"agent_container": args.agent_container, "case_key": key, "points": {},
++         "driver_sha": hashlib.sha1(driver_path.read_bytes()).hexdigest()[:12]}
++
++    # 1) pristine baseline + goldens (goldens are ALWAYS the pristine tree's)
++    gdir, base = ensure_baseline(cfg, driver_path, args.golden_dir, points, key)
++    v["pristine_points"] = {k: {"median": p["median"], "sigma": p["sigma"]} for k, p in base["points"].items()}
++    if args.baseline_tree:
++        # continuous loop: the round's latency baseline is the current best tree
++        base = dict(base)
++        base["points"] = measure_tree(cfg, driver_path, points, args.baseline_tree, int(cfg.get("reps", 5)))
++        v["baseline_tree"] = str(args.baseline_tree)
++
++    # 2) judged tree = pristine + agent .py diff
++    judged_dir, patch, changed = build_judged_tree(
++        args.pristine_dir, args.tree_dir, pathlib.Path(args.tree_dir).parent / (
++            pathlib.Path(args.tree_dir).name + "_judged"))
++    patch_path = judged_dir.parent / (pathlib.Path(args.tree_dir).name + "_judged.patch")
++    patch_path.write_text(patch)
++    v.update(changed_files=changed, diff_patch=str(patch_path), diff_lines=len(patch.splitlines()))
++
++    # 3) replay on a fresh pristine container with the judged tree mounted read-only
++    cont = Container(cfg, f"judge_k3_replay_{int(time.time())}",
++                     tree_mount=(str(judged_dir), cfg["edit_tree"]["container_path"]))
++    try:
++        cont.cp_in(driver_path, f"/tmp/{driver_path.name}")
++        cont.exec(["mkdir", "-p", "/tmp/golden"])
++        for p in points:
++            cont.cp_in(gdir / golden_name(p), f"/tmp/golden/{golden_name(p)}")
++        lat = {p: [] for p in points}
++        correctness = {}
++        for rep in range(int(cfg.get("reps", 5))):
++            try:
++                res, out = run_driver(cont, cfg, driver_path.name, points,
++                                      ["--replay", "/tmp/golden/golden.pt",
++                                       "--rel-err-max", str(cfg.get("rel_err_max", 2e-2))])
++            except Exception as e:
++                v.update(verdict="FAIL", reason=f"driver failed on agent tree: {e}"[:1500])
++                return _emit(v, args.out)
++            for p in points:
++                if not res[p].get("ok"):
++                    v.update(verdict="FAIL", reason=f"point {p} failed on agent tree: {res[p].get('error')}")
++                    return _emit(v, args.out)
++                lat[p].append(float(res[p]["latency_us"]))
++                if rep == 0:
++                    correctness[p] = res[p].get("correctness") or {"pass": False, "missing": True}
++    finally:
++        cont.rm()
++
++    # 4) gates
++    gates, per_point = {}, {}
++    all_correct = True
++    for p in points:
++        b = base["points"][pt_key(p)]
++        before, sigma = b["median"], b["sigma"]
++        after = statistics.median(lat[p])
++        improvement = (before - after) / before
++        noise = 3.0 * sigma / before if before else 0.0
++        c = correctness[p]
++        ok_c = bool(c.get("pass"))
++        all_correct = all_correct and ok_c
++        per_point[pt_key(p)] = {
++            "before_us": before, "before_sigma_us": sigma, "after_us": after,
++            "after_lat": lat[p], "improvement": round(improvement, 4),
++            "noise_frac_3sigma": round(noise, 4), "correctness": c,
++            "latency_mode": b.get("latency_mode"), "primary": p == prim, "mixed": p[2]}
++    pp = per_point[pt_key(prim)]
++    min_impr = float(cfg.get("min_improvement", 0.05)) if args.min_improvement is None else args.min_improvement
++    # 3 sigma of the baseline, but never below 0.5%: two 5-rep medians on a shared GPU can
++    # differ by that much with sigma ~0, and a "gain" inside that band is not a gain.
++    need = max(min_impr, pp["noise_frac_3sigma"], 0.005)
++    gates["correctness"] = all_correct
++    gates["latency_improved"] = pp["improvement"] >= need
++    gates["no_secondary_regression"] = all(
++        per_point[pt_key(p)]["improvement"] >= -max(0.02, per_point[pt_key(p)]["noise_frac_3sigma"])
++        for p in secs)
++    v.update(points=per_point, gates=gates, required_improvement=round(need, 4),
++             before_us=pp["before_us"], latency_us=pp["after_us"],
++             recovered_frac=pp["improvement"],  # = fractional improvement (open-ended case)
++             correctness={"pass": all_correct}, golden_dir=str(gdir))
++    v["verdict"] = "PASS" if all(gates.values()) else "FAIL"
++    v["reason"] = ("all gates passed" if v["verdict"] == "PASS"
++                   else "failed: " + ",".join(k for k, ok in gates.items() if not ok))
++    _emit(v, args.out)
++
++
++def _emit(v, out):
++    s = json.dumps(v, indent=2)
++    print(s)
++    if out:
++        pathlib.Path(out).write_text(s)
++    sys.exit(0 if v.get("verdict") == "PASS" else 1)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/scripts-local/vibesim-analysis-container/run_iter_opt_eval.sh b/scripts-local/vibesim-analysis-container/run_iter_opt_eval.sh
+new file mode 100755
+index 0000000..928df8e
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/run_iter_opt_eval.sh
+@@ -0,0 +1,221 @@
++#!/usr/bin/env bash
++# Iterative optimizer eval (de-leaked, config-driven, multi-case).
++#
++# The agent is told ONLY "optimize metric X (e.g. per-step decode latency) for this model on
++# this workload" -- no operator name, no target files, no target number, and NO hint about
++# "necessary/unnecessary/removable work". It must DERIVE what to change from the VibeSim
++# roofline analysis, map it to the real source, edit + recompile, and prove the layer got
++# faster without changing its numerical output. It organizes intermediate results by iteration
++# in /workspace/opt_run/iter_NN/.
++#
++# Per trial: fresh codex container on the slurm GPU -> Codex drives the loop against the
++# VibeSim oracle -> DRIVER deterministically rebuilds+installs the agent's tree and runs the
++# case's judge (judge_general.py: PR answer-key cases; judge_k3.py: open-ended Kimi-K3 case).
++# The agent's iteration workspace + transcript are saved for reward-leak audit.
++#
++# Usage: run_iter_opt_eval.sh [CONFIG=issue_28103.json] [N_TRIALS=3] [EFFORT=max]
++#   START=<k>          resume from trial k (preserves earlier trials' evidence)
++#   AGENT_TIMEOUT=<s>  per-agent-turn budget (default 3600)
++#   CODEX_MODEL=<m>    override the codex model (default: config codex_model or gpt-5.6-luna)
++#   TASK_TMPL=<file>   override the prompt template (default: config task_template or
++#                      agent_task_iter_opt.md)
++#   START_TREE=<dir>   continuous loop: seed the agent tree from this (current best) tree and
++#                      judge against its latency (K3 judge only; goldens stay pristine)
++#   MIN_IMPROVEMENT=<f> override the judge's min_improvement (0 = any 3-sigma gain)
++#
++# Config keys beyond the judge's (all optional unless noted):
++#   codex_image (req), model_snap, gpu, case, judge (script in this dir), driver (file copied
++#   to /tmp in the agent container; default extract_and_profile.py), mounts ["host:cont[:ro]"],
++#   shm_size, edit_tree {container_path}: bind-mount a host copy of that in-image directory so
++#   the judge can diff the agent's edits against the pristine copy; render.* keys are
++#   substituted as $KEY in the template (INSTALL_CMD replaces the default wheel copy step).
++set -Eeuo pipefail
++HERE="$(cd "$(dirname "$0")" && pwd)"
++CONFIG="${1:-$HERE/issue_28103.json}"; [ -f "$CONFIG" ] || CONFIG="$HERE/$1"
++N="${2:-3}"; EFFORT="${3:-max}"
++CODEX_HOME_HOST=/raid/yilegu/codex_home_eval
++FICACHE=/raid/yilegu/flashinfer_cache
++GOLDEN_DIR=/raid/yilegu/eval_goldens
++AGENT_TIMEOUT="${AGENT_TIMEOUT:-3600}"
++
++# ---- load config fields (single python read -> shell vars) --------------------------------
++eval "$(python3 - "$CONFIG" <<'PY'
++import json,sys,shlex,os
++c=json.load(open(sys.argv[1])); r=c.get("render",{})
++def e(k,v): print(f'{k}={shlex.quote(str(v))}')
++e("IMG", c["codex_image"]); e("SNAP", c.get("model_snap","")); e("GPU_DEV", c.get("gpu","3"))
++e("CASE", c.get("case", os.path.splitext(os.path.basename(sys.argv[1]))[0]))
++e("R_FRAMEWORK", r.get("FRAMEWORK","vllm"))
++e("R_CHECKOUT", r.get("CHECKOUT","/workspace/vllm"))
++e("R_REBUILD", r.get("REBUILD_CMD","python3 setup.py build_ext --inplace"))
++e("R_INSTALL", r.get("INSTALL_CMD",""))
++e("SITE_FW", r.get("FRAMEWORK","vllm"))
++e("JUDGE", c.get("judge","judge_general.py"))
++e("DRIVER", c.get("driver","extract_and_profile.py"))
++e("CFG_TMPL", c.get("task_template","agent_task_iter_opt.md"))
++e("CFG_MODEL", c.get("codex_model","gpt-5.6-luna"))
++e("SHM", c.get("shm_size",""))
++e("EDIT_TREE_PATH", (c.get("edit_tree") or {}).get("container_path",""))
++print("MOUNTS=(" + " ".join(shlex.quote(m) for m in c.get("mounts",[])) + ")")
++PY
++)"
++CODEX_MODEL="${CODEX_MODEL:-$CFG_MODEL}"
++TASK_TMPL="${TASK_TMPL:-$HERE/$CFG_TMPL}"; [ -f "$TASK_TMPL" ] || TASK_TMPL="$HERE/$CFG_TMPL"
++# Under slurm_gpu.sh the allocation exports DOCKER_GPU_ARG (cgroup-scoped UUID); use it
++# so the trial container binds the slurm-assigned GPU. Standalone falls back to config gpu.
++GPU="${DOCKER_GPU_ARG:-\"device=$GPU_DEV\"}"
++SITE="/opt/venv/lib/python3.12/site-packages/$SITE_FW"
++OUT="$HERE/iter_opt_eval_${CASE}"; mkdir -p "$OUT" "$FICACHE" "$GOLDEN_DIR"
++
++# ---- render the task (python, not sed: REBUILD_CMDs contain '&&' which sed treats specially)
++TASK_RUNTIME="$OUT/agent_task_rendered.md"
++python3 - "$CONFIG" "$TASK_TMPL" "$TASK_RUNTIME" <<'PY'
++import json,sys
++c=json.load(open(sys.argv[1])); r=dict(c.get("render",{}))
++r.setdefault("METRIC","per-step decode latency"); r.setdefault("FRAMEWORK","vllm")
++r.setdefault("CHECKOUT","/workspace/vllm"); r.setdefault("MODEL_NAME","the model")
++r.setdefault("WORKLOAD","short-prompt decode"); r.setdefault("TOKENS", c.get("tokens",8))
++r.setdefault("REBUILD_CMD","python3 setup.py build_ext --inplace")
++r["MODEL_SNAP"]=c.get("model_snap","")
++t=open(sys.argv[2]).read()
++for k in sorted(r, key=len, reverse=True):   # longest first: $MODEL_SNAP before $MODEL
++    t=t.replace("$"+k, str(r[k]))
++open(sys.argv[3],"w").write(t)
++left=[l for l in t.splitlines() if "$" in l and any(tok.isupper() for tok in l.split("$")[1:2])]
++print(f"rendered {sys.argv[3]} ({len(t.splitlines())} lines)" + (f"; unresolved: {left[:3]}" if left else ""))
++PY
++
++# ---- pristine copy of the editable in-image tree (once per case) ---------------------------
++PRISTINE=""
++if [ -n "$EDIT_TREE_PATH" ]; then
++  PRISTINE="$OUT/pristine_tree"
++  if [ ! -d "$PRISTINE" ]; then
++    echo "== extracting pristine $EDIT_TREE_PATH from $IMG -> $PRISTINE"
++    tmpc="pristine_${CASE}_$$"; docker rm -f "$tmpc" >/dev/null 2>&1 || true
++    docker create --name "$tmpc" "$IMG" true >/dev/null
++    docker cp "$tmpc:$EDIT_TREE_PATH" "$PRISTINE"
++    docker rm -f "$tmpc" >/dev/null
++    find "$PRISTINE" -name __pycache__ -prune -exec rm -rf {} +
++  fi
++fi
++
++run_trial () {
++  local k="$1" cname="iteropt_${CASE}_run_${k}" log="$OUT/trial_${k}"
++  echo "==================== $CASE TRIAL $k ===================="
++  docker rm -f "$cname" >/dev/null 2>&1 || true
++  local -a extra=()
++  [ -n "$SHM" ] && extra+=(--shm-size "$SHM")
++  for m in "${MOUNTS[@]:-}"; do [ -n "$m" ] && extra+=(-v "$m"); done
++  local tree=""
++  if [ -n "$PRISTINE" ]; then
++    tree="${log}_tree"
++    # a previous trial's container (root) may have left __pycache__ in the tree:
++    # remove the old copy as root via docker, then insist it is gone (a stale
++    # patched tree would make a planted/agent patch fail to apply -> false FAIL).
++    if [ -d "$tree" ]; then
++      docker run --rm -v "$(dirname "$tree"):/p" --entrypoint sh "$IMG" \
++        -c "rm -rf /p/$(basename "$tree") /p/$(basename "$tree")_judged" >/dev/null 2>&1 || true
++      rm -rf "$tree" "${tree}_judged" 2>/dev/null || true
++      if [ -e "$tree" ]; then echo "!! [$k] could not remove stale tree $tree"; exit 1; fi
++    fi
++    # Continuous loop: START_TREE seeds the agent with the current best tree (previous
++    # rounds' accepted edits) instead of the pristine one; the judge then measures its
++    # latency baseline from that same tree (goldens stay pristine).
++    cp -a "${START_TREE:-$PRISTINE}" "$tree"
++    [ -n "${START_TREE:-}" ] && echo "== [$k] seeded agent tree from $START_TREE"
++    extra+=(-v "$tree:$EDIT_TREE_PATH")
++  fi
++  docker run -d --name "$cname" --gpus "$GPU" \
++    -e CUDA_VISIBLE_DEVICES=0 -e HF_HUB_OFFLINE=1 \
++    -e SGLANG_OPT_FUSED_KDA_VERIFY=0 -e TOKENIZERS_PARALLELISM=false \
++    -e CODEX_HOME=/root/.codex-eval \
++    -v "$CODEX_HOME_HOST":/root/.codex-eval \
++    -v /raid/yilegu/models:/raid/yilegu/models:ro \
++    -v "$FICACHE":/root/.cache/flashinfer \
++    "${extra[@]}" \
++    --workdir "$R_CHECKOUT" \
++    "$IMG" sleep infinity >/dev/null
++  docker cp "$HERE/$DRIVER" "$cname:/tmp/$(basename "$DRIVER")"
++  [ "$DRIVER" != "extract_and_profile.py" ] || true
++  docker exec "$cname" mkdir -p /workspace/opt_run
++
++  echo "== [$k] launching Codex agent ($CODEX_MODEL effort=$EFFORT, timeout ${AGENT_TIMEOUT}s)"
++  set +e
++  timeout "$AGENT_TIMEOUT" docker exec -i --workdir "$R_CHECKOUT" "$cname" \
++    codex exec -m "$CODEX_MODEL" -c model_reasoning_effort="$EFFORT" \
++      --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check \
++      "$(cat "$TASK_RUNTIME")" > "${log}_agent.log" 2>&1
++  local acode=$?
++  set -e
++  echo "== [$k] agent exit=$acode (transcript: ${log}_agent.log)"
++
++  docker cp "$cname:/workspace/opt_run" "${log}_opt_run" >/dev/null 2>&1 \
++    && echo "== [$k] saved iteration workspace -> ${log}_opt_run" \
++    || echo "== [$k] (no /workspace/opt_run produced)"
++  # hand the bind-mounted tree back to the host user (container writes as root)
++  if [ -n "$tree" ]; then
++    docker exec "$cname" chown -R "$(id -u):$(id -g)" "$EDIT_TREE_PATH" >/dev/null 2>&1 || true
++  fi
++
++  # Judge-integrity controls (test-only): PLANT_PATCH=<patch> applies a known edit to the
++  # agent's tree after the agent step so a planted slowdown / numerics change can be shown to
++  # FAIL, and the pristine tree (AGENT_TIMEOUT=1, no patch) to score ~0 improvement.
++  if [ -n "${PLANT_PATCH:-}" ] && [ -n "$tree" ]; then
++    echo "== [$k] CONTROL: applying planted patch $PLANT_PATCH to the agent tree"
++    patch -d "$tree" -p1 < "$PLANT_PATCH"
++  fi
++
++  echo "== [$k] deterministic rebuild of the agent's tree"
++  if ! docker exec --workdir "$R_CHECKOUT" "$cname" \
++        bash -lc "$R_REBUILD" > "${log}_build.log" 2>&1; then
++    echo "!! [$k] BUILD FAILED -> FAIL"; tail -15 "${log}_build.log"
++    echo '{"trial":'"$k"',"verdict":"FAIL","reason":"agent left source non-compiling"}' > "${log}_verdict.json"
++    docker rm -f "$cname" >/dev/null 2>&1 || true; return 0
++  fi
++  if [ -n "$R_INSTALL" ]; then
++    echo "== [$k] install step: $R_INSTALL"
++    docker exec "$cname" bash -lc "$R_INSTALL"
++  else
++    echo "== [$k] installing built tree into the wheel ($SITE)"
++    docker exec "$cname" bash -lc "cp -a $R_CHECKOUT/$SITE_FW/. $SITE/"
++  fi
++
++  echo "== [$k] judging ($JUDGE)"
++  set +e
++  if [ -n "$tree" ]; then
++    python3 "$HERE/$JUDGE" --agent-container "$cname" --config "$CONFIG" \
++      --golden-dir "$GOLDEN_DIR" --out "${log}_verdict.json" \
++      --tree-dir "$tree" --pristine-dir "$PRISTINE" \
++      ${START_TREE:+--baseline-tree "$START_TREE"} \
++      ${MIN_IMPROVEMENT:+--min-improvement "$MIN_IMPROVEMENT"}
++  else
++    python3 "$HERE/$JUDGE" --agent-container "$cname" \
++      --config "$CONFIG" --golden-dir "$GOLDEN_DIR" --out "${log}_verdict.json"
++  fi
++  set -e
++  [ -f "${log}_verdict.json" ] || echo '{"verdict":"FAIL","reason":"judge produced no verdict"}' > "${log}_verdict.json"
++  python3 - "$k" "$acode" "${log}_verdict.json" <<'PY'
++import json,sys
++k,ac,f=sys.argv[1:4]
++d=json.load(open(f)); d["trial"]=int(k); d["agent_exit"]=int(ac)
++json.dump(d,open(f,"w"),indent=2)
++PY
++  docker rm -f "$cname" >/dev/null 2>&1 || true
++  echo "== [$k] done -> ${log}_verdict.json"
++}
++
++for k in $(seq "${START:-1}" "$N"); do run_trial "$k"; done
++
++echo "==================== SUMMARY ($CASE) ===================="
++python3 - "$OUT" <<'PY'
++import json,glob,os,sys
++out=sys.argv[1]; rows=[]
++for f in sorted(glob.glob(os.path.join(out,"trial_*_verdict.json"))):
++    rows.append(json.load(open(f)))
++p=sum(1 for d in rows if d.get("verdict")=="PASS")
++for d in rows:
++    print(f"  trial {d.get('trial')}: {d.get('verdict'):4s} "
++          f"improvement/recovered={d.get('recovered_frac')} lat={d.get('latency_us')}us "
++          f"correct={(d.get('correctness') or {}).get('pass')} reason={d.get('reason')}")
++print(f"  PASS {p}/{len(rows)}")
++PY

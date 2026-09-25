@@ -1,0 +1,544 @@
+diff -ruN -x __pycache__ -x '*.pyc' a/kernels/jit/csrc/attention/kda_fused_decode.cuh b/kernels/jit/csrc/attention/kda_fused_decode.cuh
+--- a/kernels/jit/csrc/attention/kda_fused_decode.cuh	2026-09-18 02:16:55.000000000 -0700
++++ b/kernels/jit/csrc/attention/kda_fused_decode.cuh	2026-09-24 03:06:27.647750753 -0700
+@@ -42,6 +42,7 @@
+ 
+ #include <cstdint>
+ #include <cstdlib>
++#include <type_traits>
+ #include <cuda_bf16.h>
+ #include <cuda_runtime.h>
+ 
+@@ -153,36 +154,77 @@
+   return __float2bfloat16(value);
+ }
+ 
+-template <bool kUseCacheGlobalStore>
+-SGL_DEVICE void store_state_float4(float* ptr, float4 value) {
+-  if constexpr (kUseCacheGlobalStore) {
+-    __stcg(reinterpret_cast<float4*>(ptr), value);
++SGL_DEVICE float bf16_round(float value) {
++  return __bfloat162float(__float2bfloat16(value));
++}
++
++SGL_DEVICE float conv_silu_bf16(float value) {
++  return bf16_round(value / (1.0f + expf(-value)));
++}
++
++template <typename StateT>
++SGL_DEVICE float4 load_state4(const StateT* ptr) {
++  if constexpr (std::is_same_v<StateT, float>) {
++    return *reinterpret_cast<const float4*>(ptr);
++  } else {
++    return make_float4(
++        __bfloat162float(ptr[0]),
++        __bfloat162float(ptr[1]),
++        __bfloat162float(ptr[2]),
++        __bfloat162float(ptr[3]));
++  }
++}
++
++template <bool kUseCacheGlobalStore, typename StateT>
++SGL_DEVICE void store_state4(StateT* ptr, float4 value) {
++  if constexpr (std::is_same_v<StateT, float>) {
++    if constexpr (kUseCacheGlobalStore) {
++      __stcg(reinterpret_cast<float4*>(ptr), value);
++    } else {
++      *reinterpret_cast<float4*>(ptr) = value;
++    }
+   } else {
+-    *reinterpret_cast<float4*>(ptr) = value;
++    reinterpret_cast<__nv_bfloat162*>(ptr)[0] =
++        __float22bfloat162_rn(make_float2(value.x, value.y));
++    reinterpret_cast<__nv_bfloat162*>(ptr)[1] =
++        __float22bfloat162_rn(make_float2(value.z, value.w));
+   }
+ }
+ 
+-template <int kCopyThreads>
++template <int kCopyThreads, typename StateT>
+ SGL_DEVICE void
+-cp_async_state_chunk_for(float* s_state, const float* state, int slot, int i_hv, int64_t state_slot_stride, int chunk) {
+-  constexpr int kFloat4PerChunk = kChunkV * kDimK / 4;
++cp_async_state_chunk_for(
++    StateT* s_state,
++    const StateT* state,
++    int slot,
++    int i_hv,
++    int64_t state_slot_stride,
++    int chunk) {
++  constexpr int kElementsPerCopy = 16 / sizeof(StateT);
++  constexpr int kCopiesPerChunk = kChunkV * kDimK / kElementsPerCopy;
+   const int tid = threadIdx.x;
+   const int stage = chunk & 1;
+   const int v_base = chunk * kChunkV;
+   const int64_t slot_base = static_cast<int64_t>(slot) * state_slot_stride;
+-  for (int linear4 = tid; linear4 < kFloat4PerChunk; linear4 += kCopyThreads) {
+-    const int elem = linear4 * 4;
++  for (int linear = tid; linear < kCopiesPerChunk; linear += kCopyThreads) {
++    const int elem = linear * kElementsPerCopy;
+     const int row = elem / kDimK;
+     const int k = elem - row * kDimK;
+-    float* dst = s_state + (stage * kChunkV + row) * kDimK + k;
+-    const float* src = state + slot_base + ((i_hv * kDimV + v_base + row) * kDimK + k);
++    StateT* dst = s_state + (stage * kChunkV + row) * kDimK + k;
++    const StateT* src = state + slot_base + ((i_hv * kDimV + v_base + row) * kDimK + k);
+     ptx::cp_async_cg_16b(dst, src);
+   }
+   ptx::cp_async_commit_group();
+ }
+ 
+-SGL_DEVICE void
+-cp_async_state_chunk(float* s_state, const float* state, int slot, int i_hv, int64_t state_slot_stride, int chunk) {
++template <typename StateT>
++SGL_DEVICE void cp_async_state_chunk(
++    StateT* s_state,
++    const StateT* state,
++    int slot,
++    int i_hv,
++    int64_t state_slot_stride,
++    int chunk) {
+   cp_async_state_chunk_for<kThreads>(s_state, state, slot, i_hv, state_slot_stride, chunk);
+ }
+ 
+@@ -194,23 +236,23 @@
+ 
+ // 1D TMA bulk copy gmem -> smem; the issuing thread arrives with expect-tx on
+ // the mbarrier, completion is observed via ptx::mbar_wait_parity.
+-template <int kStageChunkV>
++template <int kStageChunkV, typename StateT>
+ SGL_DEVICE void tma_state_chunk_stage(
+-    float* s_state,
+-    const float* state,
++    StateT* s_state,
++    const StateT* state,
+     int slot,
+     int i_hv,
+     int64_t state_slot_stride,
+     int chunk,
+     int stage,
+     uint64_t* bar) {
+-  constexpr uint32_t kBytes = kStageChunkV * kDimK * sizeof(float);
+-  float* dst = s_state + stage * kStageChunkV * kDimK;
++  constexpr uint32_t kBytes = kStageChunkV * kDimK * sizeof(StateT);
++  StateT* dst = s_state + stage * kStageChunkV * kDimK;
+   // 16B-aligned for any slot iff state_slot_stride*sizeof(float) % 16 == 0
+   // (host gates TMA off otherwise); the intra-slot chunk offset is a multiple
+   // of kStageChunkV*kDimK*4, always 16B-aligned.
+   const int64_t slot_base = static_cast<int64_t>(slot) * state_slot_stride;
+-  const float* src = state + slot_base + ((i_hv * kDimV + chunk * kStageChunkV) * kDimK);
++  const StateT* src = state + slot_base + ((i_hv * kDimV + chunk * kStageChunkV) * kDimK);
+ #if KDA_FUSED_DECODE_HAS_TMA
+   ptx::fence_async_smem();
+   ptx::mbar_arrive_expect_tx(bar, kBytes);
+@@ -386,7 +428,8 @@
+     bool kApplyBetaSigmoid = true,
+     bool kUseTmaLoad = false,
+     int kTmaStages = kNumChunks,
+-    bool kUsePDL = false>
++    bool kUsePDL = false,
++    typename StateT = float>
+ // Shapes below use K3's per-TP-rank sizing (linear_attn_config: num_heads=96 over
+ // TP={8,16,32} -> H=HV={12,6,3} local heads; head_dim=128 -> kDimK=kDimV=128; kSeg = H*128;
+ // short_conv_kernel_size=4 -> kKernelWidth=4, kConvStateWidth=3). B is the live
+@@ -415,7 +458,7 @@
+     const int* __restrict__ ssm_state_indices,  // [B] recurrent-state slot per token; <0 marks a padded cuda-graph slot
+     const int* __restrict__ cu_seqlens,         // [B+1] token offsets into x_q/x_k/x_v/g/beta; unused under
+                                                 // kUseStaticDecodeLayout
+-    float* __restrict__ state,  // [slots, HV, 128, 128] recurrent KDA state h, inner [V,K] contiguous, slot pitch =
++    StateT* __restrict__ state,  // [slots, HV, 128, 128] recurrent KDA state h, inner [V,K] contiguous, slot pitch =
+                                 // state_slot_stride
+     __nv_bfloat16* __restrict__ out,  // [B, hv_count*128] fused-decode output, row i_n, col i_hv*128 + v
+     int B,                            // live decode batch size (token count for this launch)
+@@ -488,7 +531,8 @@
+ 
+   // Dynamic size: 2 cp.async stages (32KB) or kTmaStages TMA stages (16KB per
+   // stage; kTmaStages == kNumChunks means no buffer reuse).
+-  extern __shared__ __align__(16) float s_state[];
++  extern __shared__ __align__(16) unsigned char s_state_storage[];
++  StateT* s_state = reinterpret_cast<StateT*>(s_state_storage);
+   __shared__ float s_q[kDimK];
+   __shared__ float s_k[kDimK];
+   __shared__ float s_decay[kDimK];
+@@ -561,8 +605,8 @@
+       cs_k[cs_base + cs_w_stride] = k_shift1;
+       cs_k[cs_base + 2 * cs_w_stride] = k_new;
+ 
+-      s_q[k] = device::math::silu_fast(q_acc);
+-      s_k[k] = device::math::silu_fast(k_acc);
++      s_q[k] = conv_silu_bf16(q_acc);
++      s_k[k] = conv_silu_bf16(k_acc);
+ 
+       const float g_raw = bf16_load(g, bos * g_row_stride + i_hv * kDimK + k) + dt_bias[hk];
+       if constexpr (kUseLowerBound) {
+@@ -588,8 +632,8 @@
+       q_acc += bf16_load(x_q, bos * x_row_stride + hk) * fp32_at(w_q_t, (kKernelWidth - 1) * hkv_dim + hk);
+       k_acc += bf16_load(x_k, bos * x_row_stride + hk) * fp32_at(w_k_t, (kKernelWidth - 1) * hkv_dim + hk);
+ 
+-      s_q[k] = device::math::silu_fast(q_acc);
+-      s_k[k] = device::math::silu_fast(k_acc);
++      s_q[k] = conv_silu_bf16(q_acc);
++      s_k[k] = conv_silu_bf16(k_acc);
+ 
+       const float g_raw = bf16_load(g, bos * g_row_stride + i_hv * kDimK + k) + dt_bias[hk];
+       if constexpr (kUseLowerBound) {
+@@ -625,7 +669,7 @@
+       cs_v[cs_base + 0] = v_shift0;
+       cs_v[cs_base + cs_w_stride] = v_shift1;
+       cs_v[cs_base + 2 * cs_w_stride] = v_new;
+-      s_v[v] = device::math::silu_fast(v_acc);
++      s_v[v] = conv_silu_bf16(v_acc);
+ 
+       if constexpr (kApplyOnorm && kPreloadOnormParams) {
+         const int64_t onorm_idx = i_n * onormg_row_stride + i_hv * kDimV + v;
+@@ -645,7 +689,7 @@
+         v_acc += bf16_load(cs_v, cs_idx) * fp32_at(w_v_t, w * hvv_dim + hvv);
+       }
+       v_acc += bf16_load(x_v, bos * x_row_stride + hvv) * fp32_at(w_v_t, (kKernelWidth - 1) * hvv_dim + hvv);
+-      s_v[v] = device::math::silu_fast(v_acc);
++      s_v[v] = conv_silu_bf16(v_acc);
+ 
+       if constexpr (kApplyOnorm && kPreloadOnormParams) {
+         const int64_t onorm_idx = i_n * onormg_row_stride + i_hv * kDimV + v;
+@@ -719,7 +763,7 @@
+       }
+     }
+ 
+-    const float* state_stage = s_state + (kUseTmaLoad ? (chunk % kTmaStages) : (chunk & 1)) * kChunkV * kDimK;
++    const StateT* state_stage = s_state + (kUseTmaLoad ? (chunk % kTmaStages) : (chunk & 1)) * kChunkV * kDimK;
+ 
+ #pragma unroll
+     for (int row = 0; row < kRowsPerWarp; row += 2) {
+@@ -732,8 +776,8 @@
+       float dot_hk_a = 0.0f;
+       float dot_hk_b = 0.0f;
+ 
+-      const float4 raw_h_a = *reinterpret_cast<const float4*>(state_stage + v_row_a * kDimK + k_base);
+-      const float4 raw_h_b = *reinterpret_cast<const float4*>(state_stage + v_row_b * kDimK + k_base);
++      const float4 raw_h_a = load_state4(state_stage + v_row_a * kDimK + k_base);
++      const float4 raw_h_b = load_state4(state_stage + v_row_b * kDimK + k_base);
+       h_a_vals[0] = raw_h_a.x * r_decay[0];
+       h_a_vals[1] = raw_h_a.y * r_decay[1];
+       h_a_vals[2] = raw_h_a.z * r_decay[2];
+@@ -767,19 +811,19 @@
+       if constexpr (kComputeOutputBeforeStore) {
+         dot_hq_a = h_a_0 * r_q[0] + h_a_1 * r_q[1] + h_a_2 * r_q[2] + h_a_3 * r_q[3];
+         dot_hq_b = h_b_0 * r_q[0] + h_b_1 * r_q[1] + h_b_2 * r_q[2] + h_b_3 * r_q[3];
+-        store_state_float4<kUseCacheGlobalStore>(state + state_idx_a, make_float4(h_a_0, h_a_1, h_a_2, h_a_3));
+-        store_state_float4<kUseCacheGlobalStore>(state + state_idx_b, make_float4(h_b_0, h_b_1, h_b_2, h_b_3));
++        store_state4<kUseCacheGlobalStore>(state + state_idx_a, make_float4(h_a_0, h_a_1, h_a_2, h_a_3));
++        store_state4<kUseCacheGlobalStore>(state + state_idx_b, make_float4(h_b_0, h_b_1, h_b_2, h_b_3));
+       } else {
+-        store_state_float4<kUseCacheGlobalStore>(state + state_idx_a, make_float4(h_a_0, h_a_1, h_a_2, h_a_3));
+-        store_state_float4<kUseCacheGlobalStore>(state + state_idx_b, make_float4(h_b_0, h_b_1, h_b_2, h_b_3));
++        store_state4<kUseCacheGlobalStore>(state + state_idx_a, make_float4(h_a_0, h_a_1, h_a_2, h_a_3));
++        store_state4<kUseCacheGlobalStore>(state + state_idx_b, make_float4(h_b_0, h_b_1, h_b_2, h_b_3));
+         dot_hq_a = h_a_0 * r_q[0] + h_a_1 * r_q[1] + h_a_2 * r_q[2] + h_a_3 * r_q[3];
+         dot_hq_b = h_b_0 * r_q[0] + h_b_1 * r_q[1] + h_b_2 * r_q[2] + h_b_3 * r_q[3];
+       }
+ 
+       const Sum2 dot_hq = warp_reduce_sum_pair(dot_hq_a, dot_hq_b);
+       if (lane == 0) {
+-        s_o[v0] = dot_hq.x;
+-        s_o[v1] = dot_hq.y;
++        s_o[v0] = bf16_round(dot_hq.x);
++        s_o[v1] = bf16_round(dot_hq.y);
+         if constexpr (kApplyOnorm && kAccumulateOnormSumsq) {
+           o_sumsq += dot_hq.x * dot_hq.x + dot_hq.y * dot_hq.y;
+         }
+@@ -887,7 +931,13 @@
+ // and lower-bounded sigmoid) and selected at launch from the model config.
+ // kUseTmaLoad/kTmaStages select the 1D-TMA state-staging path in place of the
+ // cp.async fallback used for a misaligned recurrent-state slot stride.
+-template <int kFixedHeads, bool kUseLowerBound, bool kUsePDL, bool kUseTmaLoad = false, int kTmaStages = kNumChunks>
++template <
++    int kFixedHeads,
++    bool kUseLowerBound,
++    bool kUsePDL,
++    typename StateT = float,
++    bool kUseTmaLoad = false,
++    int kTmaStages = kNumChunks>
+ constexpr auto kda_fused_decode_k3_kernel = kda_decode_fusion_many_heads_kernel<
+     /*kApplyOnorm=*/true,
+     /*kUseStaticDecodeLayout=*/true,
+@@ -907,26 +957,28 @@
+     /*kApplyBetaSigmoid=*/true,
+     kUseTmaLoad,
+     kTmaStages,
+-    kUsePDL>;
++    kUsePDL,
++    StateT>;
+ 
+-template <int kFixedHeads, bool kUsePDL>
++template <int kFixedHeads, bool kUsePDL, typename StateT>
+ auto select_kda_fused_decode_k3_kernel(bool use_lower_bound, int tma_stages) {
+   if (tma_stages == 3) {
+-    return use_lower_bound ? kda_fused_decode_k3_kernel<kFixedHeads, true, kUsePDL, true, 3>
+-                           : kda_fused_decode_k3_kernel<kFixedHeads, false, kUsePDL, true, 3>;
++    return use_lower_bound ? kda_fused_decode_k3_kernel<kFixedHeads, true, kUsePDL, StateT, true, 3>
++                           : kda_fused_decode_k3_kernel<kFixedHeads, false, kUsePDL, StateT, true, 3>;
+   }
+   if (tma_stages == 4) {
+-    return use_lower_bound ? kda_fused_decode_k3_kernel<kFixedHeads, true, kUsePDL, true, 4>
+-                           : kda_fused_decode_k3_kernel<kFixedHeads, false, kUsePDL, true, 4>;
++    return use_lower_bound ? kda_fused_decode_k3_kernel<kFixedHeads, true, kUsePDL, StateT, true, 4>
++                           : kda_fused_decode_k3_kernel<kFixedHeads, false, kUsePDL, StateT, true, 4>;
+   }
+-  return use_lower_bound ? kda_fused_decode_k3_kernel<kFixedHeads, true, kUsePDL>
+-                         : kda_fused_decode_k3_kernel<kFixedHeads, false, kUsePDL>;
++  return use_lower_bound ? kda_fused_decode_k3_kernel<kFixedHeads, true, kUsePDL, StateT>
++                         : kda_fused_decode_k3_kernel<kFixedHeads, false, kUsePDL, StateT>;
+ }
+ 
+ template <bool kUsePDL>
+ struct KdaFusedDecodeKernel {
++  template <typename StateT>
+   static void
+-  run(const tvm::ffi::TensorView mixed_qkv,     // [B, 3*H*128] bf16, row-strided
++  run_impl(const tvm::ffi::TensorView mixed_qkv,     // [B, 3*H*128] bf16, row-strided
+       const tvm::ffi::TensorView a,             // [B, H*128] bf16 raw forget gate
+       const tvm::ffi::TensorView b,             // [B, H] bf16 raw beta logits
+       const tvm::ffi::TensorView conv_states,   // [slots, 3, conv_dim] bf16 pool
+@@ -938,7 +990,7 @@
+       const tvm::ffi::TensorView dt_bias,       // [H*128] fp32
+       const tvm::ffi::TensorView onorm_g,       // [B, H*128] bf16, row-strided
+       const tvm::ffi::TensorView onorm_weight,  // [128] fp32
+-      const tvm::ffi::TensorView state,         // [slots, H, 128, 128] fp32; inner-contiguous, any slot pitch
++      const tvm::ffi::TensorView state,         // [slots, H, 128, 128] state dtype; inner-contiguous, any slot pitch
+       const tvm::ffi::TensorView indices,       // [B] int32 (< 0 = padded slot)
+       const tvm::ffi::TensorView out,           // [B, H*128] bf16 dense
+       double scale,
+@@ -978,7 +1030,7 @@
+     // slot pitch from state.stride(0); only the inner [HV, V, K] contiguity
+     // (strides {V*K, K, 1}) is load-bearing here.
+     TensorMatcher({Slots_, kH, 128, 128})
+-        .with_dtype<fp32_t>()
++        .with_dtype<StateT>()
+         .with_device(device)
+         .with_strides({-1, 128 * 128, 128, 1})
+         .verify(state);
+@@ -1000,23 +1052,27 @@
+     // TMA 1D-bulk needs the per-slot source address (state + slot*stride) 16B
+     // aligned for every slot. state.data_ptr() is torch-aligned and each chunk
+     // offset is a multiple of kChunkV*kDimK*4 B, so alignment holds iff the slot
+-    // pitch itself is 16B-aligned, i.e. state_slot_stride % 4 == 0 (fp32). The
++    // pitch itself is 16B-aligned, i.e. state_slot_stride % (16 / sizeof(StateT)) == 0. The
+     // K3 envelope pitch (14,042,880 elems, %4==0) and the dense pitch both
+     // satisfy this; a pathological stride falls back to cp.async (still fully
+     // fused, just no TMA) rather than silently mis-addressing the descriptor.
+-    const bool tma_slot_stride_aligned = (state_slot_stride % 4) == 0;
++    const bool tma_slot_stride_aligned = (state_slot_stride % (16 / sizeof(StateT))) == 0;
+     if (tma_slot_stride_aligned) {
+       // Full-state staging (4 stages, 64KB, sync-free) wins while the grid
+       // is small enough that occupancy isn't the limiter; past that the
+       // 48KB 3-stage variant (one sync for the single stage reuse) benches
+       // fastest.
+-      tma_stages = B * static_cast<int>(kH) >= 512 ? 3 : 4;
++      if constexpr (std::is_same_v<StateT, float>) {
++        tma_stages = B * static_cast<int>(kH) >= 512 ? 3 : 4;
++      } else {
++        tma_stages = 4;
++      }
+     }
+-    auto kernel = kH == 3 ? select_kda_fused_decode_k3_kernel<3, kUsePDL>(use_lower_bound, tma_stages)
+-                          : (kH == 6 ? select_kda_fused_decode_k3_kernel<6, kUsePDL>(use_lower_bound, tma_stages)
+-                                     : select_kda_fused_decode_k3_kernel<12, kUsePDL>(use_lower_bound, tma_stages));
++    auto kernel = kH == 3 ? select_kda_fused_decode_k3_kernel<3, kUsePDL, StateT>(use_lower_bound, tma_stages)
++                          : (kH == 6 ? select_kda_fused_decode_k3_kernel<6, kUsePDL, StateT>(use_lower_bound, tma_stages)
++                                     : select_kda_fused_decode_k3_kernel<12, kUsePDL, StateT>(use_lower_bound, tma_stages));
+     const int smem_stages = tma_stages == 0 ? 2 : tma_stages;
+-    const size_t smem_bytes = static_cast<size_t>(smem_stages) * kChunkV * kDimK * sizeof(float);
++    const size_t smem_bytes = static_cast<size_t>(smem_stages) * kChunkV * kDimK * sizeof(StateT);
+     host::RuntimeDeviceCheck(
+         cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, static_cast<int>(smem_bytes)));
+ 
+@@ -1043,7 +1099,7 @@
+             static_cast<const fp32_t*>(onorm_weight.data_ptr()),
+             static_cast<const int32_t*>(indices.data_ptr()),
+             /*cu_seqlens=*/static_cast<const int32_t*>(nullptr),
+-            static_cast<fp32_t*>(state.data_ptr()),
++            static_cast<StateT*>(state.data_ptr()),
+             static_cast<__nv_bfloat16*>(out.data_ptr()),
+             B,
+             /*H=*/static_cast<int>(kH),
+@@ -1059,6 +1115,74 @@
+             conv_states.stride(1),
+             state_slot_stride);
+   }
++
++  static void
++  run(const tvm::ffi::TensorView mixed_qkv,
++      const tvm::ffi::TensorView a,
++      const tvm::ffi::TensorView b,
++      const tvm::ffi::TensorView conv_states,
++      const tvm::ffi::TensorView w_q_t,
++      const tvm::ffi::TensorView w_k_t,
++      const tvm::ffi::TensorView w_v_t,
++      const tvm::ffi::TensorView conv_bias,
++      const tvm::ffi::TensorView A_log,
++      const tvm::ffi::TensorView dt_bias,
++      const tvm::ffi::TensorView onorm_g,
++      const tvm::ffi::TensorView onorm_weight,
++      const tvm::ffi::TensorView state,
++      const tvm::ffi::TensorView indices,
++      const tvm::ffi::TensorView out,
++      double scale,
++      double onorm_eps,
++      double lower_bound,
++      bool use_lower_bound) {
++    using namespace host;
++    if (is_type<bf16_t>(state.dtype())) {
++      run_impl<bf16_t>(
++          mixed_qkv,
++          a,
++          b,
++          conv_states,
++          w_q_t,
++          w_k_t,
++          w_v_t,
++          conv_bias,
++          A_log,
++          dt_bias,
++          onorm_g,
++          onorm_weight,
++          state,
++          indices,
++          out,
++          scale,
++          onorm_eps,
++          lower_bound,
++          use_lower_bound);
++    } else if (is_type<fp32_t>(state.dtype())) {
++      run_impl<fp32_t>(
++          mixed_qkv,
++          a,
++          b,
++          conv_states,
++          w_q_t,
++          w_k_t,
++          w_v_t,
++          conv_bias,
++          A_log,
++          dt_bias,
++          onorm_g,
++          onorm_weight,
++          state,
++          indices,
++          out,
++          scale,
++          onorm_eps,
++          lower_bound,
++          use_lower_bound);
++    } else {
++      RuntimeCheck(false, "KDA fused decode state must be bfloat16 or float32, got ", state.dtype());
++    }
++  }
+ };
+ 
+ }  // namespace sglang
+diff -ruN -x __pycache__ -x '*.pyc' a/kernels/ops/attention/fla/fused_recurrent.py b/kernels/ops/attention/fla/fused_recurrent.py
+--- a/kernels/ops/attention/fla/fused_recurrent.py	2026-09-18 02:16:55.000000000 -0700
++++ b/kernels/ops/attention/fla/fused_recurrent.py	2026-09-23 06:51:33.279699466 -0700
+@@ -628,6 +628,8 @@
+     # part (~9.6 TB/s) where this triton kernel tops out at ~5 TB/s holding a
+     # [BV, K] register tile per warp. ULP-level output differences only
+     # (reduction order); small batches keep triton (launch-bound anyway).
++    # kda_packed_decode.cuh implements both the standard softplus gate and
++    # KDA's safe lower-bound gate; pass the bound through to that kernel.
+     if use_qk_l2norm_in_kernel:
+         from sglang.kernels.ops.attention import kda_packed_decode as kda_decode_cuda
+ 
+diff -ruN -x __pycache__ -x '*.pyc' a/kernels/ops/attention/kda_fused_decode.py b/kernels/ops/attention/kda_fused_decode.py
+--- a/kernels/ops/attention/kda_fused_decode.py	2026-09-18 02:16:55.000000000 -0700
++++ b/kernels/ops/attention/kda_fused_decode.py	2026-09-24 02:52:24.452488193 -0700
+@@ -61,8 +61,8 @@
+     onorm_g: torch.Tensor,
+ ) -> bool:
+     """The kernel is compiled for the K3 KDA decode regime: H heads of 128,
+-    packed [T, 3*H*128] qkv rows, transposed [slots, 3, 3*H*128] conv pool, fp32
+-    [slots, H, 128, 128] ssm pool (inner-contiguous, any slot pitch — the
++    packed [T, 3*H*128] qkv rows, transposed [slots, 3, 3*H*128] conv pool, BF16
++    or FP32 [slots, H, 128, 128] ssm pool (inner-contiguous, any slot pitch — the
+     kernel reads the real slot stride), one token per request."""
+     if ssm_states.ndim < 4:
+         return False
+@@ -89,7 +89,7 @@
+         and b.dtype == torch.bfloat16
+         and onorm_g.dtype == torch.bfloat16
+         and conv_states.dtype == torch.bfloat16
+-        and ssm_states.dtype == torch.float32
++        and ssm_states.dtype in (torch.bfloat16, torch.float32)
+         and cache_indices.dtype == torch.int32
+         and mixed_qkv.stride(-1) == 1
+         and a.stride(-1) == 1
+diff -ruN -x __pycache__ -x '*.pyc' a/srt/layers/attention/linear/kda_backend.py b/srt/layers/attention/linear/kda_backend.py
+--- a/srt/layers/attention/linear/kda_backend.py	2026-09-18 02:16:55.000000000 -0700
++++ b/srt/layers/attention/linear/kda_backend.py	2026-09-23 06:11:15.556367933 -0700
+@@ -735,11 +735,9 @@
+             conv_state_indices=cache_indices,
+         )
+ 
+-        # The packed kernel assumes one token per request.
+-        if (
+-            self.kernel_dispatcher.supports_packed_decode
+-            and getattr(layer, "lower_bound", None) is None
+-        ):
++        # The packed kernel assumes one token per request. Its Triton KDA
++        # implementation also handles the KDA safe gate (lower_bound).
++        if self.kernel_dispatcher.supports_packed_decode:
+             assert qkv.shape[0] == cache_indices.shape[0], (
+                 "KDA packed decode requires one token per sequence (T=1): "
+                 f"got {qkv.shape[0]} tokens for {cache_indices.shape[0]} requests."
+diff -ruN -x __pycache__ -x '*.pyc' a/srt/models/kimi_k3.py b/srt/models/kimi_k3.py
+--- a/srt/models/kimi_k3.py	2026-09-18 02:16:55.000000000 -0700
++++ b/srt/models/kimi_k3.py	2026-09-23 07:07:11.894971186 -0700
+@@ -196,6 +196,20 @@
+             (x.shape[0], weight.shape[0]), dtype=out_dtype, device=x.device
+         )
+     if x.dtype == torch.bfloat16 and weight.dtype == torch.bfloat16:
++        if (
++            out_dtype is None
++            and weight.shape == (7168, 6144)
++            and x.shape[0] <= 128
++            and x.is_contiguous()
++        ):
++            from sglang.kernels.ops.gemm.cutedsl_bf16_gemm import (
++                cutedsl_bf16_gemm,
++                cutedsl_bf16_gemm_out,
++            )
++
++            if out is None:
++                return cutedsl_bf16_gemm(x, weight)
++            return cutedsl_bf16_gemm_out(x, weight, out)
+         from sglang.srt.layers.quantization.unquant import get_bf16_gemm_backend
+ 
+         if get_bf16_gemm_backend().is_cutedsl():
+@@ -1318,8 +1332,27 @@
+                     prefix_sum,
+                 )
+         else:  # single collective over the flat [latent | shared] pair
+-            self._forward_shared(gate_up, shared_output)
++            # With one rank there is no collective to overlap, so issue the
++            # independent shared-down GEMM on the existing side stream while
++            # the routed MXFP4 path uses the current stream. Keep the
++            # multi-rank and AR-fusion schedules unchanged.
++            overlap_shared = (
++                self.alt_stream is not None
++                and self.tp_size == 1
++                and not k3_ar_fusion.enabled()
++            )
++            shared_event = None
++            if overlap_shared:
++                current_stream = torch.cuda.current_stream()
++                self.alt_stream.wait_stream(current_stream)
++                with torch.cuda.stream(self.alt_stream):
++                    self._forward_shared(gate_up, shared_output)
++                    shared_event = self.alt_stream.record_event()
++            else:
++                self._forward_shared(gate_up, shared_output)
+             self._forward_routed(hidden_states, router_logits, routed_input, latent)
++            if shared_event is not None:
++                current_stream.wait_event(shared_event)
+             if self.fuse_ar_norm and k3_ar_fusion.enabled():
+                 fused_norm = True
+                 k3_ar_fusion.all_reduce_norm(

@@ -253,7 +253,58 @@ moves the critical path (stacked check: −4.8%, not −7%).
     the single-layer driver did not — harmless here (≤0.7%), found only because a VibeSim runner tried to
     reproduce the layer's exact launches.
 
-## 6. Reproduce
+## 6. Code changes, as patches
+
+`patches/` (regenerate with `./export_k3_patches.sh`, which also verifies that applying each chain onto a copy
+of the pristine `python/sglang` tree reproduces the case's best tree exactly). Apply inside `python/sglang`
+of `lmsysorg/sglang:v0.5.20` with `patch -p1`.
+
+### MLA layer — six accepted levers, in acceptance order (cumulative 304.6 → 253.5 µs @1×1M, −16.8%)
+
+| patch | files | key change | Δ when accepted |
+|---|---|---|---|
+| `sglang/mla/01_r08_cutedsl_to_trtllm_mla_decode.patch` | `srt/layers/attention/cutedsl_mla_backend.py` (5 lines) | non-DCP decode: `backend="cute-dsl"` → `"trtllm-gen"` (DCP keeps the explicit CuteDSL path in `_run_decode_kernel`) | −12.1% |
+| `sglang/mla/02_r20_route_quant_fused_112_top2.patch` | `kernels/jit/csrc/moe/route_quant_fused.cuh`, `route_radix.cuh`, `kernels/ops/moe/moe_route_quant_fused.py`, `srt/layers/moe/topk.py`, `kernels/ops/attention/set_mla_kv_concat_q.py` (277 lines) | fused route+quant JIT specialised to `kNumExperts = 112`, `kTopK = 2` (the EP8 rank's local shape; production routes 896/top-16 globally — harness-specific) | +0.75% |
+| `sglang/mla/03_r21_front_fp32_gemm_cute_tgv.patch` | `srt/models/kimi_k3.py` (16 lines) | in `_k3_bf16_gemm`: fp32-output front GEMMs `(15984,7168)`/`(6016,7168)` at `m ≤ 16` → `cutedsl_bf16_gemm_out` instead of cuBLAS (fp32 accumulator kept, routing stays exact) | +1.5% (+3.2% @128×8k) |
+| `sglang/mla/04_r23_latent_up_shared_down_bf16_tgv.patch` | `srt/models/kimi_k3.py` (33 lines) | `latent_up` `(7168,3584)` and `shared_down` `(7168,6144)` at `m ≤ 16` → CuTe TGV (`cutedsl_bf16_gemm[_out]`); `routed_expert_up_proj` routed through `_k3_bf16_gemm` | +1.5% |
+| `sglang/mla/05_r24_shared_routed_alt_stream_overlap.patch` | `srt/models/kimi_k3.py` (12 lines) | `KimiK3MoE._forward_fused`: `_forward_shared` on `self.alt_stream` while `_forward_routed` runs on the current stream; `wait_stream` join before the collective | +2.4% |
+| `sglang/mla/06_r25_is_var_seq_persistent_kvconcat_warps.patch` | `srt/layers/attention/trtllm_mla_backend.py`, `kernels/ops/attention/set_mla_kv_concat_q.py`, `kernels/jit/csrc/elementwise/set_mla_kv_concat_q.cuh` (26 lines) | `extra_kwargs["is_var_seq"] = False` for the fp8 K3 layout (FlashInfer: `is_persistent = not is_var_seq`, a schedule choice — verified on mixed lengths); 16-warp CTA for the 13-item B=1 KV-concat grid | +0.8% |
+
+`sglang/mla_best_tree_vs_pristine.patch` is the cumulative patch (9 files, 361 changed lines).
+
+### KDA layer — two patches (cumulative 403.0 → 379.4 µs @B=128, −5.9%)
+
+| patch | files | key change | Δ |
+|---|---|---|---|
+| `sglang/kda/01_stacked_fastpath_overlap_cutedsl_gemm_warps.patch` | `srt/layers/attention/linear/kda_backend.py`, `srt/models/kimi_k3.py`, `kernels/ops/attention/fla/fused_recurrent.py` (44 lines) | packed KDA decode fast path no longer excluded for `lower_bound` layers (the kernel implements the safe gate); shared `down` `(7168,6144)` at `m ≤ 128` → CuTe bf16 GEMM; shared-down issued on the side stream (single-rank, no AR fusion) with an event join; `num_warps` tuning of the recurrent kernel | −4.8% (stacked from trials 8/10/11) |
+| `sglang/kda/02_r22_bf16_state_fused_kda_decode_kernel.patch` | `kernels/jit/csrc/attention/kda_fused_decode.cuh`, `kernels/ops/attention/kda_fused_decode.py` (242 lines) | bf16-state port of the fused conv+delta-rule+gated-norm decode kernel: `__nv_bfloat162` state loads/stores, `bf16_round`/`conv_silu_bf16` to match the unfused chain's rounding, `covered()` accepts the bf16 state (cookbook `--mamba-ssm-dtype bfloat16`) | +1.3% (@B=32 +2.5%, @B=1 +3.1%) |
+
+`sglang/kda_best_tree_vs_pristine.patch` cumulative (5 files, 286 lines).
+
+Both cumulative trees passed: the original pristine goldens (rel_err ≤ 0.014), two extra seeds each (rel_err
+≤ 0.011), the MLA mixed-length point, and the B=512/256 transfer checks.
+
+### Harness and VibeSim
+
+- `patches/harness/01_driver_kimi_single_layer_decode.patch` — the single-layer extractor/driver: production-shape
+  layer build (`--attn-heads 12 --experts 112 --local-topk 2`, fp8 KV, bf16 state), CUDA-graph timing, seeded
+  goldens (`--capture/--replay`, output + post-step state), mixed-length and chunked-prefill points
+  (`B,L,mix`, `B,L,pf[<prefix>]`), row-wise prefill CHECK, `--profile-kernels`, `--nvtx-align`, `--bf16-gemm-init`.
+- `patches/harness/02_judge_runner_prompt_cases.patch` — `judge_k3.py` (pristine baseline + goldens per case key,
+  source-only diff re-applied onto pristine, gates, `--baseline-tree` continuous mode), `run_iter_opt_eval.sh`
+  (`START_TREE`, mounts), the agent prompt, the six case configs.
+- `patches/harness/03_loop_orchestration_scripts.patch` — continuous loop (`run_k3_continuous.sh`, alternate runner,
+  GPU waiters, transfer checks, campaign chains). `04_warm_start_history.patch` — `build_opt_history.py` +
+  `opt_history_techniques.md`. `05_oracle_bake_and_codex_tasks.patch` — `build_context_k3.sh`, the B2–B12b Codex
+  prompts. `harness/COMMITS.txt` is the branch log (92 commits).
+- `patches/vibesim/kimi_k3_vs_roofline_base.patch` (419 files, 162 commits, `COMMITS.txt`/`STAT.txt`) — the VibeSim
+  `kimi-k3` branch: kinds `kda_recurrent_decode`, `kda_fused_decode`, `mla_decode_attention`, `mxfp4_fused_moe`,
+  `kda_chunk_prefill`, `causal_conv1d_prefill`, `mla_prefill_attention`, `mla_prefix_gather`, `mla_merge_state`
+  with `sglang_k3_env` runners; arch `kimi_k3_sglang` + KDA/MLA/MoE worklets (decode and prefill branches,
+  rank-1 and TP8/EP8/PP2 presets incl. b512 and prefill); model.work label + location maps; alignment pack and
+  `doc/alignment/kimi_k3_single_layer.md`. The branch profile.db rows are not in the patch.
+
+## 7. Reproduce
 
 ```bash
 cd scripts-local/vibesim-analysis-container

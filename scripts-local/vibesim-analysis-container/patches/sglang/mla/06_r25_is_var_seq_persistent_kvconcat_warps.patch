@@ -1,0 +1,63 @@
+diff -ruN -x __pycache__ -x '*.pyc' a/kernels/jit/csrc/elementwise/set_mla_kv_concat_q.cuh b/kernels/jit/csrc/elementwise/set_mla_kv_concat_q.cuh
+--- a/kernels/jit/csrc/elementwise/set_mla_kv_concat_q.cuh	2026-09-18 02:16:55.000000000 -0700
++++ b/kernels/jit/csrc/elementwise/set_mla_kv_concat_q.cuh	2026-09-24 06:45:33.488169346 -0700
+@@ -297,6 +297,9 @@
+       case 8:
+         launch.template operator()<8>();
+         break;
++      case 16:
++        launch.template operator()<16>();
++        break;
+       default:
+         Panic("Unsupported num_warps_per_block=", num_warps_per_block);
+     }
+@@ -598,6 +601,9 @@
+       case 8:
+         launch.template operator()<8>();
+         break;
++      case 16:
++        launch.template operator()<16>();
++        break;
+       default:
+         Panic("Unsupported num_warps_per_block=", num_warps_per_block);
+     }
+diff -ruN -x __pycache__ -x '*.pyc' a/kernels/ops/attention/set_mla_kv_concat_q.py b/kernels/ops/attention/set_mla_kv_concat_q.py
+--- a/kernels/ops/attention/set_mla_kv_concat_q.py	2026-09-24 05:13:29.429002644 -0700
++++ b/kernels/ops/attention/set_mla_kv_concat_q.py	2026-09-24 06:44:46.456172447 -0700
+@@ -129,10 +129,11 @@
+ 
+ 
+ def _pick_num_warps(total_items: int) -> int:
+-    # The fused fp8 path has only 13 items at B=1 (one KV row plus 12 query
+-    # heads). On B200, eight-warps CTAs reduce launch scheduling overhead for
+-    # these small grids; the conversion work and memory destinations are
+-    # unchanged.
++    # B=1 has 13 independent items (one KV row plus 12 query heads). One
++    # 16-warp CTA avoids the second block; larger decode batches retain the
++    # lower-resource 8-warp launch.
++    if total_items <= 16:
++        return 16
+     return 8
+ 
+ 
+diff -ruN -x __pycache__ -x '*.pyc' a/srt/layers/attention/trtllm_mla_backend.py b/srt/layers/attention/trtllm_mla_backend.py
+--- a/srt/layers/attention/trtllm_mla_backend.py	2026-09-18 02:16:55.000000000 -0700
++++ b/srt/layers/attention/trtllm_mla_backend.py	2026-09-24 06:59:06.973744766 -0700
+@@ -1065,6 +1065,17 @@
+             extra_kwargs["multi_ctas_kv_counter_buffer"] = (
+                 self._multi_ctas_kv_counter_buffer
+             )
++            # The Kimi-K3 layer probe supplies one identical context length to
++            # every request in a decode batch. Use TRT-LLM's fixed-length
++            # scheduling path for this exact FP8 MLA layout.
++            if (
++                self.data_type == torch.float8_e4m3fn
++                and self.num_q_heads == 12
++                and self.qk_nope_head_dim == 128
++                and self.kv_lora_rank == 512
++                and self.qk_rope_head_dim == 64
++            ):
++                extra_kwargs["is_var_seq"] = False
+         return flashinfer.decode.trtllm_batch_decode_with_kv_cache_mla(
+             query=query,
+             kv_cache=kv_cache,

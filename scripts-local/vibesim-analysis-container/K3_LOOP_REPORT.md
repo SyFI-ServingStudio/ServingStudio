@@ -269,6 +269,8 @@ VibeSim prefill support (Codex B12: kinds `kda_chunk_prefill`, `causal_conv1d_pr
 
 ## Artifacts
 
+`patches/` — per-lever sglang patches (validated to reproduce the best trees), harness and VibeSim patches; see `K3_PIPELINE_AND_RESULTS.md` §6.
+
 `iter_opt_eval_k3_{kda,mla}/trial_<k>_{verdict.json,agent.log,opt_run/,tree_judged.patch}`,
 goldens `/raid/yilegu/eval_goldens/golden_k3_<key>/`, controls `run_k3_controls.sh`, direct runner
 `run_k3_trials_direct.sh`, workspace branch `kimi-k3-loop`, VibeSim branch `kimi-k3`.

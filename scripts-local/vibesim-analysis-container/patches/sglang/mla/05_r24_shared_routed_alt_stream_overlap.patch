@@ -1,0 +1,22 @@
+diff -ruN -x __pycache__ -x '*.pyc' a/srt/models/kimi_k3.py b/srt/models/kimi_k3.py
+--- a/srt/models/kimi_k3.py	2026-09-24 03:56:10.751238561 -0700
++++ b/srt/models/kimi_k3.py	2026-09-24 05:40:30.721083030 -0700
+@@ -1358,8 +1358,16 @@
+                     prefix_sum,
+                 )
+         else:  # single collective over the flat [latent | shared] pair
+-            self._forward_shared(gate_up, shared_output)
+-            self._forward_routed(hidden_states, router_logits, routed_input, latent)
++            if self.alt_stream is not None:
++                current_stream = torch.cuda.current_stream()
++                self.alt_stream.wait_stream(current_stream)
++                with torch.cuda.stream(self.alt_stream):
++                    self._forward_shared(gate_up, shared_output)
++                self._forward_routed(hidden_states, router_logits, routed_input, latent)
++                current_stream.wait_stream(self.alt_stream)
++            else:
++                self._forward_shared(gate_up, shared_output)
++                self._forward_routed(hidden_states, router_logits, routed_input, latent)
+             if self.fuse_ar_norm and k3_ar_fusion.enabled():
+                 fused_norm = True
+                 k3_ar_fusion.all_reduce_norm(

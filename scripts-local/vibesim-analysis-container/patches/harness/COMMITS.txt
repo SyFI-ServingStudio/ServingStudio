@@ -1,0 +1,92 @@
+369d492 Add Kimi-K3 single-layer decode harness and optimizer-loop scaffolding
+1ecb9dd K3 loop: CUDA-graph metric, golden capture/replay, open-ended judge, case wiring
+c7bca96 K3 loop: judge-integrity controls, Codex WS-B task prompts, NVTX alignment probe
+af486cf EVAL_HARNESS.md: document the Kimi-K3 open-ended case
+7f3105d K3 loop: attention-residual stream + remaining real-config fields; judge/runner hardening
+dd7568f codex_tasks: B3b model.work correction prompt (KDA gate ranks, attention-residual stream)
+e431089 run_iter_opt_eval.sh: remove stale trial trees as root via docker and fail loudly if they persist
+f2d3f56 K3: kernel smoke runner for the new VibeSim kinds (slurm UUID-bound) + B2/B4 Codex addenda
+26cd8a9 run_k3_kernel_smoke.sh: private TMPDIR for the host CUPTI extension lock
+ae56807 codex_tasks: B2c fused-KDA runner fix prompt
+254224a K3 driver: honour --mamba-ssm-dtype via SGLANG_MAMBA_SSM_DTYPE (bf16 state -> unfused KDA chain); smoke: fused KDA with fp32 state
+56745b5 K3: nsys/NVTX alignment-probe capture runner (driver under nsys in the sglang container)
+8ff29f1 K3: JIT-fill runner (timing-predict presets into a branch profile.db on the slurm GPU)
+3cf81e5 codex_tasks: B4b KDA state-dtype kernel-chain prompt
+0480900 codex_tasks: B2d paged-fp8 MLA cache-append runner prompt
+c581faf K3 oracle: build_context_k3.sh (kimi-k3 worktree assets, branch profile.db, baked rank-1 predictions; one image, per-case containers on 8801/8802)
+de8a926 build_context_k3.sh: upstream has no eval-configs/; synthesize before.json from the K3 preset
+cea2b44 codex_tasks: B7 R6/R7 for K3 predictions
+8cb84bd codex_tasks: B2e mla_decode_attention grid/cute-dsl constraints prompt
+f27e6e4 agent_task_k3_opt.md: identical before/after measurement protocol (trial-4 lesson)
+ac33209 codex_tasks: B5 alignment prompt (K3 single-layer probe vs rank-1 prediction)
+2623063 codex_tasks: B8 cost-model fixes from the K3 alignment
+569a825 agent_task_k3_opt.md: re-run all points before finishing (trial-5 lesson)
+d6cefd8 run_k3_trials_direct.sh: sequential K3 trials on GPU 3 without slurm (idle-gated)
+321b381 K3 fill: K3_GPU_INDEX for direct-GPU runs + after_trials_fill.sh (B8 rows after the trial queue)
+c0ea912 judge_k3: carry JIT CUDA source edits (.cu/.cuh/.h) in the judged tree; re-judge KDA trial 7 after the queue
+7724cbe K3_LOOP_REPORT.md: C4 report draft (controls, 6 judged trials, findings, VibeSim side)
+b827cf8 issue_k3_mla.json: point the MLA case at the MLA oracle (8802), report finding 6
+63e3e12 K3 loop: MLA 6 result in report; file-based MLA-7 waiter (inline waiter deadlocked the rejudge chain)
+3dd5969 K3_LOOP_REPORT.md: KDA trial 7 v2 (bf16 fused kernel port works, 1-3%)
+33d21fa K3_LOOP_REPORT.md: post-B8 predictions vs measured
+c21b7cf restart_oracles_after_mla7.sh: swap K3 oracles to the post-B8 image after MLA trial 7
+6c293f7 K3_LOOP_REPORT.md: MLA trial 7 (correct oracle), campaign complete 0/8
+22cf210 scripts-local/.gitignore: ignore oracle context_k3 and direct-trial outputs
+2cc8c3d codex_tasks: B9 prompt (mxfp4 row fidelity, unmapped glue, small-m floor, Max attribution)
+fc3fce4 after_b9_fill.sh: fill the 112-expert mxfp4 rows on GPU 3 after Codex B9
+0186499 B10 prompt (mxfp4 runner vs layer A/B on GPU 3, Max attribution); report: B9 outcome + post-B9 alignment
+565f2b1 K3_LOOP_REPORT.md: B10 interim (routing-collapse root cause, post-B10 alignment, harness caveat)
+fdf5344 K3_LOOP_REPORT.md: B10 final rows; oracles on post-B10 image
+e4a3c25 driver: --local-topk (EP-shard emulation, 2 @ EP8) and --hidden-scale (de-collapse routing)
+51da06e run_realistic_sanity.sh: idle-gated GPU-3 measurement of both layers with realistic routing flags
+7e45ef1 codex_tasks: B11 prompt (realistic routing in rank-1 presets)
+eed9b6d K3 scripts: allow GPU 7 (user-authorized shared device) and K3_SHARED_GPU=1 to skip the idle gate
+9cc2670 K3 cases: realistic routing flags (--local-topk 2 --hidden-scale 1.0) in driver_args/REBUILD_CMD
+fcabdf5 B11 prompt: GPU 7 (shared) + measured realistic baselines
+0763b3c K3_LOOP_REPORT.md: realistic-routing re-baseline table
+e799fc6 issue_k3_mla.json: primary point = 1x1M (long-context decode); 128x8k and 16x64k secondary
+80786a0 driver: norm gains ~1 (fixes routing collapse: 0.02 gains let the correction bias rank experts), per-slot KDA state mean, --dump-routing probe
+cd6fb0e K3_LOOP_REPORT.md: routing-collapse root cause (norm gains) + realistic v2 baselines
+8e76d04 K3_LOOP_REPORT.md: campaign 2 — MLA trial 8 PASS (-12.1% @1x1M)
+1050d87 K3_LOOP_REPORT.md: KDA trial 8 (-3.1/-4.7/-5.9%, gate FAIL), KDA 9 running
+47198a1 K3_LOOP_REPORT.md: KDA trial 9 (bf16 fused-kernel port, -0.3%), KDA 10 running
+75ca5b6 K3_LOOP_REPORT.md: KDA trial 10 (-4.6% bit-exact, gate by 0.4pt), KDA 11 running, lever summary
+d8bd79e K3_LOOP_REPORT.md: KDA trial 11 (-4.4% bit-exact), campaign 2 closed (MLA PASS, KDA best -4.6%)
+da4fd8f K3_LOOP_REPORT.md: operator-stacked KDA verification (-4.8%, levers don't add linearly)
+2dd9ebf EVAL_HARNESS.md: K3 section brought up to date (realistic routing, direct-GPU runner, source-diff judge, results, lessons)
+1094261 K3_PIPELINE_AND_RESULTS.md: clean write-up of the pipeline, results, and the techniques that produced the gains
+b8651e1 K3_PIPELINE_FIGURE.html: architecture figure of the three-container K3 loop; linked from the write-up
+9a52bb2 K3 continuous loop: judge --baseline-tree/--min-improvement, START_TREE seeding, run_k3_continuous.sh (promote best_tree on PASS), alternate runner; no fixed 5% gate
+a757746 K3_LOOP_REPORT.md: campaign 3 (continuous loop) — MLA round 20 PASS +0.75%
+d5d7911 K3 loop: resume_k3_loop_when_free.sh (auto-resume when an authorized GPU has room); report: KDA round 20 = OOM infra artifact
+044eb35 K3 resume waiter: require 5 consecutive idle readings on GPU 2/3 (a brief gap between the user's vLLM runs double-booked GPU 3)
+9fab14f K3 resume waiter: 1 h sustained idle on GPU 2/3 (IDLE_CHECKS=30); 10-min streaks were fooled twice by the user's cycling vLLM runs
+e9c1143 K3_LOOP_REPORT.md: continuous loop — MLA round 21 PASS (+1.5% @1x1M, +3.2% @128x8k)
+321e5c4 K3_LOOP_REPORT.md: continuous loop — KDA round 21 FAIL (correctness; 7% noise gate under co-tenant)
+8d7b4ca K3_LOOP_REPORT.md: continuous loop — MLA round 22 null (FAIL), KDA 22 running
+dcba7fb K3_LOOP_REPORT.md: continuous loop — KDA round 22 PASS (+1.3% @B=128, cumulative -5.9%)
+6bfd995 K3_LOOP_REPORT.md: continuous loop — MLA round 23 PASS (+1.5% @1x1M, cumulative -14.1%)
+7f88420 K3 reports: KDA round 23 null; campaign-3 (continuous loop) summary in the write-up — MLA -14.1%, KDA -5.9% cumulative
+49b0f6d K3 reports: MLA round 24 PASS (+2.4% @1x1M; cumulative -16.2%)
+cdcd01f K3_LOOP_REPORT.md: continuous loop — KDA round 24 null (plateau), MLA 25 running
+39d7a3a K3_LOOP_REPORT.md: MLA round 25 PASS (+0.8%) flagged as harness overfit (is_var_seq=False hardcoded)
+4459cfa K3 reports: rounds 24-25 complete (MLA -16.8%, KDA -5.9%; round-25 overfit flagged); MLA-only rounds 26-27 queued
+c2b4850 K3_LOOP_REPORT.md: continuous loop — MLA round 26 null, MLA 27 running
+8d812e1 K3 reports: MLA round 27 null — continuous loop stopped; final MLA -16.8% @1x1M, KDA -5.9% @B=128
+57db966 recheck_best_trees_seeds.sh: re-judge the final best trees under extra seeds against fresh pristine goldens
+fe06b24 K3 harness: mixed-context-length decode point (driver 'B,L,mix', judge (B,L,mixed) keys, MLA case 16x64k -> mixed 64k/48k/32k/16k) to catch uniform-length shortcuts
+9ffb3e5 after_recheck_mixed_point.sh: judge the MLA best tree on the mixed-length point; retire the round-25 overfit if it fails
+49e1d72 K3_LOOP_REPORT.md: accuracy hardening — 4/4 multi-seed rechecks PASS
+5e24ba5 K3 reports: round-25 is_var_seq=False verified correct on the new mixed-length point (persistent schedule, not a uniform-length assumption); overfit flag downgraded
+4f7375e K3 loop: warm-start optimization history (k3_opt_history KB mounted into the agent), large-batch decode cases (B=512/256) seeded from the best trees, b512 oracle bake + campaign waiter
+3cd0fa2 K3 driver: chunked-prefill points (B,L,pf[<prefix>]; KDA chunk_kda / MLA trtllm ragged prefill, eager timing), judge point tags, prefill cases + campaign waiter, B12 VibeSim prefill task
+e5d1dea K3: MLA prefill pre-step resets both prefix-chunk gates; b512 continuation script; Codex B12a task (MLA attention leaf mispredicts at B>=256)
+39db094 K3 driver: row-wise correctness rule for prefill points (autotuner tactic drift flips ~0.1% of token routings across processes; replays within a process are identical); CHECK reports rows_over_tol/p99 row error
+83335c2 K3: MLA-b512 oracle re-bake (post-B12a), Codex B12 launcher, MLA-b512 rounds queued behind KDA-b512
+cee3bcb K3: drop the 'codex exec' pgrep gates (they match the trial agents too)
+01ccafb K3 report: campaign 4 (warm start, large-batch transfer checks, KDA-b512 null rounds, prefill infrastructure)
+95a65e4 K3: MLA-b512 rounds restart after Codex B12 (round 1 was infra noise from concurrent kernel profiling on GPU 7)
+d179b50 K3 driver: --bf16-gemm-init reproduces the production scheduler's bf16 GEMM backend init (auto -> cutedsl on SM100); default off = legacy cuBLAS-only dispatch used by all runs so far
+82e72f9 K3: new cases run with --bf16-gemm-init (production bf16 GEMM dispatch); report: fidelity gap quantified at <= 0.7%, decode results stand
+4428db9 K3: B12 commit-at-cap script, Codex B12b (prefill prediction fidelity) chained after the MLA-b512 rounds, then prefill oracle bake + prefill rounds
+38cf3ce K3 write-up: campaign 4 section (warm start, large-batch transfer + rounds, prefill infrastructure, fidelity gap, lessons 8-11)

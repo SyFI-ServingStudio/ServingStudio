@@ -1,0 +1,1250 @@
+diff --git a/scripts-local/vibesim-analysis-container/build_context_k3.sh b/scripts-local/vibesim-analysis-container/build_context_k3.sh
+new file mode 100755
+index 0000000..b46f325
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/build_context_k3.sh
+@@ -0,0 +1,72 @@
++#!/usr/bin/env bash
++# Stage the Docker build context for the Kimi-K3 VibeSim analysis oracle (vibesim-analysis:k3).
++#
++# Same shape as build_context.sh (fixed prediction oracle: 5 agent-facing verbs, prebuilt
++# `analyze` binary, no Rust/PyO3 at runtime) but sourced from the kimi-k3 branch worktree:
++#   * repo assets at HEAD of the worktree (gpu, model incl. K3 label + location maps,
++#     simulator source for workspace-info arch stems, eval-configs, K3 presets)
++#   * the BRANCH profile.db (K3 B200 rows; the shared profiling/profile.db is untouched)
++#   * the prebuilt analyze binary from the worktree
++#   * baked predictions: logs/k3_kda (rank-1 KDA layer, B=1/32/128@8k) and logs/k3_mla
++#     (rank-1 MLA layer); the container serves ONE of them per VIBESIM_PREBAKED_RUN, so
++#     the KDA and MLA cases run two containers from the same image (ports 8801 / 8802).
++# Open-ended case: there is no "after" answer key to purge; the agent's own edits never
++# reach this container (it only re-serves the baked before-state prediction).
++set -euo pipefail
++HERE="$(cd "$(dirname "$0")" && pwd)"
++SRC_REPO="${SRC_REPO:-/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/main-k3-rust}"
++API_PKG="${API_PKG:-/raid/yilegu/roofline_guided_agent/vibesim-api-package}"
++PROFILE_DB="${PROFILE_DB:-$HERE/kimi_single_layer/k3_branch_profile.db}"
++OUT="${OUT:-$HERE/context_k3}"
++REPO_OUT="$OUT/repo"
++declare -A BAKE=( [k3_kda]=predict_kimi_k3_b200_rank1_layer_kda [k3_mla]=predict_kimi_k3_b200_rank1_layer_mla
++                  [k3_kda_b512]=predict_kimi_k3_b200_rank1_layer_kda_b512 [k3_mla_b512]=predict_kimi_k3_b200_rank1_layer_mla_b512
++                  [k3_kda_prefill]=predict_kimi_k3_b200_rank1_layer_kda_prefill [k3_mla_prefill]=predict_kimi_k3_b200_rank1_layer_mla_prefill )
++
++echo "== staging into $OUT from $SRC_REPO @ $(git -C "$SRC_REPO" rev-parse --short HEAD) ($(git -C "$SRC_REPO" branch --show-current))"
++rm -rf "$OUT"; mkdir -p "$REPO_OUT" "$OUT/app"
++
++echo "== 1. tracked assets at HEAD"
++# (upstream has no eval-configs/; the server's `config` default only matters for a live
++#  simulate, which the prebaked shim short-circuits -- point it at the K3 preset anyway)
++git -C "$SRC_REPO" archive HEAD -- gpu model simulator presets | tar -x -C "$REPO_OUT"
++mkdir -p "$REPO_OUT/eval-configs"
++cp "$REPO_OUT/presets/predict_kimi_k3_b200_rank1_layer_kda.json" "$REPO_OUT/eval-configs/before.json"
++find "$REPO_OUT" -maxdepth 2 -type f \( -name '*_plan.md' -o -name '*_progress.md' \) -delete
++
++echo "== 2. branch profile.db + analyze binary"
++mkdir -p "$REPO_OUT/profiling" "$REPO_OUT/target/release"
++cp "$PROFILE_DB" "$REPO_OUT/profiling/profile.db"
++cp "$SRC_REPO/target/release/analyze" "$REPO_OUT/target/release/analyze"
++
++echo "== 3. baked K3 predictions"
++mkdir -p "$REPO_OUT/logs"
++baked=0
++for run in "${!BAKE[@]}"; do
++  src="$SRC_REPO/logs/${BAKE[$run]}"
++  if [ -f "$src/prediction.meta.json" ] && [ -f "$src/raw/params.json" ]; then
++    cp -a "$src/." "$REPO_OUT/logs/$run/"
++    rm -f "$REPO_OUT/logs/$run/reports/optimality_scoped_"*.json 2>/dev/null || true
++    echo "   baked $run <- ${BAKE[$run]} ($(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('prediction_id'))" "$src/prediction.meta.json"))"
++    baked=$((baked+1))
++  else
++    echo "   SKIP $run: $src has no complete prediction yet"
++  fi
++done
++[ "$baked" -gt 0 ] || { echo "!! no baked prediction available"; exit 1; }
++
++echo "== 4. API package + app (prebaked simulate) + skill"
++mkdir -p "$OUT/vibesim-api"; cp -a "$API_PKG/." "$OUT/vibesim-api/"
++cp "$API_PKG/vibesim_api.py" "$OUT/app/vibesim_api.py"
++python3 "$HERE/patch_prebaked.py" "$OUT/app/vibesim_api.py"
++cp "$HERE/app/server.py" "$OUT/app/server.py"
++cp "$HERE/app/entrypoint.sh" "$OUT/app/entrypoint.sh"
++cp "$HERE/app/uv" "$OUT/app/uv"
++cp -a "$HERE/skill" "$OUT/skill"
++
++echo "== OK. context ready at $OUT"
++du -sh "$OUT" "$REPO_OUT/profiling/profile.db" "$REPO_OUT/target/release/analyze" 2>/dev/null || true
++echo "build:  sed 's#COPY context/#COPY context_k3/#' $HERE/Dockerfile | docker build -t vibesim-analysis:k3 -f - $HERE"
++echo "run:    docker run -d --name vibesim_oracle_k3_kda -e VIBESIM_PREBAKED_RUN=k3_kda -e VIBESIM_API_PORT=8801 -p 172.17.0.1:8801:8801 vibesim-analysis:k3"
++echo "        docker run -d --name vibesim_oracle_k3_mla -e VIBESIM_PREBAKED_RUN=k3_mla -e VIBESIM_API_PORT=8802 -p 172.17.0.1:8802:8802 vibesim-analysis:k3"
++echo "        large-batch cases: k3_kda_b512 -> 8803, k3_mla_b512 -> 8804 (same image, VIBESIM_PREBAKED_RUN=k3_{kda,mla}_b512)"
+diff --git a/scripts-local/vibesim-analysis-container/codex_tasks/b10_mxfp4_runner_vs_layer.md b/scripts-local/vibesim-analysis-container/codex_tasks/b10_mxfp4_runner_vs_layer.md
+new file mode 100644
+index 0000000..c910e90
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/codex_tasks/b10_mxfp4_runner_vs_layer.md
+@@ -0,0 +1,59 @@
++# B10 — make the `mxfp4_fused_moe` runner reproduce the Kimi-K3 layer's real MoE launch (GPU microbench)
++
++Worktree: `/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/main-k3-rust` (branch `kimi-k3-arch`,
++HEAD b088a6eb = your B9). Read `CLAUDE.md`, skills `operate-profile-existing-kernel`,
++`impl-validate-kernel-cache`, `top-add-kernel`. Commit when green (`just test-cpu`), report in English.
++
++## GPU rules (hard)
++You may use exactly ONE GPU: NVIDIA B200 index 3, UUID `GPU-019267a2-092a-6798-3cc5-57ffc761e004`.
++- Only through VibeSim's profiling env: `export VIBESIM_PROFILE_GPUS=GPU-019267a2-092a-6798-3cc5-57ffc761e004
++  VIBESIM_PROFILE_DB=/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/kimi_single_layer/k3_branch_profile.db
++  TMPDIR=/raid/tmp/yilegu_k3_tmp` (the `sglang_k3_env` docker env binds that UUID). For ad-hoc
++  scripts use `docker run --rm --gpus '"device=GPU-019267a2-092a-6798-3cc5-57ffc761e004"' --shm-size 32g
++  -v /raid/yilegu/roofline_guided_agent/VibeSimWorkspace:/ws -v /raid/yilegu/flashinfer_cache:/root/.cache/flashinfer
++  lmsysorg/sglang:v0.5.20 python3 ...`. Never `--gpus all`, never other indices/UUIDs, never slurm.
++- Before each GPU step check `nvidia-smi -i 3 --query-gpu=memory.used --format=csv,noheader` < 1000 MiB.
++- Do not write to `profiling/profile.db`; only the branch DB above.
++
++## The discrepancy (B9's fix went from 18% under to 37% over)
++Rank-1 KDA layer, B=128 tokens, 112 local experts, top-16, MXFP4 (`flashinfer_mxfp4`), CUDA-graph replay.
++Measured per step (torch profiler on the graph, `scripts-local/vibesim-analysis-container/kimi_single_layer/profiles/kda_prod_B128_L8192.json`):
++`bmm_MxE4m3_MxE2m1MxE4m3_Fp32_...t128x16x256u2_s3...` 264.8 us + `bmm_Bfloat16_MxE2m1MxE4m3_...` 134.7 us +
++`finalizeKernelVecLoad` 10.2 us + `routingIndicesClusterKernel` 7.7 us ≈ **418 us** (alignment leaf 384 us).
++Branch-DB rows for the same kind (`mxfp4_fused_moe`, B200, num_tokens=128): **num_experts=896 → 342.9 us**
++(pre-B9, only 258 of 2048 assignments local) and **num_experts=112 → 527.1 us** (your B9 row, per_expert_batches
++uniform 22/21). Post-B9 alignment: KDA leaf +37% (layer total +22.8%), MLA leaf +25% (total +11.1%).
++So neither runner configuration launches what the layer launches. Candidates to test, each as a controlled
++A/B on GPU 3 with the exact layer call as the reference:
++1. Routing distribution: the layer routes 2048 seeded-random assignments (Poisson-like loads, mean 18.3) —
++   the runner pins uniform 22/21 (sum 2368 ≠ 2048?). Check the sum, the padding to the 16-row tile, and
++   whether `per_expert_batches` should be derived from the driver's actual histogram (the driver
++   `scripts-local/vibesim-analysis-container/kimi_single_layer_decode.py` can dump it; add a flag if needed).
++2. Tactic/autotune: the layer's kernel names encode `t128x16x256u2_s3_et128x16`; compare with the runner's
++   launched kernel names (torch profiler or nsys inside the same container). Both pass
++   `tune_max_num_tokens=next_pow2(128)`; check whether the layer runs under FlashInfer's `autotune()` context
++   (sglang `flashinfer_trtllm.py`) while the runner does not, or vice versa.
++3. Activation/input format and `do_finalize`, `routing_method_type` (layer: DeepSeekV3 via `kimi_k3.py:482`),
++   `routed_scaling_factor`, `gemm1_alpha/clamp`, `n_group/topk_group`, weight layout/shuffle
++   (`sglang.srt.layers.quantization.mxfp4` post-load) — any of these changes the tactic or adds kernels.
++4. PDL / graph vs eager: the runner times an eager loop; the layer number is a graph replay. Quantify the
++   difference for the same call.
++Reference implementation of the layer's call: `sglang/srt/layers/moe/moe_runner/flashinfer_trtllm.py` +
++`KimiK3MoE._forward_fused` in `sglang/srt/models/kimi_k3.py` (pristine v0.5.20 tree at
++`/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda/pristine_tree/`).
++
++## Deliverables
++- A table: for each candidate, runner-as-is vs modified, kernel names + us, vs the layer's 418 us reference.
++- Fix `profiling/runners/moe/mxfp4_fused_moe.py` (and the Rust kind/worklet if an input dimension is
++  missing) so the row for the rank-1 K3 call is within 10% of the layer's measurement at B=128 and B=32,
++  and refill the 112-expert rows the rank-1 presets need (`presets/predict_kimi_k3_b200_rank1_layer_{kda,mla}.json`
++  via `uv run --no-sync python -m launcher timing-predict <preset>` with the env above). Then re-run
++  `launcher alignment timing-predict` + `alignment analyze` for
++  `presets/alignment/kimi_k3_single_layer/{kda,mla}_{timing_predict,analyze}.yaml` and update the tables in
++  `doc/alignment/kimi_k3_single_layer.md` (state clearly what is measured post-fix).
++- Also confirmed by the post-B9 analyze: `mla_cache_append`, `output_gate`, `kv_a_layernorm` show −100%
++  (hidden by the `CostNode::Max` attribution). Implement the smallest change that keeps them visible in the
++  per-op alignment and the `optimality` ladder without breaking the critical-path total (e.g. attribute
++  the Max's children proportionally, or model the overlap on the worklet's non-critical side as a labeled
++  zero-critical-time leaf), with tests.
++- `just test-cpu` green (4 known `test_energy_*` host failures). Commit on `kimi-k3-arch`.
+diff --git a/scripts-local/vibesim-analysis-container/codex_tasks/b11_realistic_routing_presets.md b/scripts-local/vibesim-analysis-container/codex_tasks/b11_realistic_routing_presets.md
+new file mode 100644
+index 0000000..6401e20
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/codex_tasks/b11_realistic_routing_presets.md
+@@ -0,0 +1,43 @@
++# B11 — mirror the driver's realistic routing in the Kimi-K3 rank-1 presets + re-align
++
++Worktree `/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/main-k3-rust` (branch `kimi-k3-arch`,
++HEAD ef202ca2 = your B10). Read `CLAUDE.md`, skills `operate-run-alignment`, `operate-run-timing-predict`,
++`impl-compose-arch`. Commit when green (`just test-cpu`), report in English.
++
++## GPU rules (hard)
++Only GPU index 7 / UUID `GPU-c88e489a-0693-2c29-a1e3-30952377f742` (user-authorized 2026-09-24; it is
++SHARED with a light-load run of the user's — do not wait for it to be idle, do not kill anything on it),
++only via `VIBESIM_PROFILE_GPUS=GPU-c88e489a-0693-2c29-a1e3-30952377f742
++VIBESIM_PROFILE_DB=/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/kimi_single_layer/k3_branch_profile.db
++TMPDIR=/raid/tmp/yilegu_k3_tmp` or `docker run --gpus '"device=GPU-c88e489a-0693-2c29-a1e3-30952377f742"'`.
++Never other GPUs (0-6), never `--gpus all`, never slurm, never `profiling/profile.db`. Expect a few % timing
++noise from the co-tenant; use medians.
++
++## What changed on the harness side
++The driver (`scripts-local/vibesim-analysis-container/kimi_single_layer_decode.py`, commit e4a3c25 on the
++workspace branch `kimi-k3-loop`) now models an EP8 rank realistically:
++- `--local-topk 2`: K3 routes top-16 over 896 global experts; a rank holds 112, so its expected share is
++  2 assignments per token. The single-process driver cannot run sglang's EP group, so it emulates the share
++  by routing top-2 over the 112 local experts (128 tokens -> 256 local rows instead of the previous 2048).
++- `--hidden-scale 1.0`: unit-scale decode inputs so the per-token identity dominates the pre-MoE norm; the
++  previous 0.02 inputs made every token route to the same ~20 experts (B10 found the collapsed histogram).
++The case configs will carry these flags; the judge's baselines/goldens are re-captured with them. Measured with the new flags (GPU 7, CUDA-graph replay, 2026-09-24 01:22): **KDA 252.4 / 174.6 / 139.7 us at
++B=128/32/1 @8k** (old flags: 556.5 / 310.7 / 179.6); **MLA 352.6 (128x8k) / 306.7 (1x1M) / 264.7 (16x64k)**
++(old: 680.4 / 345.5 / 357.9). Full JSON: `scripts-local/vibesim-analysis-container/kimi_single_layer/result_{kda,mla}_realistic_*.json`;
++per-kernel tables: `.../kimi_single_layer/profiles/*realistic*` (read-only evidence).
++
++## Deliverables
++1. Rank-1 presets `presets/predict_kimi_k3_b200_rank1_layer_{kda,mla}.json` + the K3 arch/MoE worklet:
++   model the rank's routed load as 128 x 2 = 256 rows over 112 local experts with a realistic (Poisson-like,
++   NOT collapsed, NOT perfectly balanced) per-expert distribution; keep the production TP8/EP8/PP2 preset
++   at the global top-16-of-896 semantics (routing_experts=896, local share 1/8). Make the histogram source
++   explicit (measured histogram from the alignment payload when present; the analytic distribution otherwise).
++2. Refill whatever new `mxfp4_fused_moe` rows the presets need (GPU 3, gated), re-run the rank-1 predictions
++   and compare with the realistic measurements per point (B=1/32/128 @8k for KDA; 128x8k, 1x1M, 16x64k for
++   MLA). Target: layer totals within 10%.
++3. Alignment: the existing nsys probes (`kimi_single_layer/align/*`) were captured with the OLD flags. Do NOT
++   re-capture (needs nsys on GPU 3, the operator does that); instead document the new-flag comparison from
++   the driver's `--profile-kernels` tables vs the prediction per leaf, and update
++   `doc/alignment/kimi_k3_single_layer.md` with a "realistic routing" section (clearly separated from the
++   old-flag alignment tables).
++4. `just test-cpu` green (4 known `test_energy_*` host failures). Commit on `kimi-k3-arch`.
+diff --git a/scripts-local/vibesim-analysis-container/codex_tasks/b12_k3_prefill_support.md b/scripts-local/vibesim-analysis-container/codex_tasks/b12_k3_prefill_support.md
+new file mode 100644
+index 0000000..034265d
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/codex_tasks/b12_k3_prefill_support.md
+@@ -0,0 +1,82 @@
++# B12 — Kimi-K3 chunked-prefill support: kernel kinds, worklet prefill branches, rank-1 prefill presets
++
++Worktree `/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/main-k3-rust` (branch `kimi-k3-arch`,
++HEAD 51810876 = B11 + the b512 presets). Read `CLAUDE.md`, then the skills `top-split-model-into-kernels`,
++`top-add-kernel`, `orchestrator-add-kernel-to-python-profile`, `impl-register-kernel`, `impl-wire-kernel-to-rust`,
++`impl-compose-worklet`, `impl-wire-new-arch`, `operate-run-timing-predict`. Commit when green (`just test-cpu`;
++4 known `test_energy_*` host failures), report in English.
++
++## GPU rules (hard)
++Only GPU index 7 / UUID `GPU-c88e489a-0693-2c29-a1e3-30952377f742` (user-authorized 2026-09-24; SHARED with
++the user's other runs and with our optimizer-loop trials — do not wait for it to be idle, do not kill anything
++on it), only via `VIBESIM_PROFILE_GPUS=GPU-c88e489a-0693-2c29-a1e3-30952377f742
++VIBESIM_PROFILE_DB=/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/kimi_single_layer/k3_branch_profile.db
++TMPDIR=/raid/tmp/yilegu_k3_tmp` or `docker run --gpus '"device=GPU-c88e489a-0693-2c29-a1e3-30952377f742"'`.
++Never other GPUs (0-6), never `--gpus all`, never slurm, never the shared `profiling/profile.db`. Expect a few %
++timing noise from co-tenants; use medians.
++
++## Context
++The optimizer loop so far only exercised DECODE (`kimi_k3_sglang` arch, rank-1 KDA/MLA layer presets). The
++harness now also drives CHUNKED PREFILL of the same layer (sglang v0.5.20, one B200 = one rank of the cookbook
++TP8/EP8 recipe: 12 heads, 112 local MXFP4 experts with the local top-2 share, fp8-e4m3 latent KV, bf16 KDA
++state). Driver: `scripts-local/vibesim-analysis-container/kimi_single_layer_decode.py` (workspace branch
++`kimi-k3-loop`), point syntax `B,L,pf[<prefix>]` = B requests x L NEW tokens each on a <prefix>-token cached
++context, `ForwardMode.EXTEND`, timed eagerly (sglang does not graph-capture prefill).
++
++What sglang runs per prefill step (all file:line in the sglang tree
++`scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/pristine_tree/`, read-only):
++- KDA layer: `KimiK3DeltaAttention.forward` (srt/models/kimi_k3.py:1992-2055) -> `forward_qkvbfg` (one wide
++  GEMM + side GEMV, as in decode) -> `KDAAttnBackend.forward_extend` (srt/layers/attention/linear/kda_backend.py:
++  795-953): `causal_conv1d_fn` over the T tokens with the conv state (kernels/ops/mamba/causal_conv1d_triton.py),
++  `chunk_kda` (kernels/ops/attention/fla/kda.py:1202-1249 -> chunk_kda_fwd 1083-1199: l2norm, cumsum/gating,
++  chunk_gated_delta_rule_fwd_h with the per-request initial state, output kernel) then the Python o_norm
++  (gated RMSNorm, T rows) and o_proj. Then the MoE at T tokens x local top-2 = 2T routed rows (32k rows for a
++  16k chunk) + shared experts + latent up/down.
++- MLA layer: `KimiK3MLAAttention` -> `DeepseekV2AttentionMLA` with the trtllm_mla handler ->
++  `AttnForwardMethod.MHA_CHUNKED_KV` (srt/models/deepseek_common/attention_backend_handler.py:171-181,
++  attention_forward_methods/forward_mha.py:179-393): q/kv projections at T rows, fp8 latent-KV write of the T new
++  rows (`set_mla_kv_buffer_triton`), `trtllm_ragged_attention_deepseek` (flashinfer; fp8 q/k/v because the KV
++  cache is fp8: srt/layers/attention/trtllm_mla_backend.py:1085-1128) causal over the chunk, and for prefix > 0
++  one pass per prefix chunk (gather the cached latent rows, `kv_b_proj` GEMM to K/V, non-causal ragged attention,
++  `merge_state`); prefix chunk length = 128k // batch (forward_batch_deepseek_mha_mixin.py:162-251).
++
++Measured evidence (GPU 7, eager, driver `--profile-kernels`, read-only):
++`scripts-local/vibesim-analysis-container/kimi_single_layer/profiles/prefill_kda_*.json`,
++`.../profiles/prefill_mla_*.json` (per-kernel tables per point) and
++`.../kimi_single_layer/result_prefill_{kda,mla}.json` (per-point `us_step`, `num_tokens`, `prefix_len`).
++Points: KDA `1,16384,pf` / `1,16384,pf49152` / `4,4096,pf`; MLA `1,16384,pf49152` / `1,16384,pf` / `4,4096,pf`
++(16384 = the B200 default `chunked_prefill_size`, srt/arg_groups/memory_hook.py:88-179).
++
++## Deliverables
++1. **Phase-1 decision table** (`top-split-model-into-kernels`) for the prefill step of both layer types from
++   the profiles: per launched kernel -> reuse kind / new kind / fold into a neighbour / elementwise placeholder.
++   Expected new kinds (decide from the evidence, not from this list): `kda_chunk_prefill` (the chunk_kda
++   kernel group incl. l2norm/cumsum/h-recurrence/output, args: tokens, heads=12, head_dim=128, prefix present or
++   not, state dtype), `causal_conv1d_prefill` (or a backend of an existing conv kind), `mla_prefill_attention`
++   (trtllm ragged fp8 DeepSeek attention: q_len, kv_len, heads=12, qk 192 / v 128, causal or prefix-chunk),
++   plus `merge_state` and the prefix gather if they are not negligible. Existing kinds cover the GEMMs
++   (`single_gemm` sglang backends at m = T), the MoE (`mxfp4_fused_moe` with m = 2T local rows over 112 experts,
++   histogram-aware as in B10/B11), `mla_cache_append` at T rows, norms.
++2. **Kinds + runners + Rust wiring** for the new kinds (`impl-register-kernel`, `impl-wire-kernel-to-rust`),
++   profiled in `sglang_k3_env` by calling the same sglang/flashinfer entry points the layer calls.
++3. **Worklet prefill branches**: `kimi_k3_kda_local`, `kimi_k3_mla_local`, `kimi_k3_moe_local` (and the dense
++   front/back) consume `prefill_chunk_pairs` groups (context = prefix, append = chunk) — the arch already
++   validates them (simulator/src/arch/kimi_k3_sglang.rs:1084-1140) but the worklets leave prefill leaves at zero
++   (kimi_k3_kda_local.rs:5-7). Keep the decode paths bit-identical (existing tests must stay green; add tests
++   in the style of the existing worklet tests: source order, prefill-vs-decode leaf selection, prefix>0 path).
++4. **Presets** `presets/predict_kimi_k3_b200_rank1_layer_{kda,mla}_prefill.json` (+ `_cases.json`):
++   KDA cases `[[0,16384]]`, `[[49152,16384]]`, 4 x `[[0,4096]]`; MLA cases `[[49152,16384]]`, `[[0,16384]]`,
++   4 x `[[0,4096]]` (one group each; same arch block as the decode rank-1 presets: heads_per_rank 12,
++   local_experts 112, local_top_k 2, kda_state_dtype bf16, sim_{kda,mla}_layers 1/0 or 0/1).
++   JIT-fill the rows on GPU 7 into the branch DB, run `timing-predict` for both presets, and compare the
++   layer totals per case with `result_prefill_{kda,mla}.json` (`us_step`). Target: within 15% per case; report
++   the per-leaf comparison against the profile tables in `doc/alignment/kimi_k3_single_layer.md` under a new
++   "chunked prefill" section (this is layer-level kernel evidence from the driver, not a server alignment).
++5. `just test-cpu` green; commit on `kimi-k3-arch` (one or a few commits, English messages). The operator bakes
++   the two predictions into the oracle image afterwards (`logs/predict_kimi_k3_b200_rank1_layer_{kda,mla}_prefill`
++   must contain `prediction.meta.json` + `raw/params.json`).
++
++## Do not
++- Do not touch the shared `profiling/profile.db`, `main/` (the user's checkout), or the driver/judge.
++- Do not change the decode presets or decode prediction numbers (B11 baselines are in use by running trials).
++- Do not re-capture nsys probes (nsys needs the operator).
+diff --git a/scripts-local/vibesim-analysis-container/codex_tasks/b12a_k3_large_batch_mla_rows.md b/scripts-local/vibesim-analysis-container/codex_tasks/b12a_k3_large_batch_mla_rows.md
+new file mode 100644
+index 0000000..13df8e2
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/codex_tasks/b12a_k3_large_batch_mla_rows.md
+@@ -0,0 +1,50 @@
++# B12a — Kimi-K3 rank-1 presets at B=256/512: the MLA decode-attention leaf mispredicts by 20-50x
++
++Worktree `/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/main-k3-rust` (branch `kimi-k3-arch`,
++HEAD 51810876). Read `CLAUDE.md`, skills `operate-run-timing-predict`, `impl-register-kernel`,
++`impl-wire-kernel-to-rust`. Commit when green (`just test-cpu`; 4 known `test_energy_*` host failures),
++report in English. This is a small, focused fix — do it before anything else.
++
++## GPU rules (hard)
++Only GPU index 7 / UUID `GPU-c88e489a-0693-2c29-a1e3-30952377f742` (user-authorized 2026-09-24; SHARED with
++the user's runs and with our optimizer-loop trials — do not wait for it to be idle, do not kill anything on
++it), only via `VIBESIM_PROFILE_GPUS=GPU-c88e489a-0693-2c29-a1e3-30952377f742
++VIBESIM_PROFILE_DB=/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/kimi_single_layer/k3_branch_profile.db
++TMPDIR=/raid/tmp/yilegu_k3_tmp`. Never other GPUs (0-6), never `--gpus all`, never slurm, never the shared
++`profiling/profile.db`. Expect timing noise from co-tenants; use medians.
++
++## Symptom
++New presets (committed, HEAD): `presets/predict_kimi_k3_b200_rank1_layer_{kda,mla}_b512.json` with cases
++KDA 128/256/512 @ 8k and MLA 512 @ 8k, 256 @ 8k, 16 @ 40960 (decode). `timing-predict` on both finished in
++7 s (no JIT fill happened) and produced:
++- KDA: 417 / 514 / 751 us at B=128/256/512 — plausible (MoE 264/308/389, recurrent 30/58/113).
++- MLA: **16614 us at 512x8k and 5854 us at 256x8k**, of which `mla_decode_attention` = 15998 / 5402 us
++  (`logs/predict_kimi_k3_b200_rank1_layer_mla_b512/reports/iter_breakdown.ans`). The branch DB has
++  `mla_decode_attention` rows `sglang_cutedsl_mla` at batch_size 256 / kv_len 8192 = 288 us (and 128/8192 =
++  142 us; `sglang_trtllm_mla` 128/8192 = 104.5 us, no trtllm rows above batch 128, no rows at all for
++  batch 512), so the leaf is neither reading the 256-row nor triggering a fill for 512: it extrapolates.
++  Expected physics: KV read = B x 8192 x 576 B -> 2.4 GB at B=512 = 345 us at 7 TB/s; measured layer step
++  at 128x8k is 493 us with attention ~105 us, so attention at 512 should be ~400-600 us, not 16 ms.
++
++## Deliverables
++1. Find why the `mla_decode_attention` predictor (simulator/src/timing/kernels/mla_decode_attention.rs and
++   the K3 MLA worklet's input construction in simulator/src/worklet/kimi_k3_mla_local.rs) does not hit the
++   B=256 row and extrapolates instead of JIT-filling at B=512 — check the input it builds for a decode group
++   (batch_size vs decode_kv_total vs per-request kv_len, backend choice trtllm vs cutedsl, page/dtype keys),
++   and the lookup/extrapolation policy. Fix it so that out-of-grid shapes are FILLED (JIT, GPU 7) rather than
++   extrapolated across an order of magnitude, or at worst extrapolated along the measured axis.
++2. JIT-fill the rows both b512 presets need (`kernel-profile count-missing` = 0), for both MLA backends the
++   worklet can select (trtllm + cutedsl) at batch 256 and 512 with kv_len 8192, and 16 @ 40960.
++3. Re-run `timing-predict` for `presets/predict_kimi_k3_b200_rank1_layer_mla_b512.json` (and the KDA one to
++   confirm it is unchanged) and compare with the measured pristine step times the operator will drop at
++   `scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_b512/seed_transfer_verdict.json`
++   (`points.<key>.before_us`; keys "512,8192", "256,8192", "16,65536mix") and
++   `.../iter_opt_eval_k3_kda_b512/seed_transfer_verdict.json` ("512,8192", "256,8192", "128,8192").
++   Target: layer totals within 15%. Report the per-case comparison.
++4. Add a regression test that a decode group above the profiled batch grid does not silently extrapolate
++   the MLA attention leaf (whatever policy you implement), keep the existing decode predictions for the
++   B=1/32/128 presets unchanged, `just test-cpu` green, commit on `kimi-k3-arch`.
++
++Do not touch `main/` (the user's checkout), the shared `profiling/profile.db`, the driver/judge, or the
++decode presets' numbers. When done, write a 10-line summary to
++`/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/codex_runs/b12a_summary.md`.
+diff --git a/scripts-local/vibesim-analysis-container/codex_tasks/b12b_k3_prefill_fidelity.md b/scripts-local/vibesim-analysis-container/codex_tasks/b12b_k3_prefill_fidelity.md
+new file mode 100644
+index 0000000..e1ad9e5
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/codex_tasks/b12b_k3_prefill_fidelity.md
+@@ -0,0 +1,49 @@
++# B12b — Kimi-K3 chunked-prefill predictions are ~60% below the measured layer step: close the gap
++
++Worktree `/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/main-k3-rust` (branch `kimi-k3-arch`; HEAD = the
++B12 commit "chunked-prefill support"). Read `CLAUDE.md`, `doc/alignment/kimi_k3_single_layer.md` (B12 section),
++skills `operate-run-timing-predict`, `impl-register-kernel`, `impl-compose-worklet`. Commit when green
++(`just test-cpu`; 4 known `test_energy_*` host failures), report in English, and write a 10-line summary to
++`/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/codex_runs/b12b_summary.md`.
++
++## GPU rules (hard)
++Only GPU index 7 / UUID `GPU-c88e489a-0693-2c29-a1e3-30952377f742` (user-authorized, SHARED; do not wait for
++idle, do not kill anything), only via `VIBESIM_PROFILE_GPUS=GPU-c88e489a-0693-2c29-a1e3-30952377f742
++VIBESIM_PROFILE_DB=/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/kimi_single_layer/k3_branch_profile.db
++TMPDIR=/raid/tmp/yilegu_k3_tmp`. Never other GPUs, never `--gpus all`, never slurm, never the shared
++`profiling/profile.db`. You may ALSO run the driver itself in a container to get ground truth (see below).
++
++## Symptom
++`timing-predict` on `presets/predict_kimi_k3_b200_rank1_layer_{kda,mla}_prefill.json` gives
++KDA 8894 / 8972 / 8537 us for cases `[[0,16384]]` / `[[49152,16384]]` / 4x`[[0,4096]]` and
++MLA 11792 / 8002 / 7557 us for `[[49152,16384]]` / `[[0,16384]]` / 4x`[[0,4096]]`.
++Measured eager layer step (driver, GPU 7, `--profile-kernels`): KDA 22132 / 22535 / 22111 us,
++MLA 29538 / 20585 / 17763 us. The per-kernel tables show the measured step is ~95% kernel time (KDA 20959 of
++22132 us; MLA 24785 of 29538 us) with 41-75 launches, so launch overhead is NOT the gap. Top kernels (KDA
++1x16384 first chunk): `nvjet_sm100_tst_128x256_64x6_2x1_2cta` 6111 us, `nvjet_sm100_tss_128x256_64x6_2x1_2cta`
++5817 us, `bmm_MxE4m3_MxE2m1MxE4m3_Fp32_Ab32_Bb32` (routed MXFP4 MoE) 2963 us, `sglang::attn_res_fused_tma_kernel`
++1883 us. MLA prefix case adds `fmhaSm100aKernel_QkvE4m3OBfloat16HQk19...` 6144 us (prefix attention).
++Tables: `scripts-local/vibesim-analysis-container/kimi_single_layer/profiles/prefill_{kda,mla}_B*_L*pf*.json`
++(read-only), step totals in `.../kimi_single_layer/result_prefill_{kda,mla}.json`.
++
++## What to do
++1. Reconcile leaf by leaf against the profile tables (kernel name -> leaf): for each large kernel group
++   decide whether the predictor (a) has no leaf for it, (b) has the leaf but with the wrong shape (e.g. the
++   fused front GEMM at T=16384 rows is one 7168 -> 15984+6016 GEMM, the shared experts run at T rows, the routed
++   MoE physically processes 2T = 32768 rows, latent up/down at 2T or T), or (c) has the right shape but the row
++   was measured under different conditions than the layer (e.g. cuBLAS `nvjet` heuristics at m = 16384 pick a
++   2-CTA 128x256 tile that runs at ~50% of peak: a 16384 x 7168 x 15984 GEMM is 3.75 TFLOP; 6.1 ms means
++   ~0.6 PFLOP/s). Prefer measuring the exact production call (same shapes, dtypes, out_dtype, weights layout)
++   in the runner over adjusting numbers.
++2. Where the leaf is right but the measurement differs, verify with a direct probe in the sglang container:
++   `docker run --rm --gpus '"device=GPU-c88e489a-0693-2c29-a1e3-30952377f742"' -e CUDA_VISIBLE_DEVICES=0 -e HF_HUB_OFFLINE=1 --shm-size 32g -v /raid/hf/hub:/raid/hf/hub:ro -v /raid/yilegu/flashinfer_cache:/root/.cache/flashinfer -v /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/kimi_single_layer_decode.py:/tmp/kimi_single_layer_decode.py:ro --workdir /tmp lmsysorg/sglang:v0.5.20 python3 /tmp/kimi_single_layer_decode.py --point 1,16384,pf --attn-type kda --moe-backend flashinfer_mxfp4 --attn-heads 12 --experts 112 --ep 8 --local-topk 2 --hidden-scale 1.0 --bf16-gemm-init --iters 10 --warmup 3 --profile-kernels /tmp/p.json`
++   (MLA: `--attn-type mla --attention-backend cutedsl_mla --kv-cache-dtype fp8_e4m3`, points `1,16384,pf49152`
++   etc.). `--bf16-gemm-init` reproduces the production scheduler's bf16 GEMM backend init (auto -> cutedsl on
++   SM100); the earlier tables were taken WITHOUT it (cuBLAS-only), so re-profile with it and compare.
++3. Target: each of the six cases within 15% of the measured step, and the top-5 kernels within 25% each.
++   Update the alignment doc section with the per-leaf table (predicted vs measured, before/after).
++4. Keep decode predictions unchanged (B=1/32/128 and the b512 presets); `just test-cpu` green; commit.
++
++Do not touch `main/`, the shared `profiling/profile.db`, the driver/judge. Do not run while a judge trial
++container (`judge_k3_*`, `iteropt_k3_*`) is on GPU 7 if you can avoid it: bursty profiling inflated a judge
++measurement 3x earlier today; prefer short bursts and medians.
+diff --git a/scripts-local/vibesim-analysis-container/codex_tasks/b2_addendum.md b/scripts-local/vibesim-analysis-container/codex_tasks/b2_addendum.md
+new file mode 100644
+index 0000000..313cea9
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/codex_tasks/b2_addendum.md
+@@ -0,0 +1,28 @@
++
++
++## ADDENDUM (operator, after your first attempt)
++Your earlier run already wrote these files on this branch (uncommitted; keep and finish them, do
++not start over): `profiling/kernels/{kda_recurrent_decode,kda_fused_decode,mla_decode_attention,mxfp4_fused_moe}.py`,
++`profiling/runners/attention/{kda_recurrent_decode,kda_fused_decode,mla_decode_attention,gdn_causal_conv_decode_sglang_triton,gdn_gated_rms_norm_sglang_triton}.py`,
++`profiling/runners/moe/mxfp4_fused_moe.py`, edits to `profiling/exec/env.py`, `profiling/exec/local.py`,
++`profiling/kernels/{__init__,batched_gemm,gdn_causal_conv_decode,gdn_gated_rms_norm}.py`,
++`profiling/runners/gemm/batched_gemm.py`, Rust twins `simulator/src/timing/kernels/{kda_fused_decode,kda_recurrent_decode,mla_decode_attention,mxfp4_fused_moe}.rs`
+++ `mod.rs`/`slot_input.rs`, and tests `tests/test_kimi_k3_profiling.py`, `tests/test_profile_container.py`,
++`tests/test_l1_single_gemm.py`. Review them (`git status`, `git diff`) and continue from there.
++
++**Known pre-existing breakage — do NOT try to fix it and do NOT touch it:** `cargo test -p simulator --lib`
++fails in THIS working tree with `error[E0432]: unresolved import req_frontend::schema::AcceptanceProfile`
++because the `alignment/load_generator/req-frontend` submodule checkout is rewound (6ecd16dd) relative to
++the commit the branch records (ec54cd08). That is the operator's local environment, unrelated to your
++change. Do not edit `simulator/src/common/request_family/autoregressive.rs`, the submodule, Cargo files,
++or anything under `alignment/`. The operator verifies your Rust twins in a clean worktree
++(`/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/main-k3-rust`) — you may run
++`cargo test -p simulator --lib` THERE after copying your `simulator/src/timing/kernels/*.rs`, `mod.rs` and
++`slot_input.rs` changes into that worktree (it is a detached checkout of this branch; copy files, do not
++commit there), and iterate until it passes; then make sure the same file contents are in this tree.
++
++Finish: Python tests green (`uv run pytest tests/test_kimi_k3_profiling.py tests/test_batched_gemm.py
++tests/test_gdn_causal_conv_decode.py tests/test_gdn_gated_rms_norm.py tests/test_profile_container.py -q`),
++Rust green in the worktree, then commit on `kimi-k3` (only your files; never `git add -A`) with the trailer
++`Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`, and write the report requested above
++(including the GPU smoke commands).
+diff --git a/scripts-local/vibesim-analysis-container/codex_tasks/b2_kernels_k3.md b/scripts-local/vibesim-analysis-container/codex_tasks/b2_kernels_k3.md
+new file mode 100644
+index 0000000..ce62742
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/codex_tasks/b2_kernels_k3.md
+@@ -0,0 +1,100 @@
++# Task: register the Kimi-K3 decode kernels in VibeSim's profiling layer (branch `kimi-k3`)
++
++You are in the VibeSim repository, on git branch `kimi-k3`. Do NOT switch branches. You have
++NO GPU here (`CUDA_VISIBLE_DEVICES` is empty): write and unit-test the code CPU-side; the
++GPU measurement runs are done by the operator afterwards with the exact commands you leave in
++your report. Use `uv run ...`. Follow the repo's skills, in this order, and quote in your
++report which steps you took from each: `skills/top-add-kernel/SKILL.md`,
++`skills/orchestrator-add-kernel-to-python-profile/SKILL.md`, `skills/impl-register-kernel/SKILL.md`,
++`skills/impl-wire-kernel-to-rust/SKILL.md`. Read `profiling/README.md` (kinds, backends,
++envs, `kernel-profile` CLI, the `UNIQUE(gpu_name, backend, <args>)` contract) before coding.
++Comments in English. Commit on `kimi-k3` with messages ending in
++`Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`.
++
++## Context
++Kimi-K3 (moonshotai/Kimi-K3) on sglang v0.5.20, NVIDIA B200, production per-GPU shape =
++attention TP8 rank (12 heads) + EP8 rank (112 mxfp4 routed experts). The decode step of one
++decoder layer launches ~24 kernels (per-kernel tables measured by our driver are at
++`/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/kimi_single_layer/profiles/*.json`
++— read them: `kda_prod_B{32,128}_L8192.json`, `mla_prod_B1_L1048576.json`, `mla_prod_B128_L8192.json`;
++fields: kernel name, count/step, total_us/step). sglang source for the call chains:
++`/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/k3_src_v0520/`
++(`models_kimi_k3.py`, `layers_attention_linear_kda_backend.py`, `_attn_dir/linear/kernels/kda_triton.py`,
++`_attn_dir/cutedsl_mla_backend.py`, `_attn_dir/trtllm_mla_backend.py`, `deepseek_v2.py`); the full
++package lives inside the docker image `lmsysorg/sglang:v0.5.20` at
++`/sgl-workspace/sglang/python/sglang` (you may `docker run --rm --entrypoint bash lmsysorg/sglang:v0.5.20 -c 'cat ...'`
++to read files; never pass `--gpus`).
++
++## Part 1 — a profiling environment for sglang v0.5.20 (B1)
++Add a docker-backed `ProfileEnv` named `sglang_k3_env` in `profiling/exec/env.py` (see how
++`vllm_env` is defined and how `profiling/exec/local.py` builds the container command and
++bind-mounts `profiling/ launcher/ gpu/` read-only), image `lmsysorg/sglang:v0.5.20`, with
++`/raid/yilegu/flashinfer_cache` mounted at `/root/.cache/flashinfer` (offline cubins), env
++`SGLANG_OPT_FUSED_KDA_VERIFY=0 HF_HUB_OFFLINE=1`, `--shm-size 32g`. The worker entrypoint
++must be `python -m profiling.exec.local_worker` inside that image (check that the image's
++python has `torch`, `triton`, `flashinfer`, `sglang` importable — it does — and whether
++`profiling/`'s own imports (e.g. pydantic/typer) are satisfied; if not, document the minimal
++extra `pip install` and make the env install them on first use or via a tiny derived
++Dockerfile `profiling/container/Dockerfile.sglang_k3`).
++
++## Part 2 — kinds and backends (B2). Decisions are FIXED (do not re-litigate):
++NEW kinds (different arg semantics from anything existing):
++1. `kda_recurrent_decode` — sglang's `fused_sigmoid_gating_delta_rule_update` (Triton, in
++   `sglang/kernels/ops/attention/fla/fused_sigmoid_gating_recurrent.py`), as called from
++   `TritonKDAKernel.decode` (`kda_triton.py`) with `is_kda=True, lower_bound=-5.0,
++   use_qk_l2norm_in_kernel=True`. Args: `num_heads, head_k_dim, head_v_dim, dtype (activations),
++   state_dtype (fp32|bf16), lower_bound`; sweep axis `batch_size`. Backend `sglang_triton`
++   (env `sglang_k3_env`), plus a `torch` semantic reference backend (multi-launch, CPU-testable
++   shapes) as the skill requires. ALSO the fused-decode variant sglang actually runs at 12 heads:
++   `kda_fused_decode` (tvm_ffi JIT CUDA in `sglang/kernels/ops/attention/kda_fused_decode`,
++   engaged when `_prepare_fused_decode` succeeds) — expose it as backend `sglang_fused` of the
++   SAME kind if its inputs map onto the same args (conv+recurrent+gated-norm fused), otherwise
++   as a second kind `kda_fused_decode` — state which and why.
++2. `mla_decode_attention` — dense absorbed-MLA decode over a paged latent KV (576 = 512 lora +
++   64 rope per token). Args: `num_heads, kv_lora_rank, rope_dim, q_dtype, kv_dtype (bf16|fp8_e4m3),
++   page_size`; sweep axes `batch_size, kv_len`. Backends `sglang_cutedsl_mla`
++   (`CuteDslMLABackend.forward_decode` path / the `cute_dsl_mla_decode` flashinfer op it calls)
++   and `sglang_trtllm_mla` (`TRTLLMMLABackend`, `flashinfer.decode.trtllm_batch_decode_with_kv_cache_mla`
++   or equivalent), and `sglang_triton` (`decode_attention_fwd` split-KV). Note trtllm-gen
++   rejects 64 < heads < 128 and cute-dsl needs page_size 64 — encode as `BackendSupport`/runner
++   validation, not silent fallbacks.
++3. `mxfp4_fused_moe` — flashinfer `trtllm_fp4_block_scale_moe` with MXFP4 weights (uint8 e2m1
++   packed, ue8m0 scales, group 32), SiTU activation with `gemm1_alpha=4.0, gemm1_clamp_limit=25.0`,
++   biases, DeepSeek-V3 grouped-sigmoid top-k routing (n_group=1, topk_group=1, top_k=16,
++   `routed_scaling_factor=1.0`), K3 shapes: `hidden_size=3584` (latent), `intermediate_size=3072`,
++   `num_experts=896, num_local_experts=112, top_k=16`. Reuse the weight preparation sglang's
++   `Mxfp4MoEMethod.process_weights_after_loading` performs (see how our driver fills random
++   valid fp4 weights in `kimi_single_layer_decode.py::_fill_mxfp4_experts`). Args mirror
++   `nvfp4_fused_moe` where sensible (`hidden_size, intermediate_size, num_experts,
++   num_local_experts, top_k, input_dtype, weight_format="mxfp4_e2m1_ue8m0", group_size=32,
++   routing_method="deepseek_v3_sigmoid", activation="situ", layerwise_global_ppm/
++   folded_rank_position` if the repo's MoE kinds use them); sweep axis `num_tokens`.
++NEW backends on EXISTING kinds:
++4. `gdn_causal_conv_decode:sglang_triton` (`sglang.kernels.ops.mamba.causal_conv1d_triton.causal_conv1d_update`,
++   channels 36864 for 96 heads / 4608 for 12 heads, kernel 4, silu) and
++   `gdn_gated_rms_norm:sglang_triton` (`sglang.kernels.ops.attention.fla.fused_norm_gate` FusedRMSNormGated,
++   hidden=128, sigmoid gate). The existing `vllm_triton` backends are H200-gated
++   (`profiling/runners/attention/_gdn_common.py`); add B200 to the sglang backends' `supports`.
++5. `batched_gemm:sglang_k3_absorb` — the two absorb bmm's `q_nope @ w_kc` (num_batches=heads,
++   k=128, n=512) and `attn_out @ w_vc` (k=512, n=128) for heads in {12, 96}; the existing
++   runner pins GLM shapes (`profiling/runners/gemm/batched_gemm.py`).
++Reuse as-is (no code): `single_gemm:sglang_bf16_auto/sglang_fused_a_auto`, `gemm_fp32_output:sglang_router_auto`,
++`rms_norm`, `residual_rms_norm`, `mla_cache_append:sglang_cuda`, `elementwise`.
++
++For every new kind: Python `profiling/kernels/<kind>.py` (KIND string, frozen Args, `register(...)`
++per backend with `subprocess_env="sglang_k3_env"`), runner(s) under `profiling/runners/...`, the
++barrel import in `profiling/kernels/__init__.py`, the Rust twin `simulator/src/timing/kernels/<kind>.rs`
++(`KernelConfig`/`SweepCoords`/`KernelSpec` with the SAME KIND string, `register_kernel!`), and
++the unit tests the skills demand (`cargo test -p simulator --lib` for the Rust twin — run it;
++`uv run pytest` for the Python registry/schema tests — run them; CPU only).
++
++## Do NOT
++- write to `profiling/profile.db` (the shared DB) — no measurements here at all;
++- change existing kinds' arg schemas or existing backends' behaviour;
++- use a GPU.
++
++## Report
++End with (a) files added/changed, (b) test results, (c) the exact `uv run python -m launcher
++kernel-profile run <kind> --backend <b> --spec '{...}' --db /tmp/k3_smoke.db --gpu-name "NVIDIA B200"`
++smoke commands for each new kind/backend at ONE representative K3 shape, (d) anything you could
++not resolve from the sources (say so explicitly rather than guessing).
+diff --git a/scripts-local/vibesim-analysis-container/codex_tasks/b2c_fused_kda_fix.md b/scripts-local/vibesim-analysis-container/codex_tasks/b2c_fused_kda_fix.md
+new file mode 100644
+index 0000000..687e448
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/codex_tasks/b2c_fused_kda_fix.md
+@@ -0,0 +1,36 @@
++# Task: fix the `kda_fused_decode:sglang_fused` profiling runner (VibeSim repo, branch `kimi-k3`)
++
++You are in the VibeSim repository on branch `kimi-k3` (do not switch). CPU only, `uv run --no-sync`. Touch ONLY
++`profiling/runners/attention/kda_fused_decode.py` (+ its test in `tests/test_kimi_k3_profiling.py` if needed);
++`git add` only those; commit with trailer `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`.
++Another agent works in a separate worktree; do not touch `simulator/` or `model/`.
++
++## The failure (GPU smoke on B200, slurm 888)
++`uv run python -m launcher kernel-profile run kda_fused_decode --backend sglang_fused --spec
++'{"batch_size":128,"num_heads":12,"head_k_dim":128,"head_v_dim":128,"dtype":"bf16","state_dtype":"bf16","lower_bound":-5.0}'`
++→ `Tensor match failed for Tensor<1536>[strides=<1>, dtype=float32] at
++/sgl-workspace/sglang/python/sglang/kernels/jit/csrc/attention/kda_fused_decode.cuh:974 - Size mismatch for
++shape#0: expected 128 but got 1536`. The runner hands a 1536-element fp32 tensor where the kernel expects a
++128-element one — an argument order / layout mismatch against the real call site.
++
++## Ground truth to match exactly
++- Call site: `sglang/srt/layers/attention/linear/kda_backend.py` (`KDAAttnBackend.forward_decode`, the
++  `kda_fused_decode` branch around lines 663-712) and the stash it consumes, built by
++  `KimiK3DeltaAttention._prepare_fused_decode` (`sglang/srt/models/kimi_k3.py` ~1870-1912): the stash is
++  `(conv_w_q[4,seg], conv_w_k[4,seg], conv_w_v[4,seg], conv_bias[3*seg] fp32, A_log[12] fp32 (reshape(-1) of
++  A_log), o_norm_weight[128] fp32, o_norm_eps)`, seg = 12*128 = 1536, conv weights transposed fp32 contiguous
++  slices of `conv_weights.t()`; dt_bias is `[seg]` fp32; recurrent state `[slots, 12, 128, 128]` fp32 or bf16;
++  conv state `[slots, 3, 3*seg]` bf16; `mixed_qkv [B, 3*seg]` bf16, `a`(forget-gate input, `[B, seg]` bf16),
++  `b` (`[B, 12]` bf16), `lower_bound=-5.0`. Read those files inside the image:
++  `docker run --rm --entrypoint bash lmsysorg/sglang:v0.5.20 -c 'sed -n 640,720p /sgl-workspace/sglang/python/sglang/srt/layers/attention/linear/kda_backend.py; grep -n "def kda_fused_decode\|def forward\|Tensor" /sgl-workspace/sglang/python/sglang/kernels/ops/attention/kda_fused_decode/__init__.py | head -60'`
++  and the kernel's parameter contract in `sglang/kernels/jit/csrc/attention/kda_fused_decode.cuh` (around
++  line 974 and the function signature) to see which parameter is checked for 128 elements (it is the
++  o_norm weight; make sure you are not passing dt_bias or conv_bias there) and the exact expected shapes of
++  every tensor. Do not guess; quote the signature in a comment.
++- The driver that exercises the production path end-to-end for reference:
++  `/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/kimi_single_layer_decode.py`
++  (search `_prepare_fused_decode`, `KDAState`).
++
++## Deliverable
++Fixed runner; `uv run --no-sync pytest tests/test_kimi_k3_profiling.py -q` green; commit; report the exact
++argument list you now pass (name, shape, dtype) next to the kernel signature.
+diff --git a/scripts-local/vibesim-analysis-container/codex_tasks/b2d_mla_cache_append_fp8.md b/scripts-local/vibesim-analysis-container/codex_tasks/b2d_mla_cache_append_fp8.md
+new file mode 100644
+index 0000000..e0ca592
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/codex_tasks/b2d_mla_cache_append_fp8.md
+@@ -0,0 +1,33 @@
++# Task: `mla_cache_append:sglang_cuda` must cover Kimi-K3's paged fp8 latent-KV append (branch `kimi-k3-arch`)
++
++Worktree `/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/main-k3-rust`, branch `kimi-k3-arch` (do not cd to
++`.../main`). CPU only; `uv run --no-sync ...`; `cargo` at `~/.cargo/bin` (only if a Rust twin needs touching —
++prefer not). Touch ONLY `profiling/runners/attention/mla_cache_append.py` (+ `mla_cache_append_reference.py` if
++needed), `profiling/kernels/mla_cache_append.py`, and their tests; `git add` only those; commit with trailer
++`Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`. Another process runs the launcher in this worktree
++concurrently — keep edits atomic and do not run `cargo build`.
++
++## Failure (GPU JIT-fill of presets/predict_kimi_k3_b200_rank1_layer_mla.json, slurm 905)
++`mla_cache_append:sglang_cuda profiled 0/70 specs; 70 failed (torch mla_cache_append requires cache_format='plain',
++got 'page_planar_fp8')`. The K3 MLA worklet (`simulator/src/worklet/kimi_k3_mla_local.rs:167`) requests
++`cache_format="page_planar_fp8"`, `kv_dtype=fp8_e4m3`, `block_size=64`, `kv_lora_rank=512`, `rope_dim=64`,
++input bf16 — the cookbook B200 recipe (`--kv-cache-dtype fp8_e4m3`, cutedsl_mla with page 64).
++
++## What sglang v0.5.20 actually launches for that path (measured with the real layer on B200)
++One kernel per decode step: `sglang::set_mla_kv_concat_q_fp8_kernel<8, true, long>` (17.5 us at B=128) — the
++fp8 branch of `MLATokenToKVPool.set_mla_kv_buffer` / the cute-dsl backend's KV write in
++`sglang/srt/layers/attention/cutedsl_mla_backend.py` (`forward_decode`, look for `set_mla_kv_buffer` /
++`set_mla_kv_concat_q_fp8`). Read the exact call inside the image:
++`docker run --rm --entrypoint bash lmsysorg/sglang:v0.5.20 -c 'grep -rn "set_mla_kv_concat_q_fp8\|def set_mla_kv_buffer" /sgl-workspace/sglang/python/sglang/srt/mem_cache/memory_pool.py /sgl-workspace/sglang/python/sglang/srt/layers/attention/cutedsl_mla_backend.py /sgl-workspace/sglang/python/sglang/kernels/ops -r | head -20'`
++and the wrapper's signature (`sglang/kernels/ops/...` or `sgl_kernel`). The pool buffer for page_size 64 is
++`(num_pages*64 + 64, 1, 576)` fp8 (K3: kv_lora_rank 512 + rope 64), written at `out_cache_loc` per token with
++the bf16 latent+rope input quantized to fp8 (scale 1.0 unless the call passes one).
++
++## Change
++Add `cache_format="page_planar_fp8"` support to the `sglang_cuda` backend runner: build the fp8 paged pool
++operands (block_size 64 pages, scattered slots like the plain path), call the real sglang kernel exactly as the
++backend does, time it with the existing Timer/Energy helpers, and report bytes = tokens*(576 input bf16 read +
++576 fp8 written). Keep `plain` working. Extend the kind's validation/`BackendSupport` so `sglang_cuda` advertises
++both formats on B200 and `torch`/`vllm_cuda` keep their current contract. Update tests
++(`tests/test_mla_cache_append*.py` or wherever this kind is tested). Report: the exact kernel call you wrap
++(module path + signature) and the test result.
+diff --git a/scripts-local/vibesim-analysis-container/codex_tasks/b2e_mla_decode_grid.md b/scripts-local/vibesim-analysis-container/codex_tasks/b2e_mla_decode_grid.md
+new file mode 100644
+index 0000000..993e890
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/codex_tasks/b2e_mla_decode_grid.md
+@@ -0,0 +1,31 @@
++# Task: `mla_decode_attention` sweep grid + cute-dsl constraints (branch `kimi-k3-arch`)
++
++Worktree `/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/main-k3-rust`, branch `kimi-k3-arch` (do not cd to
++`.../main`). `uv run --no-sync ...`, `cargo` at `~/.cargo/bin` (retry on build-dir lock; another agent edits
++`model/work/**` and `simulator/src/arch/kimi_k3_sglang.rs` concurrently — do NOT touch those). Touch only
++`simulator/src/timing/kernels/mla_decode_attention.rs`, `profiling/runners/attention/mla_decode_attention.py`,
++`profiling/kernels/mla_decode_attention.py` and their tests. Commit with the trailer
++`Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`.
++
++## Failure (GPU JIT-fill of presets/predict_kimi_k3_b200_rank1_layer_mla.json, slurm 910)
++`mla_decode_attention:sglang_cutedsl_mla profiled 134/153 specs; 19 failed`:
++  * 9x `Expected block_num % (128 / block_size) == 0, got block_num=1 and block_size=64` — the sweep asks
++    kv_len=64 (one 64-token page); the cute-dsl MLA decode kernel needs an even page count at page 64, i.e.
++    kv_len a multiple of 128. sglang itself never launches it with a single page (check how
++    `cutedsl_mla_backend.py` sizes/pads the page table for short sequences and mirror that: pad kv_len up to
++    the next multiple of 128 and document it in the runner, or make the Rust sweep grid start at 128 — do
++    BOTH so the cache key set the arch asks for is always measurable).
++  * 1x CUDA OOM (72 GiB KV) at the grid corner (largest batch × 1,048,576 kv) — cap the sweep grid so the
++    fp8/bf16 KV footprint stays under ~48 GiB (batch × kv_len × 576 × elem_bytes) and make the runner raise
++    `ProfilerNotImplemented` (not a crash) for shapes beyond the pool it can allocate; the K3 workload points
++    that MUST stay measurable are (B=1,kv=1,048,576), (B=16,kv=65,536), (B=128,kv=8,192).
++Then the arch lookup `missing profile entry for mla_decode_attention:sglang_cutedsl_mla spec {batch_size:1,
++kv_len:64,...}` must no longer occur: whatever grid the Rust `SweepCoords` enumerates must be exactly what the
++runner can measure (read `simulator/src/timing/kernels/mla_decode_attention.rs` `sweep_grid`/`enumerate` and
++the base kernel's interpolation contract in `simulator/src/timing/` so a kv_len below the first grid point is
++still resolvable — e.g. clamp or include 128 as the floor).
++Apply the same grid sanity to the `sglang_trtllm_mla` and `sglang_triton` backends (trtllm also uses page 64).
++
++## Verify
++`uv run --no-sync pytest tests/test_kimi_k3_profiling.py -q`; `cargo test -p simulator --lib mla_decode` green;
++paste the new kv_len/batch grids. Report files changed + the grids.
+diff --git a/scripts-local/vibesim-analysis-container/codex_tasks/b3_model_work_k3.md b/scripts-local/vibesim-analysis-container/codex_tasks/b3_model_work_k3.md
+new file mode 100644
+index 0000000..2e96890
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/codex_tasks/b3_model_work_k3.md
+@@ -0,0 +1,93 @@
++# Task: add the Kimi-K3 "necessary work" label to `model/work` (VibeSim repo, branch `kimi-k3`)
++
++You are in the VibeSim repository (this directory), on git branch `kimi-k3`. Do NOT switch
++branches. Do NOT use any GPU (`CUDA_VISIBLE_DEVICES` is empty on purpose; everything here is
++CPU-only Python). Run Python through `uv run ...` (the repo's `.venv`). Follow the repo's own
++skill for this job: read `skills/impl-add-model-work-label/SKILL.md` first and follow it,
++including its rules about deriving the architecture from the TRUE model code/config (not from
++a shrunk experiment config) and adding hand-derived goldens. Write code comments in English.
++
++## Goal
++Register **Kimi-K3** (`moonshotai/Kimi-K3`) in the independent FLOP/byte accountant so that
++```
++uv run python -m model.work model/config/kimi_k3.json --decode 128x8192 --gpu B200 --json
++uv run python -m model.work model/config/kimi_k3.json --decode 1x1048576 --gpu B200 --json
++uv run python -m model.work model/config/kimi_k3.json --prefill 8192@0 --gpu B200 --json
++```
++all run green, and `uv run pytest tests/test_model_work.py -q` passes with new K3 goldens.
++
++## Inputs you have
++- `model/config/kimi_k3.json` — the verbatim HF `config.json` of moonshotai/Kimi-K3 (already
++  placed; do not "simplify" it). Note it is a VL-style wrapper: the LM config is under
++  `text_config`; `architectures` = `["KimiLinearForCausalLM"]`, `model_type` = `kimi_linear`.
++  Register BOTH `KimiLinearForCausalLM` and `KimiK3ForConditionalGeneration` (sglang's entry
++  class names) in `model/work/registry.py`.
++- The sglang v0.5.20 model code for K3 is readable at
++  `/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/k3_src_v0520/`
++  (`models_kimi_k3.py` = `sglang/srt/models/kimi_k3.py`, `configs_kimi_linear.py`,
++  `deepseek_v2.py` for the MLA absorbed decode path, `layers_attention_linear_kda_backend.py`
++  and `_attn_dir/linear/kernels/kda_triton.py` for the KDA decode chain). Inventory the matmuls
++  and state traffic from THAT code, not from memory of similar models.
++
++## Architecture facts to encode (verify each against the sources above)
++- 93 decoder layers. Layer 0 (index 0) is a DENSE MLP layer (`first_k_dense_replace=1`,
++  `intermediate_size=33792`, SiTU/gated activation); layers 1..92 are MoE (`moe_layer_freq=1`).
++- Attention is HYBRID per `text_config.linear_attn_config`: `full_attn_layers` (24 layers,
++  1-based indices [4,8,...,92,93]) are dense **MLA**; `kda_layers` (69) are **KDA** (Kimi Delta
++  Attention, a gated-deltanet linear attention). Use the explicit lists, not a fixed cadence.
++- **KDA layer** (`KimiK3DeltaAttention`): 96 heads x head_dim 128 (`linear_attn_config`),
++  projections from hidden 7168: q/k/v (3 x 96*128 = 36864 total), beta `b_proj` (96), and with
++  `use_full_rank_gate: true` the forget gate `f` and output gate `g` are FULL-RANK
++  7168 -> 96*128 each (no low-rank 128 bottleneck); short causal conv1d (kernel 4) over the
++  q/k/v channels with a per-request conv state of (kernel-1) x 36864; the recurrent
++  delta-rule state is per request 96 x 128 x 128 (fp32 by default; bf16 with
++  `--mamba-ssm-dtype bfloat16`) read AND written every decode step; `FusedRMSNormGated`
++  output norm (per head, 128); `o_proj` 96*128 -> 7168. Decode FLOPs of the recurrent step
++  are O(heads*d_k*d_v) per token. Prefill uses the chunked delta-rule path.
++- **MLA layer** (`KimiK3MLAAttention`, DeepSeek-V3 style, absorbed decode): 96 heads,
++  `q_lora_rank 1536`, `kv_lora_rank 512`, `qk_nope_head_dim 128`, `qk_rope_head_dim 64`,
++  `v_head_dim 128`. Decode: `fused_qkv_a_proj_with_mqa` 7168 -> 1536+576, `q_a_layernorm`
++  (1536) and `kv_a_layernorm` (512), `q_b_proj` 1536 -> 96*192, absorb `q_nope @ w_kc`
++  (per head [128 x 512]), attention over the latent KV cache of 576 (=512+64) per token per
++  layer (bf16 by default; fp8_e4m3 with `--kv-cache-dtype fp8_e4m3`), `attn_out @ w_vc` (per
++  head [512 x 128]), `o_proj` 96*128 -> 7168, and with `mla_use_output_gate: true` an extra
++  gate projection 7168 -> 96*128 + sigmoid multiply on the o_proj input. KV cache bytes per
++  token = 576 x elem_bytes for each of the 24 MLA layers only.
++- **MoE (layers 1..92)**: router gate 7168 -> 896 (bf16 in / fp32 logits), grouped sigmoid
++  top-16 with `e_score_correction_bias` (`noaux_tc`), `routed_scaling_factor 1.0`;
++  **latent MoE**: `routed_expert_down_proj` 7168 -> 3584 (`routed_expert_hidden_size`),
++  routed experts operate in the 3584 space: gate_up 3584 -> 2x3072, down 3072 -> 3584, then
++  `routed_expert_norm` RMSNorm(3584) and `routed_expert_up_proj` 3584 -> 7168; 2 shared
++  experts in FULL hidden space: gate_up 7168 -> 2x(2*3072)=12288 total... verify the exact
++  shared-expert intermediate from the code (`KimiK3MLP` with `num_shared_experts=2` and
++  `moe_intermediate_size=3072`), down -> 7168. Routed experts are **MXFP4** (4-bit e2m1
++  weights, group 32, one uint8 E8M0 scale per 32 weights: 0.5 B/weight + 1/32 B/weight of
++  scale) per `quantization_config` (`format: mxfp4-pack-quantized`, targets Linear; in the
++  shipped checkpoint only the routed experts are quantized — attention, shared experts,
++  dense MLP, embeddings and lm_head stay bf16). `model/work/quantization.py` currently
++  supports only fp8/modelopt-NVFP4: add MXFP4 (`compressed-tensors`-style config) with
++  `converted_prefixes` limited to the routed experts.
++- Norms: `input_layernorm`, `post_attention_layernorm` (fused residual add) per layer, final
++  norm; vocab 163840, untied embeddings + lm_head; `num_nextn_predict_layers = 0` (no MTP).
++
++## How to build it
++- Template files: `model/work/models/qwen3_6_moe.py` (hybrid `LayerStack`s of a linear
++  attention + MoE), `model/work/attention/linear.py` (GatedDeltaNet — KDA is its cousin; add
++  a KDA spec with the full-rank gates and beta), `model/work/attention/glm52_dsa.py` lines
++  50-89 (absorbed-MLA matmul groups — reuse WITHOUT the DSA indexer, i.e. a plain `mla.py`),
++  `model/work/ffn/moe.py` (needs an `expert_input_dim`/latent size distinct from hidden, the
++  latent down/up projections, the routed norm, and 2 shared experts), `model/work/ffn/dense.py`
++  for layer 0. Tag the stacks `dense`, `kda`, `mla` so location maps can address them later.
++- Add `model/work/models/kimi_k3.py`, register in `model/work/registry.py`, extend
++  `quantization.py`, add goldens in `tests/test_model_work.py` (hand-derive the per-layer
++  parameter counts and decode bytes for one KDA layer, one MLA layer and the MoE block at
++  B=128, L=8192 and show the arithmetic in comments; total params should come out near the
++  official 2.8T).
++- A location map is NOT part of this task (the simulator arch does not exist yet).
++
++## Deliverable
++Commit your work on branch `kimi-k3` in one or a few commits with clear messages, each ending
++with the trailer line `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`.
++Finish with a short report: files added/changed, the three CLI outputs above (summarized),
++and any architecture question you could not resolve from the sources (do not guess silently
++— state it).
+diff --git a/scripts-local/vibesim-analysis-container/codex_tasks/b3b_model_work_k3_fix.md b/scripts-local/vibesim-analysis-container/codex_tasks/b3b_model_work_k3_fix.md
+new file mode 100644
+index 0000000..30a1a68
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/codex_tasks/b3b_model_work_k3_fix.md
+@@ -0,0 +1,45 @@
++# Task: two corrections to the Kimi-K3 `model.work` label (VibeSim repo, branch `kimi-k3`)
++
++You are in the VibeSim repository on git branch `kimi-k3` (do not switch). CPU only
++(`CUDA_VISIBLE_DEVICES` empty), `uv run ...`. Commit `9ab54685` added `model/work/models/kimi_k3.py`,
++`model/work/attention/mla.py`, the KDA spec in `model/work/attention/linear.py`, MoE/quantization
++changes and goldens in `tests/test_model_work.py`. Another agent is concurrently editing
++`profiling/` and `simulator/` on this branch: touch ONLY `model/work/**` and `tests/test_model_work.py`,
++and `git add` only those paths (never `git add -A`). Follow `skills/impl-add-model-work-label/SKILL.md`
++conventions; comments in English; commit message ends with
++`Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`.
++
++## Correction 1 — KDA gate ranks (verified in the sglang v0.5.20 source, do not re-derive from memory)
++`KimiK3DeltaAttention.__init__` with `use_full_rank_gate=True`
++(`/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/k3_src_v0520/models_kimi_k3.py`
++lines 1447-1500): `fused_qkvg_proj = MergedColumnParallelLinear(hidden, [P, P, P, P])` with
++P = num_heads*head_dim = 12288 — i.e. q, k, v AND the output gate **g** are full-rank 7168 -> 12288
++each; `b_proj` 7168 -> num_heads (96); the forget gate **f** stays LOW-RANK: `f_a_proj` 7168 -> 128
++(head_dim) then `f_b_proj` 128 -> 12288. The previous task's prompt wrongly said both f and g are
++full-rank. Fix the KDA spec accordingly (per-layer KDA projection params = 4*7168*12288 +
++7168*96 + 7168*128 + 128*12288 + o_proj 12288*7168), keep semantic names stable where possible
++(a new `kda.f_a`/`kda.f_b` split is fine — document it), and update every golden that changes
++(show the arithmetic in comments). Re-check the total parameter count against the official ~2.8T.
++
++## Correction 2 — attention-residual stream (production path, currently missing)
++`text_config.attn_res_block_size = 12` (real HF config) turns on K3's attention-residual stream
++(`KimiK3DecoderLayer.__init__` lines 2429-2445 and `_forward_attn_residual` 2640-2760;
++`sglang/srt/layers/attn_residual.py` — readable via
++`docker run --rm --entrypoint bash lmsysorg/sglang:v0.5.20 -c 'cat /sgl-workspace/sglang/python/sglang/srt/layers/attn_residual.py'`).
++Per decoder layer this adds: two score projections `self_attention_res_proj` and `mlp_res_proj`
++(each hidden 7168 -> 1, bf16), two extra RMSNorms (`self_attention_res_norm`, `mlp_res_norm`,
++7168), and two aggregations per layer over the snapshot bank: a layer at index i (0-based) reads
++`nvb = ceil(i/12)` banked rows of [T, 7168] bf16 (bank of `ceil(93/12) = 8` rows per token), scores
++them (dot with the [7168] score vector after the score norm), softmax-weights and sums them with
++the current prefix; write-layers (i % 12 == 0) additionally snapshot one [T, 7168] row into the
++bank. Model this as necessary work (bytes = nvb*T*7168*2 read per aggregation, plus the row write
++on write layers; flops = 2*nvb*T*7168 per aggregation for the score dot + the weighted sum) with
++semantic names under the layer tags (e.g. `kda.attn_res.agg1`, `kda.attn_res.agg2`,
++`mla.attn_res.*`, `dense.attn_res.*`) so a location map can bind them, plus the per-layer
++`attn_res` weight bytes. Also the model-level final aggregation (`output_attn_res_proj`/`_norm`).
++Add goldens for one KDA layer at B=128, L=8192 with nvb = 1 (layer 5) and the model total.
++
++## Deliverable
++Commit on `kimi-k3`; `uv run pytest tests/test_model_work.py -q` green; re-run
++`uv run python -m model.work model/config/kimi_k3.json --decode 128x8192 --gpu B200 --json` and
++report the new total params and decode ms next to the old (2,785,387,508,480 / 195.814 ms).
+diff --git a/scripts-local/vibesim-analysis-container/codex_tasks/b4_addendum.md b/scripts-local/vibesim-analysis-container/codex_tasks/b4_addendum.md
+new file mode 100644
+index 0000000..689b497
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/codex_tasks/b4_addendum.md
+@@ -0,0 +1,20 @@
++
++## ADDENDUM (operator)
++- You are in the git WORKTREE `/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/main-k3-rust` on branch
++  `kimi-k3-arch` (a clean checkout of `kimi-k3` at 368af34a with the correct `req-frontend` submodule, so
++  `cargo` builds here). Commit on `kimi-k3-arch`; the operator merges into `kimi-k3`. Do not cd into
++  `/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/main` (its submodule is rewound and Rust fails there).
++- `.venv` here is a symlink to the main checkout's venv: run Python as `uv run --no-sync python ...` /
++  `uv run --no-sync pytest ...` (never plain `uv sync`). `cargo` is at `~/.cargo/bin/cargo`.
++- `profiling/profile.db` has NO B200 rows yet for the new K3 kinds (they are measured later on GPU by the
++  operator); so deliverable 5 (timing-predict reaching the cache-miss stage) is exactly what is expected.
++- The K3 kinds/backends on this branch are: kinds `kda_recurrent_decode` (backends `torch`, `sglang_triton`),
++  `kda_fused_decode` (`sglang_fused`), `mla_decode_attention` (`sglang_cutedsl_mla`, `sglang_trtllm_mla`,
++  `sglang_triton`), `mxfp4_fused_moe` (`sglang_trtllm_mxfp4`); backends `gdn_causal_conv_decode:sglang_triton`,
++  `gdn_gated_rms_norm:sglang_triton`, `batched_gemm:sglang_k3_absorb`. Read their Rust twins under
++  `simulator/src/timing/kernels/` for the exact KernelConfig fields before wiring ops. Production KDA at 12
++  heads runs the FUSED kernel (`kda_fused_decode`), so the KDA decode worklet should use that kind (conv +
++  recurrence + gated norm in one leaf) with the split kinds as the alternative backend path if the config
++  supports backend lists.
++- The measured per-kernel launch tables live at
++  `/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/kimi_single_layer/profiles/{kda,mla}_prod_v2_B*_L*.json`.
+diff --git a/scripts-local/vibesim-analysis-container/codex_tasks/b4_arch_k3.md b/scripts-local/vibesim-analysis-container/codex_tasks/b4_arch_k3.md
+new file mode 100644
+index 0000000..60c0d75
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/codex_tasks/b4_arch_k3.md
+@@ -0,0 +1,101 @@
++# Task: the Kimi-K3 simulator arch recipe `kimi_k3_sglang` (branch `kimi-k3`)
++
++VibeSim repository, git branch `kimi-k3` (do not switch). CPU only (`CUDA_VISIBLE_DEVICES`
++empty). Use `uv run ...` for Python and `cargo` for Rust (`just test-cpu` = the CPU test
++gate). Follow the repo's skills and say in your report which steps of each you executed:
++`skills/top-add-new-arch/SKILL.md` (Phases 2-4; Phase 1's per-op decision table is given
++below), `skills/impl-compose-op/SKILL.md`, `skills/impl-compose-worklet/SKILL.md`,
++`skills/impl-compose-arch/SKILL.md`, `skills/impl-wire-new-arch/SKILL.md`,
++`skills/impl-add-model-work-label/SKILL.md` (only its location-map part — the `model.work`
++K3 label itself already exists on this branch: `model/work/models/kimi_k3.py`, read it and
++keep its semantic names). Comments in English. Commit on `kimi-k3` in logical steps; every
++commit message ends with `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`.
++Stop and write a clear question into your report (do not guess silently) whenever a design
++decision is not covered here.
++
++## What exists on this branch that you must build on
++- `model/config/kimi_k3.json` — verbatim HF config (LM under `text_config`).
++- `model/work/models/kimi_k3.py` (+ `attention/kda.py`, `attention/mla.py`, MoE changes,
++  MXFP4 quant) — the necessary-work label; its `LayerStack` tags are the semantic prefixes
++  your location map must consume exactly once each.
++- Profiling kinds/backends for the K3 kernels (see `git log` on this branch and
++  `profiling/kernels/{kda_recurrent_decode,mla_decode_attention,mxfp4_fused_moe}.py`, the
++  `sglang_triton`/`sglang_k3_absorb`/`sglang_cutedsl_mla`/`sglang_trtllm_mla` backends, env
++  `sglang_k3_env`) and their Rust twins under `simulator/src/timing/kernels/`.
++- Measured per-kernel tables from the real layer (what actually launches per decode step):
++  `/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/kimi_single_layer/profiles/*.json`.
++
++## Templates
++Hybrid recipe: `simulator/src/arch/qwen36_local.rs` + `simulator/src/worklet/qwen36_gdn_local.rs`
+++ `simulator/src/op/ssm/gdn_decode.rs`. DP/EP shape + per-layer recipe table:
++`simulator/src/arch/deepseek_v4_vllm.rs` (`LAYER_RECIPES`, `normalize_input` with
++`groups.len()==EP`, `gpus_per_replica/num_attn_dp_groups`). sglang-on-B200 backend dictionary:
++`simulator/src/arch/glm52_sglang_nvfp4_tp_dsa_moe.rs:85-106`. MoE worklet with EP split:
++`simulator/src/worklet/nvfp4_moe_local.rs` (`split_for_ep`). Absorbed-MLA worklet (minus the
++DSA indexer): `simulator/src/worklet/sglang_glm52_dsa_attn_local.rs`.
++
++## The model (decode-first; prefill worklets may be minimal but must exist and be honest)
++93 layers: layer 0 dense MLP (intermediate 33792, situ act), layers 1..92 MoE. Attention per
++`text_config.linear_attn_config`: `full_attn_layers` (24, 1-based [4,8,...,92,93]) = MLA,
++`kda_layers` (69) = KDA — use the explicit lists from the config, NOT a fixed cadence.
++Per-GPU production shape on B200 (the sglang cookbook recipe): **attention TP8** (12 of 96
++heads per GPU; MLA latent KV replicated across the 8 TP ranks unless DCP), **EP8** for the
++routed experts (112 of 896 local), **PP2** across the two 8-GPU nodes (each stage ~46
++layers). Model `Parallel { attn_tp_size, ep_size, pp_size, dcp_size(=1 for v1), gpu_name }`
++with TWO topologies that must both build: (a) production `attn_tp=8, ep=8, pp=2`;
++(b) **single-rank alignment topology** `attn_tp=1 (12 heads via a `heads_per_rank` override),
++ep=1 with `local_experts=112`, pp=1` — this is what our single-GPU driver measures, so a
++layer-level prediction can be aligned against it. Also support `sim_kda_layers` /
++`sim_mla_layers` overrides (predict ONE KDA or ONE MLA layer + nothing else; qwen36's
++`sim_num_layers` pattern, `qwen36_local.rs:323-334`) — the alignment probe is one layer.
++Communication in v1: attention-TP all-reduce of o_proj and the MoE EP all-to-all are
++modelled as ZERO-time leaves (named, so they can be filled later) — say so in the code.
++
++### Per-op decision table (Phase 1 output — fixed)
++KDA layer decode (12 heads/rank): `single_gemm` fused qkvbfg projection 7168 -> (3*12*128 + 2*12*128 + 12 [+pad])
++(the fused `qkvbfg_a_proj` sglang launches with use_full_rank_gate) | `gdn_causal_conv_decode:sglang_triton`
++(channels 3*12*128=4608, k=4) | `kda_recurrent_decode:sglang_fused` (the fused KDA decode kernel
++sglang runs at 12 heads: conv+recurrence+gated-norm; fall back to `sglang_triton` recurrent +
++`gdn_gated_rms_norm:sglang_triton` if the fused kind was registered as separate leaves — match
++what the branch's kinds provide) | recurrent state read+write per request 12x128x128 x state
++bytes (bf16 in the cookbook recipe) — fold into the recurrent kernel's bytes as the kind
++defines | `single_gemm` o_proj 12*128 -> 7168 | zero-time attn all-reduce leaf.
++MLA layer decode: `single_gemm:sglang_fused_a_auto` fused_qkv_a 7168 -> 2112 | `rms_norm` q_a
++(1536) and kv_a (512) | `single_gemm` q_b 1536 -> 12*192 | `batched_gemm:sglang_k3_absorb`
++q_nope@w_kc (12 x [m,128]x[128,512]) | `mla_cache_append:sglang_cuda` (576, fp8 in the recipe) |
++`mla_decode_attention:sglang_cutedsl_mla` (12 heads, kv fp8_e4m3, page 64) | `batched_gemm`
++@w_vc (12 x [m,512]x[512,128]) | `single_gemm` output gate 7168 -> 12*128 + `elementwise`
++sigmoid-mul | `single_gemm` o_proj 12*128 -> 7168 | zero-time attn all-reduce leaf.
++MoE (every layer 1..92): `single_gemm` merged front [7168 -> 12288 (2 shared gate_up) + 896
++(router) + 3584 (latent down)] — ONE GEMM, as sglang's `_merge_front_weights` fuses them
++(router logits fp32 via `gemm_fp32_output:sglang_router_auto` only if the branch models the
++router separately — pick one and state it) | routing: folded into `mxfp4_fused_moe` |
++`elementwise` situ on the shared gate_up | `single_gemm` shared down 6144 -> 7168 |
++`mxfp4_fused_moe:flashinfer_trtllm_sm100_sglang` (hidden 3584, inter 3072, 896/112 experts,
++top-16) | `rms_norm` routed norm (3584) | `single_gemm` latent up 3584 -> 7168 |
++`elementwise` add3 (routed + shared + residual) | zero-time EP a2a leaf.
++Layer glue: `residual_rms_norm` input/post-attention norms (7168). Model: embedding gather
++(`elementwise`), final `rms_norm`, lm_head `single_gemm` 7168 -> 163840 (per PP stage only
++where they live).
++
++## Deliverables
++1. Worklets `kimi_k3_kda_local`, `kimi_k3_mla_local`, `kimi_k3_moe_local`, `kimi_k3_dense_local`
++   (+ head/embedding reuse), arch `kimi_k3_sglang` with the recipe table and both topologies,
++   arms in `arch/config.rs` (`IterArchSel::KimiK3Sglang`, ProviderSchema), `arch/mod.rs`,
++   `arch/build.rs`, `deployment/unified.rs`.
++2. Presets: `presets/predict_kimi_k3_b200_sglang_tp8ep8pp2.json` (+ cases: decode B in
++   {1,32,128} at kv 8192, B=1 at 1048576, B=16 at 65536; the number of groups must equal
++   `num_attn_dp_groups()` of the topology — read `simulator/src/timing_predict.rs:171-249`) and
++   `presets/predict_kimi_k3_b200_rank1_layer_{kda,mla}.json` (single-rank, single-layer).
++3. Location map `model/work/location_maps/kimi_k3_sglang_unified.json` (every non-communication
++   leaf listed, every `model.work` semantic consumed once — `analyzer/rust/src/optimality/location.rs`
++   rules; run whatever validator the skill names).
++4. Tests in the style of `qwen36_local.rs:1041-1615` (slot/leaf-name freeze, resolved shapes,
++   normalize_input, KV/state bytes: MLA 576 x elem_bytes x 24 layers per token; KDA state
++   12x128x128 x elem + conv (k-1)x4608 x 2 per request per KDA layer) and `just test-cpu` green.
++5. `uv run python -m launcher timing-predict presets/predict_kimi_k3_b200_rank1_layer_kda.json`
++   must reach the kernel-cache lookup stage and fail ONLY with cache misses (rows come later
++   on GPU) — paste the miss list in your report. If it fails earlier, fix it.
++
++## Report
++Files, test results, the timing-predict miss list, and every open design question.
+diff --git a/scripts-local/vibesim-analysis-container/codex_tasks/b4b_kda_state_dtype.md b/scripts-local/vibesim-analysis-container/codex_tasks/b4b_kda_state_dtype.md
+new file mode 100644
+index 0000000..8602f7c
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/codex_tasks/b4b_kda_state_dtype.md
+@@ -0,0 +1,39 @@
++# Task: Kimi-K3 KDA worklet — pick the decode kernel chain by recurrent-state dtype (branch `kimi-k3-arch`)
++
++You are in the git worktree `/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/main-k3-rust` on branch
++`kimi-k3-arch` (clean checkout with a working `req-frontend` submodule; `cargo` at `~/.cargo/bin`; Python via
++`uv run --no-sync ...`, never `uv sync`). Do not cd to `.../main`. Commit on `kimi-k3-arch` with the trailer
++`Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`. Follow `skills/impl-compose-worklet/SKILL.md` and
++`skills/impl-compose-arch/SKILL.md` conventions; keep `just test-cpu` green (the `tests/test_l1_single_gemm.py::
++test_energy_*` failures are pre-existing on this host — ignore them).
++
++## Facts (verified on B200 with the real layer, 2026-09-22)
++- sglang's fused KDA decode kernel (`kda_fused_decode`, our kind `kda_fused_decode:sglang_fused`) is only
++  covered for an **fp32** recurrent state (`sglang/kernels/ops/attention/kda_fused_decode.py::covered` requires
++  `ssm_states.dtype == float32`).
++- The cookbook B200 recipes run `--mamba-ssm-dtype bfloat16`. With a bf16 state the KDA decode is the **unfused
++  Triton chain**: `causal_conv1d_update` (kind `gdn_causal_conv_decode:sglang_triton`, channels = 3*heads*128),
++  `fused_sigmoid_gating_delta_rule_update` (kind `kda_recurrent_decode:sglang_triton`, state_dtype bf16) and
++  `FusedRMSNormGated` (kind `gdn_gated_rms_norm:sglang_triton`, hidden 128, m = tokens*heads). Measured per
++  step at B=128, 12 heads: recurrent 29 us, conv 7 us, gated norm ~3 us (fused kernel would be 39 us).
++- Both are production paths (fp32 state = default/low-latency recipe; bf16 = balanced/high-throughput recipe).
++
++## Change
++1. Add a `kda_state_dtype` (fp32|bf16) parameter to the K3 arch selector (`IterArchSel::KimiK3Sglang` in
++   `simulator/src/arch/config.rs`, ProviderSchema, `build.rs` builder) and the KDA worklet config, defaulting
++   to **bf16** (the cookbook recipe). Thread it into the recurrent-state byte accounting (state bytes per
++   request = heads*128*128*elem) and KV/state reporting.
++2. KDA decode leaf selection: `kda_state_dtype == fp32` -> the single `kda_fused_decode` leaf (as now);
++   `bf16` -> three leaves `kda_conv_decode` (gdn_causal_conv_decode), `kda_recurrent_decode`
++   (kda_recurrent_decode, state_dtype bf16) and `kda_gated_norm` (gdn_gated_rms_norm). Leaf names must stay
++   stable per mode; update the location map (`model/work/location_maps/kimi_k3_sglang_unified.json`) so BOTH
++   modes' leaves are listed and every `model.work` semantic row is consumed exactly once in each mode — if the
++   map format is per-arch-type and cannot branch on a parameter, register two arch_type tags or two maps and
++   explain which the analyzer will pick; run the analyzer location tests.
++3. Presets: `predict_kimi_k3_b200_sglang_tp8ep8pp2.json` and `predict_kimi_k3_b200_rank1_layer_kda.json` use
++   bf16 (cookbook); add `predict_kimi_k3_b200_rank1_layer_kda_fp32state.json` for the fused path.
++4. Tests: slot/leaf-name freeze for both modes; state bytes for both dtypes.
++5. Verify: `just test-cpu`; `uv run --no-sync python -m launcher timing-predict presets/predict_kimi_k3_b200_rank1_layer_kda.json`
++   on CPU must reach the cache-miss listing and show the three split leaves (paste the listing).
++
++Report: files changed, test results, the two miss listings (bf16 and fp32 presets), and any question.
+diff --git a/scripts-local/vibesim-analysis-container/codex_tasks/b5_alignment_k3.md b/scripts-local/vibesim-analysis-container/codex_tasks/b5_alignment_k3.md
+new file mode 100644
+index 0000000..2593ad0
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/codex_tasks/b5_alignment_k3.md
+@@ -0,0 +1,48 @@
++# Task: run VibeSim's alignment on the Kimi-K3 single-layer probe (branch `kimi-k3-arch`)
++
++Worktree `/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/main-k3-rust`, branch `kimi-k3-arch` (do not cd to
++`.../main`). CPU only; `uv run --no-sync ...`; `cargo` at `~/.cargo/bin` (retry on build-dir lock).
++Set `VIBESIM_PROFILE_DB=/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/kimi_single_layer/k3_branch_profile.db`
++for every launcher/analyzer command (the K3 rows live in that branch DB, not in profiling/profile.db).
++Follow `skills/operate-run-alignment/SKILL.md` and `skills/top-align-with-framework/SKILL.md`; read
++`alignment/README.md` (kernel-align path: profile_log_dir + timing_predict_log_dir + labeled kernel sequences)
++and `alignment/labeling/README.md`. Commit artifacts that belong in the repo (label rules, the alignment yaml,
++a short markdown note) on `kimi-k3-arch` with trailer `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`;
++large logs stay out of git.
++
++## What exists
++- Measured side (a LAYER-LEVEL DEBUG PROBE — one KimiK3DecoderLayer driven by a synthetic driver under nsys,
++  20 decode iterations, B=128 requests at kv 8192, production TP8/EP8 rank shape, bf16 KDA state, fp8 MLA KV):
++  `/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/kimi_single_layer/align/kda_b128_l8192/`
++  and `.../mla_b128_l8192/`, each with `profile.nsys-rep`, `profile.sqlite`, `records/server.log`
++  (VibeSimAlignmentWorker + VibeSimAlignmentIteration records, adapter sglang_text), `metrics.jsonl`,
++  `parsed.json` and `kernel_sequences.json` (already produced with `python -m alignment parse --sqlite
++  --metrics --server-log --range-mode forward --default-stage decode`). 26 (KDA) / 29 (MLA) kernels per step.
++  Per-kernel torch.profiler tables for the same points: `.../kimi_single_layer/profiles/kda_prod_v3_bf16state_B128_L8192.json`
++  and `mla_prod_v2_B128_L8192.json`.
++- Simulated side: `presets/predict_kimi_k3_b200_rank1_layer_kda.json` (rank-1 topology, 1 KDA layer, cases
++  B=1/32/128 @8192) already predicted at `logs/predict_kimi_k3_b200_rank1_layer_kda` (warm branch DB) — the
++  B=128 case is the one to align (predicted 542us vs measured graph 623us / nsys busy ~600us). The MLA preset
++  `predict_kimi_k3_b200_rank1_layer_mla.json` is being filled on GPU right now; do the KDA alignment first and
++  leave the MLA one ready to run (yaml + rules) — run it too if `logs/predict_kimi_k3_b200_rank1_layer_mla`
++  is complete when you get there (check for `reports/iter_breakdown.ans`).
++
++## Do
++1. Write `profile_result.json` for each probe dir in the shape `launcher/alignment.py` requires (`log_dir`
++   equal to the profile dir, `sqlite`, `metrics_jsonl`, `parsed_nsys`, `kernel_sequences`, `gpu`,
++   `server_tp_size`=1, `server_dp_size`=1 ...) — read `alignment/profiler/runner.py:640-678` for the key list.
++2. `python -m alignment label initialize <kernel_sequences.json> <labeled.json>` then write label rules
++   (`label apply`) mapping every measured kernel of the KDA step to the modelled leaves of the K3 arch
++   (`unified.kda.attention.{input_layernorm,qkvbfg_a_proj,kda_conv_decode,kda_recurrent_decode,kda_gated_norm,
++   o_proj,post_attention_layernorm}`, `unified.kda.moe.{merged_front,shared_gate_up_activation,shared_down,
++   mxfp4_fused_moe,routed_norm,latent_up,add3}`); kernels with no modelled leaf (e.g. the two
++   `attn_res_fused_tma_kernel` launches of the attention-residual stream, cuda-graph glue) stay unmapped and
++   must be REPORTED with their per-step time. `label check` / `coverage` must pass.
++3. `launcher alignment analyze <yaml>` with `profile_log_dir` = the probe dir and `timing_predict_log_dir` =
++   the KDA prediction dir, iteration mode; select the B=128 case. Read
++   `reports/alignment_iteration_report.json` + `payloads/alignment_iteration_breakdowns.jsonl`.
++4. Report a table: per operation measured_ms vs simulated_ms, relative error, and the unmapped measured time;
++   the duration-weighted error; and the top 3 leaves to fix in the cost model (with the concrete suspected
++   cause, e.g. a kernel row measured at the wrong shape, a missing leaf, or the graph side-stream overlap the
++   probe measures but the cost tree sums serially). Mark clearly that this is layer-level probe evidence, not a
++   full-model alignment (no K3 checkpoint exists).
+diff --git a/scripts-local/vibesim-analysis-container/codex_tasks/b7_k3_r6_r7.md b/scripts-local/vibesim-analysis-container/codex_tasks/b7_k3_r6_r7.md
+new file mode 100644
+index 0000000..e273c70
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/codex_tasks/b7_k3_r6_r7.md
+@@ -0,0 +1,51 @@
++# Task: make R6/R7 (necessary work) available for Kimi-K3 timing-predict predictions (branch `kimi-k3-arch`)
++
++Worktree `/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/main-k3-rust`, branch `kimi-k3-arch` (do not cd to
++`.../main`). `uv run --no-sync ...`; `cargo` at `~/.cargo/bin`; `just test-cpu` is the gate (the 4
++`tests/test_l1_single_gemm.py::test_energy_*` failures are pre-existing on this host). Another process may run
++the launcher / cargo in this worktree concurrently: if cargo reports a build-directory lock, wait and retry.
++Commit on `kimi-k3-arch` with the trailer `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`. Follow
++`skills/impl-add-model-work-label/SKILL.md` (semantic maps, exact-iteration verification) and read
++`analyzer/rust/src/optimality/README.md`, `location.rs`, `floors.rs`, `run.rs`, `scoped.rs` first.
++
++## Symptom
++The baked prediction `logs/predict_kimi_k3_b200_rank1_layer_kda` (arch `kimi_k3_sglang`, rank-1 topology,
++`sim_kda_layers=1, sim_mla_layers=0, kda_state_dtype=bf16`, 3 decode cases) yields R0/R5 per node but
++R6/R7 = null. Scoped reports say: `r6_segmented_necessary: "semantic scope unavailable: no exact semantic
++location map for arch type \"kimi_k3_sglang\" and selected run manifest"` — `location.rs` requires ONE map
++whose location set EQUALS the manifest's non-communication leaf set, but the single-layer manifest has only the
++KDA layer's 12 leaves while `model/work/location_maps/kimi_k3_sglang_unified.json` lists 47 (whole model), and
++the fp32 twin map shares the same `arch_types`. The same will hit the rank-1 MLA preset and, once its layer
++overrides differ, the production preset.
++
++## Goal
++`analyze` (via `python -m launcher`/the analyzer binary, and the agent-facing `optimality`/`analyze` verbs in
++`scripts-local/vibesim-api`) returns non-null `r6_segmented_necessary`, `r7_scope_fused_necessary`,
++`necessary_share_r6_over_r0` for every non-communication node of:
++  1. `presets/predict_kimi_k3_b200_rank1_layer_kda.json` (bf16, split KDA chain)
++  2. `presets/predict_kimi_k3_b200_rank1_layer_kda_fp32state.json` (fused KDA)
++  3. `presets/predict_kimi_k3_b200_rank1_layer_mla.json`
++  4. `presets/predict_kimi_k3_b200_sglang_tp8ep8pp2.json` (full model, DP16/EP8/PP2)
++with values that are CORRECT for the truncated topology: the necessary work of ONE KDA layer at B tokens,
++not 93 layers, and per-rank (12 of 96 heads, 112 of 896 experts, PP stage layers) — i.e. the labeler must
++see the same topology the arch simulated. Design it the way the repo would (two candidates; pick one and
++justify, or propose a third):
++  (a) the arch emits, next to the manifest, the exact per-prediction semantic scope: which model.work
++      LayerStack tags/layer counts/rank shares apply (e.g. in `raw/params.json` or a sidecar) and the analyzer
++      derives the location subset + scale from it, so ONE authoritative full map per state-dtype suffices and
++      matching becomes "manifest ⊆ map, scaled by the emitted layer/rank factors";
++  (b) generate exact per-preset maps from the full map + the manifest (a `model/work` CLI that writes
++      `kimi_k3_sglang_<preset>_unified.json`) and teach `model.work` the layer/rank overrides so the label
++      matches the truncated topology.
++The two maps that currently share `arch_types: ["kimi_k3_sglang"]` must stop being ambiguous (tag by
++state-dtype/topology or fold into one map with per-mode locations, as the chosen design dictates).
++
++## Verify (paste outputs)
++- `uv run --no-sync python -m launcher timing-predict presets/predict_kimi_k3_b200_rank1_layer_kda.json` with
++  `VIBESIM_PROFILE_DB=/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/kimi_single_layer/k3_branch_profile.db`
++  (warm cache; the prediction re-runs on CPU) then `reports/optimality_report.json` / the scoped reports show
++  R6/R7 non-null and `necessary_ratio` non-null; list the per-leaf R0/R5/R6 for the B=128 case and sanity-check
++  the KDA-layer necessary bytes against `python -m model.work model/config/kimi_k3.json --decode 128x8192`
++  scaled to one layer / one TP8 rank (show the arithmetic).
++- `just test-cpu` green; analyzer location/scoped tests green.
++Report: design chosen and why, files changed, the R6/R7 table for the B=128 KDA case, open questions.
+diff --git a/scripts-local/vibesim-analysis-container/codex_tasks/b8_cost_model_fixes.md b/scripts-local/vibesim-analysis-container/codex_tasks/b8_cost_model_fixes.md
+new file mode 100644
+index 0000000..5871426
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/codex_tasks/b8_cost_model_fixes.md
+@@ -0,0 +1,40 @@
++# Task: close the top K3 cost-model gaps found by alignment (branch `kimi-k3-arch`)
++
++Worktree `/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/main-k3-rust`, branch `kimi-k3-arch` (do not cd
++to `.../main`). CPU only; `uv run --no-sync ...`; `cargo` at `~/.cargo/bin`; `just test-cpu` is the gate (the
++4 `test_energy_*` failures are pre-existing). `VIBESIM_PROFILE_DB=/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/kimi_single_layer/k3_branch_profile.db`
++for every launcher/analyzer command. Commit on `kimi-k3-arch` with trailer
++`Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`. Skills: `impl-compose-worklet`, `impl-compose-op`,
++`operate-run-alignment`, `top-align-with-framework`. Read `doc/alignment/kimi_k3_single_layer.md` (the
++alignment you are fixing) and `presets/alignment/kimi_k3_single_layer/*`.
++
++## Findings to fix (KDA rank-1 probe, B=128 @ kv 8192, measured vs simulated per step)
++1. `unified.kda.attention.qkvbfg_a_proj`: measured 21.8 us vs simulated 64.8 us (+198%). Two causes: (a) the
++   leaf costs ONE `single_gemm` with the fused-QKVG shape plus the `[f_a|b]` GEMV serially, while sglang runs
++   `fused_qkvg_proj` (7168 -> 4*1536 at 12 heads) and the small `[f_a|b]` GEMV (7168 -> 128+12(+pad)) on a
++   side stream (`_bfa_alt_stream`, engaged under CUDA-graph capture: `kimi_k3.py:1943-1951`) — model them as
++   two leaves with the side-stream one overlapped (the worklet/op layer has an overlap construct — find how
++   other worklets express concurrent streams; if none, cost the small GEMV at zero-critical-path with the
++   bytes still accounted and document); (b) confirm the exact production shapes from the measured kernel
++   table `/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/kimi_single_layer/profiles/kda_prod_v3_bf16state_B128_L8192.json`
++   (nvjet GEMM names + the driver source `kimi_single_layer_decode.py`) and make the cost row shape match
++   (n=6144,k=7168 for q/k/v/g at 12 heads, i.e. 4*12*128; check what the current leaf requests — 7692 or 16768
++   rows were seen in the branch DB).
++2. `unified.kda.moe.mxfp4_fused_moe`: −10.8% (sim 342.9 vs meas 384.4 us). The profiler row assumes uniform
++   `per_expert_batches`; the real step also includes the routing/finalize kernels the fused MoE launches
++   (`routingIndicesClusterKernel`, `finalizeKernelVecLoad` ~10 us, the bf16 `bmm_Bfloat16_MxE2m1` gemm2 145 us
++   + the fp8 gemm1 288 us). Check the `mxfp4_fused_moe` runner times the same set of kernels as one launch
++   group the way sglang calls `trtllm_fp4_block_scale_moe` (it should: one call); if the gap is routing
++   skew, add the skewed-popularity case the arch already supports (`routing`/ppm) or document why uniform.
++3. `unified.kda.attention.kda_recurrent_decode`: +18% (sim 30.1 vs meas 25.5 us) and `kda_conv_decode` +20%:
++   the cached rows were measured at a different shape/state dtype than the probe (bf16 state, B=128, 12
++   heads, 4608 channels). Verify the row keys the arch looks up match the probe exactly; if the runner's
++   input layout differs from the real call (e.g. `a`/`b` gate tensors, `cache_indices` mapping), fix it.
++4. MLA probe: sim 584.6 vs meas 677.5 us (−13.7%) — identify the two largest per-op gaps from the MLA
++   alignment payloads and fix them the same way if they fall into the classes above.
++
++## Verify
++Re-run the KDA and MLA alignment (`launcher alignment analyze presets/alignment/kimi_k3_single_layer/{kda,mla}_analyze.yaml`
++after re-predicting with the warm branch DB; if a new row shape is needed and cannot be measured here on
++CPU, leave the exact `kernel-profile run` command in the report for the operator). Target: per-op |error|
++≤ 20% on every leaf ≥ 5 us, duration-weighted |error| ≤ 10% for both probes. Report the new table.
+diff --git a/scripts-local/vibesim-analysis-container/codex_tasks/b9_mxfp4_row_fidelity.md b/scripts-local/vibesim-analysis-container/codex_tasks/b9_mxfp4_row_fidelity.md
+new file mode 100644
+index 0000000..8a5db71
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/codex_tasks/b9_mxfp4_row_fidelity.md
+@@ -0,0 +1,56 @@
++# B9 — close the remaining Kimi-K3 single-layer prediction gap (mxfp4_fused_moe row + glue)
++
++You are in the VibeSim worktree `/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/main-k3-rust`
++(branch `kimi-k3-arch`, HEAD 07d5ee16 = your B8 commit). Read `CLAUDE.md`, then the skills
++`operate-run-alignment`, `top-add-kernel`, `impl-register-kernel`, `operate-profile-existing-kernel`.
++Work on this branch, commit when green (`just test-cpu`), and END with a short report in English.
++No GPU is available to you: never run `kernel-profile run`, `timing-predict` with a cold cache on a
++GPU, or docker. If a row must be (re)measured, print the exact command for the operator, who runs it
++on GPU 3 via `scripts-local/vibesim-analysis-container/run_k3_jit_fill.sh` (`K3_GPU_INDEX=3`).
++
++## Where we are (post-B8, all rank-1 single-layer presets, B200, branch DB
++`/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/kimi_single_layer/k3_branch_profile.db`)
++
++| layer | point | measured CUDA-graph step (us) | simulated (us) | error |
++|---|---|---|---|---|
++| KDA | B=1 / 32 / 128 @ L=8k | 179.6 / 310.7 / 556.5 | 141 / 277 / 495 | -21% / -11% / -11% |
++| MLA | 128x8k / 1x1M / 16x64k | 680.4 / 345.5 / 357.9 | 569 / 274 / 317 | -16% / -21% / -11% |
++
++Your B8 fixed the qkvbfg leaf (now ~21 us, was 65). The per-op alignment tables in
++`doc/alignment/kimi_k3_single_layer.md` say the remaining under-prediction is dominated by:
++1. `moe.mxfp4_fused_moe`: measured 384.4 us (KDA, B=128) vs row 342.9 (-10.8%); MLA B=128 421.2 vs
++   342.9 (-18.6%). Same row for both layers although the measured numbers differ by 37 us — so the
++   row does not depend on something the layer changes (routing distribution? PDL? which of the two
++   BMMs? the fused routing/finalize inside `trtllm_fp4_block_scale_moe`?). The runner times ONE call
++   with `do_finalize=True`; the layer's kernel table (probe) shows the routed MXFP4 BMMs as two
++   launches (284.0 + 143.0 us at B=128) plus routing/finalize kernels.
++2. Unmapped ~17 us/step: two `attn_res_fused_tma_kernel` launches (the attention-residual stream,
++   `attn_res_block_size=12`) + CUDA-graph glue. Decide: fold into an existing leaf, add an
++   `elementwise`-kind leaf with a measured backend, or document as an explicit floor.
++3. At B=1 the KDA gap is -21% (38 us): check launch-bound floors — with 26-29 kernels/step in the
++   graph, per-kernel minimum durations (~2-3 us each under graph replay) may be below what the rows
++   return for m=1; look at how other archs handle the small-m floor.
++
++Evidence available (read-only): probe captures + parsed kernel sequences under
++`/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/kimi_single_layer/align/{kda,mla}_b128_l8192/`
++(`parsed.json`, `kernel_sequences.json`, `metrics.jsonl`), per-kernel torch-profiler tables in
++`.../kimi_single_layer/profiles/*.json`, alignment payloads under `logs/alignment_kimi_k3_single_layer_{kda,mla}/`,
++and the driver `scripts-local/vibesim-analysis-container/kimi_single_layer_decode.py` (how the
++layer is built and routed: seeded random router logits, 112 local experts, top-16 + 2 shared).
++
++## Deliverables
++- Root-cause each of the three items with numbers from the evidence; for (1) determine what the
++  runner measures differently from the layer (compare `profiling/runners/moe/mxfp4_fused_moe.py`
++  arguments/shape/routing/PDL against the driver's real call) and fix the runner and/or the Rust
++  kernel model (`simulator/src/timing/kernels/mxfp4_fused_moe.rs`, the K3 MoE worklet) so the SAME
++  row explains both layers' measurements, or add the missing input dimension to the kind.
++- If (1) needs new rows, keep the change JIT-fillable by the existing presets
++  (`presets/predict_kimi_k3_b200_rank1_layer_{kda,mla}.json`) and print the fill command.
++- Re-run the CPU side of the alignment pipeline (`launcher alignment analyze` against the cached
++  rows) and update the tables in `doc/alignment/kimi_k3_single_layer.md`; state clearly which numbers
++  are post-fix vs still waiting on a GPU fill.
++- Also answer, without changing analyzer semantics: does the `CostNode::Max` used for the stream
++  overlap hide the non-critical leaves (`mla_cache_append`, `output_gate`) from the `optimality`
++  ladder that agents read? If yes, propose (in the doc) the smallest analyzer/worklet change that
++  keeps their bytes/time visible.
++- `just test-cpu` green (the 4 `test_energy_*` failures are a known host issue). Commit.
+diff --git a/scripts-local/vibesim-analysis-container/run_k3_jit_fill.sh b/scripts-local/vibesim-analysis-container/run_k3_jit_fill.sh
+new file mode 100755
+index 0000000..c57ba3b
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/run_k3_jit_fill.sh
+@@ -0,0 +1,48 @@
++#!/usr/bin/env bash
++# JIT-fill the Kimi-K3 kernel rows a timing-predict preset needs, on the slurm-granted B200,
++# into a BRANCH copy of profile.db (never the shared profiling/profile.db — merging that needs
++# the user's explicit OK, per skills/impl-register-kernel). Runs in the clean worktree
++# (main-k3-rust) because the user's main/ checkout cannot build Rust (rewound submodule).
++#   sbatch slurm_gpu.sh ./run_k3_jit_fill.sh [preset ...]
++# Default presets: the single-rank KDA and MLA layer presets (alignment) then the full TP8/EP8/PP2.
++set -uo pipefail
++HERE="$(cd "$(dirname "$0")" && pwd)"
++REPO="${VIBESIM_REPO:-/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/main-k3-rust}"
++DB="${VIBESIM_PROFILE_DB:-$HERE/kimi_single_layer/k3_branch_profile.db}"
++[ -f "$DB" ] || cp "$REPO/profiling/profile.db" "$DB"
++# Under slurm the cgroup shows only the granted GPU; when run directly on the host, pass
++# K3_GPU_INDEX=3 (or 2) so the fill never lands on the first visible device (GPU 0).
++if [ -n "${K3_GPU_INDEX:-}" ]; then
++  case "$K3_GPU_INDEX" in 2|3|7) ;; *) echo "!! GPU $K3_GPU_INDEX not authorized (only 2,3,7)"; exit 1;; esac
++  UUID="$(nvidia-smi -i "$K3_GPU_INDEX" --query-gpu=uuid --format=csv,noheader | tr -d ' ')"
++else
++  UUID="$(nvidia-smi --query-gpu=uuid --format=csv,noheader | head -1 | tr -d ' ')"
++fi
++[ -n "$UUID" ] || { echo "!! no GPU visible"; exit 1; }
++export VIBESIM_PROFILE_GPUS="$UUID" VIBESIM_PROFILE_DB="$DB"
++export PATH="$HOME/.cargo/bin:$PATH"
++export TMPDIR="/raid/tmp/yilegu_k3_tmp"; mkdir -p "$TMPDIR"
++PRESETS=("$@")
++[ ${#PRESETS[@]} -gt 0 ] || PRESETS=(presets/predict_kimi_k3_b200_rank1_layer_kda.json
++                                     presets/predict_kimi_k3_b200_rank1_layer_mla.json
++                                     presets/predict_kimi_k3_b200_sglang_tp8ep8pp2.json)
++echo "==== K3 JIT fill: repo=$REPO db=$DB gpu=$UUID ===="
++cd "$REPO"
++for p in "${PRESETS[@]}"; do
++  echo; echo "---- $p ----"
++  timeout 5400 uv run --no-sync python -m launcher timing-predict "$p" 2>&1 | tail -40
++  echo "RESULT $p exit=${PIPESTATUS[0]}"
++done
++echo; echo "==== rows per K3 table in $DB ===="
++python3 - "$DB" <<'PY'
++import sqlite3, sys
++con = sqlite3.connect(sys.argv[1])
++for t in ("kda_recurrent_decode","kda_fused_decode","mla_decode_attention","mxfp4_fused_moe",
++          "gdn_causal_conv_decode","gdn_gated_rms_norm","batched_gemm","single_gemm","rms_norm",
++          "residual_rms_norm","mla_cache_append","elementwise","gemm_fp32_output"):
++    try:
++        n = con.execute(f'select count(*) from "{t}" where gpu_name like "%B200%"').fetchone()[0]
++        print(f"{t}: {n} B200 rows")
++    except Exception as e:
++        print(f"{t}: {e}")
++PY

@@ -1,0 +1,162 @@
+54e8e2a2 refactor(launcher): lift the golden store out of conftest
+d766a4f9 refactor(launcher): lift the .complete marker into process/markers.py
+e7178a33 feat(labeling): rule out label sets that depend on rule order
+81ad8de1 feat(launcher): add the alignment-campaign engine
+2fae08af feat(alignment): add the GLM-5.2 NVFP4 B200 campaign pack
+3bdcbc16 test(alignment): record the accepted GLM-5.2 matrix as a golden baseline
+de3b2751 docs(pr): add the generated fifteen-case alignment matrix
+d7f94680 feat(trace): add a 100-request diverse workload spanning 256-128k prefill
+20527a6c feat(presets): run GLM-5.2 NVFP4 B200 against the diverse workload
+b0243fc3 Merge pull request #25 from SyFI-VibeSim/glm52-l1-clean
+a14dc943 fix(analyzer): honor configured kernel analysis directory
+1df6dee7 fix(launcher): supervise alignment campaign phases
+77e2f106 fix(alignment): render engine context-limit flags
+86fc660a fix(alignment): separate expert sharding from count reduction
+3078943e fix(alignment): normalize expert profile model identity
+cd063779 fix(analyzer): draw compared measured path
+b1b09d83 feat(alignment): diagnose kernel overlap reductions
+dfa7ba16 perf(analyzer): index and stream alignment detail
+168d9357 perf(analyzer): build alignment detail in parallel
+a9f83d36 feat(profiling): track dirty measurement provenance
+5d929e3a fix(profiling): surface batch runner failures
+0c8a552d fix(alignment): count scheduler evidence once per DP rank
+2c59d22a fix(alignment): reject mismatched SGLang graph ceiling
+9b97a598 fix(alignment): analyze the complete captured window
+b05521b5 fix(worklet): separate NVFP4 MoE EP and TP shards
+ab91c4c0 fix(alignment): preflight SGLang NSYS markers
+82df0f02 test(alignment): follow streamed kernel inventory
+82a78a0a fix(alignment): require explicit expert topology
+bb442fea Merge pull request #26 from SyFI-VibeSim/glm52-sglang-nvfp4-tp4-clean
+badf55f6 feat: add SGLang GLM-5.2 TP L1 kernels
+b869e371 feat: add SGLang GLM-5.2 NVFP4 TP architecture
+06145a18 feat: model prefill-priority iteration batches
+e977b0c1 feat: align chunked KV admission with SGLang
+b5b67b64 fix(alignment): make SGLang profiling reproducible
+5a14a92c refactor(worker): group chunked KV admission settings
+69eedac6 test(alignment): record SGLang GLM-5.2 TP4 baseline
+9852e8f5 fix(alignment): preserve SGLang measurement contracts
+128971e4 Merge pull request #28 from SyFI-VibeSim/glm52-sglang-nvfp4-tp4-integrate
+87b17292 fix(submodules): track published alignment branches
+64d3a9f3 fix(alignment): scale measured kernel path to GPU cycle
+9f14cab6 Merge pull request #29 from SyFI-VibeSim/fix/submodule-branch-tracking
+48c660a4 Merge pull request #30 from SyFI-VibeSim/fix/alignment-multiplier-measured-ms
+c945b8d9 alignment: GLM-5.2 NVFP4 B200 TP8/EP8 pack (Coral Bricks production topology)
+b14e2797 alignment(tp8): attn_gpu_memory_gb measured from the TP8 workload logs
+d121964f alignment(tp8): re-target the expert-popularity sharding metadata to EP8
+250e71ac profiling(vllm_mla_rope): interval-union fallback when inductor declines the fusion (TP8 num_heads=8 shapes run the aten elementwise path; the timed region contains only this op)
+363de27e profiling(batched_gemm): allow the TP8 per-rank head count (8) for the GLM MLA bmms
+c67923b9 profiling(dsa_sparse_mla): accept the TP8 per-rank head count (8) on the trtllm fp8 paths; thread num_heads parametrically
+ba8201c1 data(profiling): 2,584 B200 rows at GLM-5.2 NVFP4 TP8/EP8 shapes
+689255e4 Merge pull request #27 from divyvasal/coral/tp8-pack
+3d756782 test(profiling): restore the CPU gate after the TP8 head-count widening
+fe65028b Merge pull request #31 from SyFI-VibeSim/fix/tp8-runner-test-contracts
+c3884d0c timing(dsa): parameterize the speculative verify-group width at L1
+4757e880 profiling(nvfp4_moe): bill logical bandwidth per finalize mode
+a93a6f1c timing(moe): add the whole-callable BF16 fused-MoE L1 kind
+901ff556 op(dsa): accept any positive verify width at the op boundary
+1a35253d worklet(dsa): accept any positive verify width at L3
+f8b83062 worklet(dsa): bill the indexer the KV its decode batch holds, not the longest request
+d9191746 worklet(moe): add the BF16 routed-MoE local section
+e13f0109 worklet(mtp): shard the MTP output head's vocabulary like the main head
+22ccb02c arch(contract): add the speculative iteration input and model capability
+97592d6e arch(glm52): extract the target forward from the vLLM NVFP4 model
+8663869e arch(glm52): bill the MTP layer's experts at the precision it ships in
+05eddf50 arch(glm52): give the MTP layer a pass it can run more than once
+c00683e9 arch(glm52): add the speculative recipe to the vLLM NVFP4 config surface
+99a56612 arch(glm52): add the speculative vLLM NVFP4 model as its own type
+33c08d75 arch(build): add the speculative GLM-5.2 NVFP4 constructor
+ee5996da arch(glm52): drop the placeholder proposer from the ordinary model
+b6265680 work(glm52): label the MTP layer when a draft stage ran
+3134240d worker(iter): stop the essentials helper from picking the execution adapter
+dee5ba44 trace(schema): let a request declare acceptance per draft position
+37e1d4ab worker(admission): make per-iteration decode advance a lifecycle sub-axis
+c916ef1d worker(execution): lower a verify batch into the speculative L4 input
+cfbd0e00 worker(iter): make the GLM-5.2 speculative composition selectable
+f39d31ae preset: add the GLM-5.2 NVFP4 speculative run
+cc8e0762 alignment: allow explicit reuse of kernel calibration for E2E
+f3b82fb4 alignment: propagate failed analyzer subjects before publishing results
+5ce67f3a alignment: isolate warmed measurement and preserve speculative evidence
+b91a6219 campaign: render matching speculative workload and chunk settings
+dad4f99a launcher: declare Prometheus parser dependency for serving counters
+67293d44 profiling: support Spec5 DSA queries and rounded 8K prefill
+dd014589 alignment: preserve speculative queries and source-backed draft ranges
+2f9e9efc profiling: isolate profile databases and matching launcher leases
+e6ae1338 alignment: account for unmapped collective wait and critical coverage
+cc3c6a8f timing: preserve exact DSA contexts and speculative saturation boundaries
+6d49625b worker: preserve speculative work and reserve future verify capacity
+868a5a26 optimality: account for complete speculative necessary work and conservation
+32d7d852 speculative: wire explicit prediction inputs and role-specific routing
+32e543c1 timing: deduplicate profile requirements and resolve FP4 peaks
+509feeb5 profiling: register logits gather copy and argmax runners
+b97bb637 presets: add Spec5 alignment matrix and preserved TP4 TP8 evidence
+0c18ebb4 timing: accept rounded Spec5 sparse MLA prefill batches
+c668abd8 alignment: preserve request-level reproduction and server percentile reports
+62b5afb3 data(profiling): preserve Spec5 prediction cache and provenance audit
+723165ba alignment: declare speculative timing input contract explicitly
+d573c4c7 analyzer: select conservation from explicit worker contract
+e8b2463a alignment: keep simulation calibration explicit in presets
+35169cb3 presets: consolidate Spec5 rules and deduplicate TP4 routing data
+624e03b1 profiling: defer unwired logits kernels to separate branch
+d47bcd46 alignment: integrate observed workload inputs and request audits
+0eef2242 docs(alignment): retain Spec5 campaign evidence and baseline workflow
+f9ef858a data(alignment): calibrate nine warm Spec5 workloads from measured evidence
+060adc01 docs(alignment): update warm matrix evidence and prepare Spec5 PR draft
+1b2cd1c6 data(alignment): retain server percentiles and tenth warm Spec5 result
+e2c8283e docs(alignment): preserve full kernel evidence with capture provenance
+bec9232f chore(review): mark all measured popularity artifacts as generated
+890b03fa data(alignment): preserve case13 warm request alignment
+7a21d4fc data(alignment): preserve case14 warm request alignment
+a48e2a02 data(alignment): retain warm Spec5 case15 calibration and server percentiles
+8adb5200 data(alignment): retain warm Spec5 case16 calibration and server percentiles
+6ed562e8 data(alignment): finish Spec5 warm matrix evidence and PR preparation
+55382f9f docs(pr): record published Spec5 dependencies
+a8d4d11d style(alignment): compact measured routing profiles like existing packs
+620e90ef Merge pull request #32 from SyFI-VibeSim/glm52-spec5-clean
+fcdba491 fix(timing): require custom routing for expert popularity files
+ccafaa50 Merge pull request #33 from SyFI-VibeSim/fix/moe-custom-routing
+d8d7114c fix: handle unreaped processes and experiment trace CSVs
+cb4425e3 Merge pull request #35 from SyFI-VibeSim/fix/launcher-supervision-and-workload-traces
+a916c09a docs: use VibeSim checkout directory in development workflows
+93f1144d Add scoped CostTree optimality analysis
+83a30444 Fix scoped optimality test for main's SemanticWork compute_dtype field
+12fc9521 Serve scoped CostTree optimality over HTTP for the Analyzer UI
+10285ff9 Infer unified deployment for pre-deployment params.json
+777e9360 Expose the singleton run id in the sweep catalog
+dfab7e96 Serve scoped optimality for timing predictions too
+9ab54685 feat(model-work): add Kimi-K3 necessary work label
+59463280 fix(model-work): correct Kimi-K3 gates and attention residuals
+368af34a Register Kimi-K3 decode profiling kernels
+aa660954 profiling: accept device UUIDs in VIBESIM_PROFILE_GPUS (slurm/cgroup-granted GPUs)
+fd117ca6 profiling(k3): rw flashinfer cache mount for sglang_k3_env; allow bf16 state in fused KDA runner
+d7280efc fix(profiling): match fused KDA norm weight layout
+08a3f558 profiling(k3): fused KDA runner allocates the recurrent state in the requested state_dtype
+5d7c2a22 profiling(k3): fused KDA runner requires an fp32 state (matches kda_fused_decode.covered)
+c4f5b1ce feat(simulator): add Kimi K3 local worklets
+598f3073 profiling(k3): sglang_triton KDA recurrent runner accepts a bf16 state (cookbook recipe path)
+8a4bce66 feat(arch): add Kimi K3 SGLang recipe
+df3760b4 feat(wiring): register Kimi K3 SGLang arch
+97571d3c fix(simulator): align Kimi K3 dense layer ownership
+35b9de65 fix(timing-predict): report cold cache coverage on CPU
+ae9039c9 feat(kimi-k3): add SGLang presets and semantic map
+7340eebc Merge branch 'kimi-k3-arch' into kimi-k3
+fd588da7 fix(timing-predict): rebuild warm caches after coverage
+1252b6c2 test(profiling): match writable K3 FlashInfer mount
+4c142978 timing-predict: JIT-fill cache misses on GPU hosts, report-only on CPU
+148806c4 profiling: serve sglang_env backends from the sglang v0.5.20 container when the fork venv is absent
+caad45ce profiling(k3): absorb bmm runner accepts any decode batch size m (the cost tree sweeps m over B)
+00db12f6 test(batched_gemm): K3 absorb runner accepts any decode batch size
+565cc086 feat(kimi-k3): select KDA decode chain by state dtype
+2ba0f0c9 Support Kimi K3 SGLang fp8 MLA cache append
+3865ee1b kimi_k3 mla worklet: cache append takes the bf16 latent input (quantized to the fp8 cache in-kernel)
+ed61806f kimi_k3 presets: rank-1 layer cases at the optimizer-loop workload points (B=1/32/128 @8k; MLA 16@64k, 1@1M)
+0ec46ecc Fix MLA decode profiling sweep coverage
+3d5b7de9 Add scoped Kimi-K3 necessary-work predictions
+d61fb8d3 kimi_k3: cost the MLA decode with cute-dsl/trtllm only (Triton fallback is never selected on B200)
+6e81a072 docs: align Kimi-K3 single-layer probes
+07d5ee16 align Kimi K3 cost model with production streams
+b088a6eb fix K3 rank-local MXFP4 MoE prediction shape
+ef202ca2 Align K3 MXFP4 MoE runner with layer launch
+135455d7 kimi_k3: realistic rank-local routing (local top-k share, TopK routing method in the MXFP4 runner, histogram-aware presets)
+51810876 kimi_k3 presets: large-batch decode cases (B=512/256 @8k) for the rank-1 KDA/MLA layer oracles
+83847486 Fix Kimi K3 MLA decode profile coverage
+85eefeb4 kimi_k3: chunked-prefill support (Codex B12, committed by operator at the cap)

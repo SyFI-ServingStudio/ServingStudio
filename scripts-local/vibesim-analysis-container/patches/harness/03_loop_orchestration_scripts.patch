@@ -1,0 +1,974 @@
+diff --git a/scripts-local/vibesim-analysis-container/after_b9_fill.sh b/scripts-local/vibesim-analysis-container/after_b9_fill.sh
+new file mode 100755
+index 0000000..12e32a6
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/after_b9_fill.sh
+@@ -0,0 +1,22 @@
++#!/usr/bin/env bash
++# After Codex B9 exits: JIT-fill the new 112-expert mxfp4_fused_moe rows (rank-1 presets) on
++# GPU 3 directly, so the post-B9 predictions can be compared with the measured graph times.
++#   setsid nohup ./after_b9_fill.sh > codex_runs/after_b9_fill.log 2>&1 &
++set -uo pipefail
++HERE="$(cd "$(dirname "$0")" && pwd)"
++GPU_IDX="${K3_GPU_INDEX:-3}"
++while pgrep -f "[b]9_mxfp4_row_fidelity" >/dev/null; do echo "$(date +%T) B9 still running -> wait 120s"; sleep 120; done
++while :; do
++  used="$(nvidia-smi -i "$GPU_IDX" --query-gpu=memory.used --format=csv,noheader,nounits | tr -d ' ')"
++  [ "${used:-99999}" -lt 1000 ] && break
++  echo "$(date +%T) GPU $GPU_IDX busy (${used} MiB) -> wait 60s"; sleep 60
++done
++echo "==== $(date +%F_%T) B9 done -> JIT fill (repo main-k3-rust @ $(git -C "$HERE/../../main-k3-rust" rev-parse --short HEAD))"
++K3_GPU_INDEX="$GPU_IDX" "$HERE/run_k3_jit_fill.sh" \
++  presets/predict_kimi_k3_b200_rank1_layer_kda.json \
++  presets/predict_kimi_k3_b200_rank1_layer_mla.json
++echo "==== $(date +%F_%T) fill done exit=$?"
++for r in kda mla; do
++  echo "-- $r"; grep -E '"batch_tokens"|^total:' "$HERE/../../main-k3-rust/logs/predict_kimi_k3_b200_rank1_layer_$r/reports/iter_breakdown.ans" \
++    | sed 's/"prefill_chunk_pairs":\[\]//' | paste - - | cut -c1-160
++done
+diff --git a/scripts-local/vibesim-analysis-container/after_kda_b512_rounds.sh b/scripts-local/vibesim-analysis-container/after_kda_b512_rounds.sh
+new file mode 100755
+index 0000000..45fcf30
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/after_kda_b512_rounds.sh
+@@ -0,0 +1,10 @@
++#!/usr/bin/env bash
++# Queue MLA-b512 continuous rounds behind the KDA-b512 rounds (same GPU 7; never two trials at once).
++set -uo pipefail
++HERE="$(cd "$(dirname "$0")" && pwd)"
++WAIT_PID="$1"; K0="$2"; N="$3"
++while kill -0 "$WAIT_PID" 2>/dev/null; do sleep 60; done
++until curl -s -m 5 "http://172.17.0.1:8804/api/v1/analyze?level=run_summary" | grep -q '"'; do sleep 60; done
++echo "==== $(date +%F_%T) KDA-b512 rounds done -> MLA-b512 rounds $K0..$((K0+N-1)) on GPU 7"
++export AGENT_TIMEOUT="${AGENT_TIMEOUT:-2700}" K3_SHARED_GPU=1 DOCKER_GPU_ARG="\"device=7\""
++CASES="mla_b512" exec "$HERE/run_k3_alternate.sh" 7 "$K0" "$N"
+diff --git a/scripts-local/vibesim-analysis-container/after_recheck_mixed_point.sh b/scripts-local/vibesim-analysis-container/after_recheck_mixed_point.sh
+new file mode 100644
+index 0000000..71ccf2d
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/after_recheck_mixed_point.sh
+@@ -0,0 +1,35 @@
++#!/usr/bin/env bash
++# After the multi-seed recheck finishes: judge the MLA best_tree on the NEW mixed-length point
++# (issue_k3_mla.json now has [16, 65536, "mix"]). Expected: round 25's hardcoded is_var_seq=False
++# fails CHECK there. If so, retire that tree (best_tree.r25_overfit), restore the round-24 tree
++# (best_tree.prev) as best_tree, and judge it too. Verdicts: iter_opt_eval_k3_mla/best_tree_mixed_*.json
++set -uo pipefail
++HERE="$(cd "$(dirname "$0")" && pwd)"
++GPU_IDX="${K3_GPU_INDEX:-7}"
++export DOCKER_GPU_ARG="\"device=$GPU_IDX\""
++OUT="$HERE/iter_opt_eval_k3_mla"
++while pgrep -f "[r]echeck_best_trees_seeds" >/dev/null; do sleep 60; done
++judge () {  # $1 = tree dir, $2 = out json
++  python3 "$HERE/judge_k3.py" --agent-container mixed_point_check --config "$HERE/issue_k3_mla.json" \
++    --golden-dir /raid/yilegu/eval_goldens --out "$2" --tree-dir "$1" --pristine-dir "$OUT/pristine_tree" \
++    --min-improvement 0 > "${2%.json}.log" 2>&1
++  python3 - "$2" <<'PY'
++import json, sys
++d = json.load(open(sys.argv[1])); print(d.get("verdict"), (d.get("reason") or "")[:160])
++for k, p in (d.get("points") or {}).items():
++    print(f"  {k}: pristine {p['before_us']:.1f} -> tree {p['after_us']:.1f} us ({p['improvement']*100:+.1f}%), "
++          f"CHECK {p['correctness'].get('pass')} rel {p['correctness'].get('max_rel_err')}")
++PY
++}
++echo "==== $(date +%F_%T) judging current MLA best_tree (round-25 tree) on the mixed-length point"
++judge "$OUT/best_tree" "$OUT/best_tree_mixed_verdict.json"
++if python3 -c "import json,sys; d=json.load(open('$OUT/best_tree_mixed_verdict.json')); p=(d.get('points') or {}).get('16,65536mix'); sys.exit(0 if (p and not p['correctness'].get('pass')) or d.get('verdict')=='FAIL' and 'correctness' in (d.get('reason') or '') else 1)"; then
++  echo "==== mixed-length CHECK FAILED on the round-25 tree -> retiring it, restoring the round-24 tree"
++  rm -rf "$OUT/best_tree.r25_overfit"; mv "$OUT/best_tree" "$OUT/best_tree.r25_overfit"
++  cp -a "$OUT/best_tree.prev" "$OUT/best_tree"
++  echo "==== $(date +%F_%T) judging the restored round-24 tree on the mixed-length point"
++  judge "$OUT/best_tree" "$OUT/best_tree_mixed_verdict_v2.json"
++else
++  echo "==== round-25 tree passed the mixed-length point (unexpected) -> best_tree kept"
++fi
++echo "==== $(date +%F_%T) mixed-point check done"
+diff --git a/scripts-local/vibesim-analysis-container/after_transfer_b512.sh b/scripts-local/vibesim-analysis-container/after_transfer_b512.sh
+new file mode 100755
+index 0000000..7c1ea08
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/after_transfer_b512.sh
+@@ -0,0 +1,58 @@
++#!/usr/bin/env bash
++# Continuation of run_k3_b512_when_free.sh after its parent was stopped (17:40, MLA-b512 oracle found
++# to mispredict the attention leaf at B=256/512 -> Codex B12a fixes it; KDA-b512 prediction looked sane).
++#   1. wait for the running mla_b512 transfer check (judge PID given) and print its verdict,
++#   2. kda_b512: seed best_tree from the decode best tree + transfer check,
++#   3. MLA prefill smoke with the fixed prefix-chunk pre-step hook (+ KDA regression) on GPU 7,
++#   4. prefill profiles (evidence for VibeSim B12),
++#   5. KDA-b512 continuous rounds only (MLA-b512 rounds start once 8804 is re-baked).
++# Usage: after_transfer_b512.sh <judge_pid> <first_round_k> <n_rounds>
++set -uo pipefail
++HERE="$(cd "$(dirname "$0")" && pwd)"
++JPID="$1"; K0="$2"; N="$3"
++export AGENT_TIMEOUT="${AGENT_TIMEOUT:-2700}" K3_SHARED_GPU=1 DOCKER_GPU_ARG="\"device=7\""
++while kill -0 "$JPID" 2>/dev/null; do sleep 30; done
++echo "==== $(date +%F_%T) mla_b512 transfer check finished"
++show () {
++python3 - "$1" "$2" <<'PY'
++import json, sys, shutil, os
++d = json.load(open(sys.argv[1])); out = sys.argv[2]
++print("transfer:", d.get("verdict"), (d.get("reason") or "")[:120])
++ok = True
++for k, p in (d.get("points") or {}).items():
++    c = p["correctness"]; ok &= bool(c.get("pass"))
++    print(f"  {k}: pristine {p['before_us']:.1f} -> seed {p['after_us']:.1f} us ({p['improvement']*100:+.1f}%) CHECK {c.get('pass')} rel {c.get('max_rel_err')}")
++if not ok or not d.get("points"):
++    print("!! seed tree fails CHECK (or no result) on the new points -> starting this case from PRISTINE")
++    shutil.move(os.path.join(out, "best_tree"), os.path.join(out, "best_tree.transfer_failed"))
++PY
++}
++show "$HERE/iter_opt_eval_k3_mla_b512/seed_transfer_verdict.json" "$HERE/iter_opt_eval_k3_mla_b512"
++
++c=kda; SRC="$HERE/iter_opt_eval_k3_${c}"; OUT="$HERE/iter_opt_eval_k3_${c}_b512"; mkdir -p "$OUT"
++[ -d "$OUT/pristine_tree" ] || cp -a "$SRC/pristine_tree" "$OUT/pristine_tree"
++if [ ! -d "$OUT/best_tree" ]; then
++  cp -a "$SRC/best_tree" "$OUT/best_tree"; echo "==== seeded ${c}_b512 best_tree from $SRC/best_tree"
++  echo "==== $(date +%F_%T) transfer check: ${c}_b512 seed tree vs pristine on the new points"
++  python3 "$HERE/judge_k3.py" --agent-container transfer_check --config "$HERE/issue_k3_${c}_b512.json" \
++    --golden-dir /raid/yilegu/eval_goldens --out "$OUT/seed_transfer_verdict.json" \
++    --tree-dir "$OUT/best_tree" --pristine-dir "$OUT/pristine_tree" --min-improvement 0 \
++    > "$OUT/seed_transfer_judge.log" 2>&1
++  show "$OUT/seed_transfer_verdict.json" "$OUT"
++fi
++
++echo "==== $(date +%F_%T) MLA prefill smoke (fixed prefix-chunk hook) + KDA regression"
++COMMON="--moe-backend flashinfer_mxfp4 --attn-heads 12 --experts 112 --ep 8 --local-topk 2 --hidden-scale 1.0 --cuda-graph --iters 5 --warmup 2"
++smoke () {
++  docker run --rm --name "k3_prefill_smoke2_$1" --gpus '"device=7"' -e CUDA_VISIBLE_DEVICES=0 -e HF_HUB_OFFLINE=1 \
++    -e SGLANG_OPT_FUSED_KDA_VERIFY=0 -e TOKENIZERS_PARALLELISM=false --shm-size 32g \
++    -v /raid/hf/hub:/raid/hf/hub:ro -v /raid/yilegu/flashinfer_cache:/root/.cache/flashinfer \
++    -v "$HERE/kimi_single_layer_decode.py:/tmp/kimi_single_layer_decode.py:ro" --workdir /tmp lmsysorg/sglang:v0.5.20 \
++    bash -c "python3 /tmp/kimi_single_layer_decode.py --point '$3' $2 $COMMON --capture /tmp/g.pt 2>&1 | grep -E 'JSON|saved golden|FAILED|Error|Traceback|\[time\]|\[mla-prefill\]'; echo '==== replay'; python3 /tmp/kimi_single_layer_decode.py --point '$3' $2 $COMMON --replay /tmp/g.pt 2>&1 | grep -E 'CHECK|FAILED|Error|Traceback'"
++}
++smoke mla "--attn-type mla --attention-backend cutedsl_mla --kv-cache-dtype fp8_e4m3" "1,2048,pf2048;2,1024,pf1024;1,8192"
++smoke kda "--attn-type kda" "1,2048,pf2048"
++echo "==== $(date +%F_%T) prefill profiles (B12 evidence)"
++"$HERE/k3_prefill_profiles.sh" > "$HERE/k3_prefill_profiles.log" 2>&1; tail -12 "$HERE/k3_prefill_profiles.log"
++echo "==== $(date +%F_%T) KDA-b512 rounds $K0..$((K0+N-1)) on GPU 7"
++CASES="kda_b512" exec "$HERE/run_k3_alternate.sh" 7 "$K0" "$N"
+diff --git a/scripts-local/vibesim-analysis-container/after_trials_fill.sh b/scripts-local/vibesim-analysis-container/after_trials_fill.sh
+new file mode 100755
+index 0000000..9a82713
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/after_trials_fill.sh
+@@ -0,0 +1,21 @@
++#!/usr/bin/env bash
++# Run the K3 JIT fill (B8's new qkvbfg leaves: 136 missing rows) on GPU 3 directly, but only
++# AFTER the direct trial queue has finished, so kernel profiling never overlaps the trials'
++# timing measurements on the same device.
++#   setsid nohup ./after_trials_fill.sh > codex_runs/after_trials_fill.log 2>&1 &
++set -uo pipefail
++HERE="$(cd "$(dirname "$0")" && pwd)"
++GPU_IDX="${K3_GPU_INDEX:-3}"
++while pgrep -f "[r]un_k3_trials_direct.sh" >/dev/null; do
++  echo "$(date +%T) trials still running -> wait 120s"; sleep 120
++done
++while :; do
++  used="$(nvidia-smi -i "$GPU_IDX" --query-gpu=memory.used --format=csv,noheader,nounits | tr -d ' ')"
++  [ "${used:-99999}" -lt 1000 ] && break
++  echo "$(date +%T) GPU $GPU_IDX busy (${used} MiB) -> wait 60s"; sleep 60
++done
++echo "==== $(date +%F_%T) trials done, GPU $GPU_IDX idle -> JIT fill (repo main-k3-rust @ $(git -C "$HERE/../../main-k3-rust" rev-parse --short HEAD))"
++K3_GPU_INDEX="$GPU_IDX" "$HERE/run_k3_jit_fill.sh" \
++  presets/predict_kimi_k3_b200_rank1_layer_kda.json \
++  presets/predict_kimi_k3_b200_rank1_layer_mla.json
++echo "==== $(date +%F_%T) fill done exit=$?"
+diff --git a/scripts-local/vibesim-analysis-container/after_trials_rejudge_and_fill.sh b/scripts-local/vibesim-analysis-container/after_trials_rejudge_and_fill.sh
+new file mode 100755
+index 0000000..44fb2f1
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/after_trials_rejudge_and_fill.sh
+@@ -0,0 +1,41 @@
++#!/usr/bin/env bash
++# After the direct trial queue finishes on GPU 3: (1) re-judge KDA trial 7 with the judge that
++# now carries the agent's JIT CUDA source edits (its v1 verdict dropped kda_fused_decode.cuh and
++# crashed on the pristine kernel -> preserved as trial_7_verdict_v1.json), then (2) run the B8
++# row fill. Both are GPU-3 work and must not overlap the trials' timing measurements.
++#   setsid nohup ./after_trials_rejudge_and_fill.sh > codex_runs/after_trials_rejudge_and_fill.log 2>&1 &
++set -uo pipefail
++HERE="$(cd "$(dirname "$0")" && pwd)"
++GPU_IDX="${K3_GPU_INDEX:-3}"
++export DOCKER_GPU_ARG="\"device=$GPU_IDX\""
++wait_idle () {
++  while pgrep -f "[r]un_k3_trials_direct.sh" >/dev/null; do
++    echo "$(date +%T) trials still running -> wait 120s"; sleep 120
++  done
++  while :; do
++    used="$(nvidia-smi -i "$GPU_IDX" --query-gpu=memory.used --format=csv,noheader,nounits | tr -d ' ')"
++    [ "${used:-99999}" -lt 1000 ] && return 0
++    echo "$(date +%T) GPU $GPU_IDX busy (${used} MiB) -> wait 60s"; sleep 60
++  done
++}
++
++wait_idle
++OUT="$HERE/iter_opt_eval_k3_kda"
++[ -f "$OUT/trial_7_verdict_v1.json" ] || cp "$OUT/trial_7_verdict.json" "$OUT/trial_7_verdict_v1.json"
++echo "==== $(date +%F_%T) re-judging KDA trial 7 (source diff incl. .cuh) on GPU $GPU_IDX"
++python3 "$HERE/judge_k3.py" --agent-container iteropt_k3_kda_run_7_rejudge --config "$HERE/issue_k3_kda.json" \
++  --golden-dir /raid/yilegu/eval_goldens --out "$OUT/trial_7_verdict.json" \
++  --tree-dir "$OUT/trial_7_tree" --pristine-dir "$OUT/pristine_tree" > "$OUT/trial_7_rejudge.log" 2>&1
++echo "==== $(date +%F_%T) re-judge exit=$? -> $(python3 -c "import json;d=json.load(open('$OUT/trial_7_verdict.json'));print(d.get('verdict'),(d.get('reason') or '')[:200])")"
++python3 - "$OUT/trial_7_verdict.json" <<'PY'
++import json,sys
++f=sys.argv[1]; d=json.load(open(f)); d["trial"]=7; d["rejudged"]="v2: source diff incl. JIT CUDA (.cuh)"
++json.dump(d,open(f,"w"),indent=2)
++PY
++
++wait_idle
++echo "==== $(date +%F_%T) JIT fill (repo main-k3-rust @ $(git -C "$HERE/../../main-k3-rust" rev-parse --short HEAD))"
++K3_GPU_INDEX="$GPU_IDX" "$HERE/run_k3_jit_fill.sh" \
++  presets/predict_kimi_k3_b200_rank1_layer_kda.json \
++  presets/predict_kimi_k3_b200_rank1_layer_mla.json
++echo "==== $(date +%F_%T) fill done exit=$?"
+diff --git a/scripts-local/vibesim-analysis-container/finish_b12.sh b/scripts-local/vibesim-analysis-container/finish_b12.sh
+new file mode 100755
+index 0000000..153d367
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/finish_b12.sh
+@@ -0,0 +1,41 @@
++#!/usr/bin/env bash
++# Codex B12 (K3 prefill support) runs under a 6 h cap that ends ~00:00. If it exits with an uncommitted
++# tree, verify and commit it here (Rust build + focused tests + just test-cpu), then fast-forward the user's
++# main/ checkout (branch kimi-k3) to the worktree branch (kimi-k3-arch). Kill nothing.
++# Usage: finish_b12.sh <codex_timeout_pid>
++set -uo pipefail
++HERE="$(cd "$(dirname "$0")" && pwd)"
++WT=/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/main-k3-rust
++while kill -0 "$1" 2>/dev/null; do sleep 30; done
++echo "==== $(date +%F_%T) B12 codex exited"
++cd "$WT"
++if [ -z "$(git status --short | grep -v '^??.*b12_debug')" ]; then
++  echo "tree clean (Codex committed): $(git log --oneline -1)"
++else
++  echo "==== uncommitted B12 tree: $(git status --short | wc -l) entries -> testing"
++  export PATH="$HOME/.cargo/bin:$PATH"
++  if just test-cpu > "$HERE/codex_runs/b12_test_cpu.log" 2>&1; then
++    echo "just test-cpu: PASS"
++  else
++    fails=$(grep -cE "FAILED|error\[" "$HERE/codex_runs/b12_test_cpu.log")
++    echo "just test-cpu: non-zero exit ($fails failure lines; 4 test_energy_* host failures are known) -> see codex_runs/b12_test_cpu.log"
++    if ! grep -E "^FAILED|test result: FAILED" "$HERE/codex_runs/b12_test_cpu.log" | grep -v test_energy >/dev/null; then
++      echo "only known failures -> treating as PASS"
++    else
++      echo "!! real test failures -> NOT committing; leaving the tree for review"; exit 1
++    fi
++  fi
++  git add -A ':!logs/b12_debug*' 2>/dev/null || git add -A
++  git reset -q -- logs 2>/dev/null || true
++  git add presets doc simulator profiling model 2>/dev/null || true
++  git commit -q -m "kimi_k3: chunked-prefill support (Codex B12, committed by operator at the cap)
++
++New kinds kda_chunk_prefill / causal_conv1d_prefill / mla_prefill_attention / mla_prefix_gather / mla_merge_state
++with sglang_k3_env runners, prefill branches in the KDA/MLA/MoE worklets (gated on prefill_chunk_pairs; decode
++leaves untouched), rank-1 prefill presets (16k chunk, prefix 49152, 4x4096) and the alignment doc section.
++Known gap: predicted layer totals are ~60% below the measured eager step (see doc/alignment/kimi_k3_single_layer.md).
++
++Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>" && echo "committed: $(git log --oneline -1)"
++fi
++cd /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/main && git merge --ff-only kimi-k3-arch 2>&1 | tail -1 && echo "main/ kimi-k3 @ $(git log --oneline -1)"
++echo "==== $(date +%F_%T) finish_b12 done"
+diff --git a/scripts-local/vibesim-analysis-container/k3_prefill_profiles.sh b/scripts-local/vibesim-analysis-container/k3_prefill_profiles.sh
+new file mode 100755
+index 0000000..4ea35f4
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/k3_prefill_profiles.sh
+@@ -0,0 +1,25 @@
++#!/usr/bin/env bash
++# Measure the pristine tree at the chunked-prefill case points on GPU 7 (shared, user-authorized) and
++# dump per-kernel tables: evidence for VibeSim B12 (prefill kinds/worklets/presets). Not a judge run.
++#   ./k3_prefill_profiles.sh            -> kimi_single_layer/profiles/prefill_{kda,mla}_B*_L*pf*.json
++#                                          kimi_single_layer/result_prefill_{kda,mla}.json
++set -uo pipefail
++HERE="$(cd "$(dirname "$0")" && pwd)"
++GPU="${K3_GPU_INDEX:-7}"
++OUTD="$HERE/kimi_single_layer"; mkdir -p "$OUTD/profiles"
++COMMON="--moe-backend flashinfer_mxfp4 --attn-heads 12 --experts 112 --ep 8 --local-topk 2 --hidden-scale 1.0 --cuda-graph --iters 20 --warmup 5"
++run () { # $1 case, $2 attn args, $3 points
++  docker run --rm --name "k3_prefill_prof_$1" --gpus "\"device=$GPU\"" -e CUDA_VISIBLE_DEVICES=0 -e HF_HUB_OFFLINE=1 \
++    -e SGLANG_OPT_FUSED_KDA_VERIFY=0 -e TOKENIZERS_PARALLELISM=false --shm-size 32g \
++    -v /raid/hf/hub:/raid/hf/hub:ro -v /raid/yilegu/flashinfer_cache:/root/.cache/flashinfer \
++    -v "$HERE/kimi_single_layer_decode.py:/tmp/kimi_single_layer_decode.py:ro" -v "$OUTD:/out" \
++    --workdir /tmp lmsysorg/sglang:v0.5.20 \
++    python3 /tmp/kimi_single_layer_decode.py --point "$3" $2 $COMMON \
++      --profile-kernels "/out/profiles/prefill_$1.json" --json-out "/out/result_prefill_$1.json" 2>&1 \
++    | grep -E "JSON|\[time\]|\[profile\]|FAILED|Traceback|Error"
++}
++echo "==== $(date +%F_%T) KDA prefill profiles"
++run kda "--attn-type kda" "1,16384,pf;1,16384,pf49152;4,4096,pf"
++echo "==== $(date +%F_%T) MLA prefill profiles"
++run mla "--attn-type mla --attention-backend cutedsl_mla --kv-cache-dtype fp8_e4m3" "1,16384,pf49152;1,16384,pf;4,4096,pf"
++echo "==== $(date +%F_%T) done"; ls -la "$OUTD"/profiles/prefill_* "$OUTD"/result_prefill_* 2>/dev/null
+diff --git a/scripts-local/vibesim-analysis-container/launch_b12_after_b12a.sh b/scripts-local/vibesim-analysis-container/launch_b12_after_b12a.sh
+new file mode 100755
+index 0000000..c273b2e
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/launch_b12_after_b12a.sh
+@@ -0,0 +1,11 @@
++#!/usr/bin/env bash
++# Launch Codex B12 (K3 prefill support) in the worktree once no codex process is running.
++set -uo pipefail
++HERE="$(cd "$(dirname "$0")" && pwd)"
++# (no codex wait: "codex exec" also matches the optimizer-loop trial agents inside their containers;
++#  the worktree B12a run had already exited when this was launched)
++echo "==== $(date +%F_%T) launching B12"
++cd /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/main-k3-rust && timeout 21600 codex exec -m gpt-5.6-luna -c model_reasoning_effort=max \
++  --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check "$(cat "$HERE/codex_tasks/b12_k3_prefill_support.md")" \
++  < /dev/null > "$HERE/codex_runs/b12.log" 2>&1
++echo "==== $(date +%F_%T) B12 codex exited $?"
+diff --git a/scripts-local/vibesim-analysis-container/launch_b12b_then_prefill.sh b/scripts-local/vibesim-analysis-container/launch_b12b_then_prefill.sh
+new file mode 100755
+index 0000000..56f5771
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/launch_b12b_then_prefill.sh
+@@ -0,0 +1,39 @@
++#!/usr/bin/env bash
++# Chain for the prefill dimension (GPU 7 is shared: never profile while a judge trial runs):
++#   1. wait for finish_b12.sh (B12 committed) and for the MLA-b512 rounds to finish
++#      (restart_mla_b512_after_b12.sh exec's into run_k3_alternate.sh, so its PID lives until the rounds end),
++#   2. run Codex B12b (prefill prediction fidelity: currently ~60% below the measured step) in the worktree,
++#   3. fast-forward main/ kimi-k3, re-bake the oracle image (prefill predictions -> k3_{kda,mla}_prefill),
++#      start the 8805 (KDA) / 8806 (MLA) oracle containers,
++#   4. hand over to run_k3_prefill_when_free.sh (transfer checks + prefill rounds).
++# Usage: launch_b12b_then_prefill.sh <finish_b12_pid> <mla_b512_rounds_pid> <first_round_k> <n_rounds>
++set -uo pipefail
++HERE="$(cd "$(dirname "$0")" && pwd)"
++WT=/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/main-k3-rust
++F_PID="$1"; R_PID="$2"; K0="$3"; N="$4"
++while kill -0 "$F_PID" 2>/dev/null || kill -0 "$R_PID" 2>/dev/null; do sleep 60; done
++echo "==== $(date +%F_%T) B12 committed and MLA-b512 rounds done -> Codex B12b"
++cd "$WT" && timeout 14400 codex exec -m gpt-5.6-luna -c model_reasoning_effort=max \
++  --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check "$(cat "$HERE/codex_tasks/b12b_k3_prefill_fidelity.md")" \
++  < /dev/null > "$HERE/codex_runs/b12b.log" 2>&1
++echo "==== $(date +%F_%T) B12b codex exited $? ; HEAD $(git -C "$WT" log --oneline -1)"
++if [ -n "$(git -C "$WT" status --short | grep -v '^??')" ]; then
++  echo "!! B12b left an uncommitted tree; committing as-is is NOT done automatically (needs review) -> baking HEAD"
++fi
++cd /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/main && git merge --ff-only kimi-k3-arch 2>&1 | tail -1
++echo "==== $(date +%F_%T) baking oracle image incl. prefill predictions"
++if "$HERE/build_context_k3.sh" > "$HERE/k3_prefill_bake.log" 2>&1 \
++   && sed 's#COPY context/#COPY context_k3/#' "$HERE/Dockerfile" | docker build -q -t vibesim-analysis:k3 -f - "$HERE" >> "$HERE/k3_prefill_bake.log" 2>&1; then
++  for spec in k3_kda_prefill:8805 k3_mla_prefill:8806; do
++    run="${spec%%:*}"; port="${spec##*:}"
++    docker rm -f "vibesim_oracle_${run}" >/dev/null 2>&1 || true
++    docker run -d --name "vibesim_oracle_${run}" -e VIBESIM_PREBAKED_RUN="$run" -e VIBESIM_API_PORT="$port" \
++      -p "172.17.0.1:${port}:${port}" vibesim-analysis:k3 >/dev/null
++  done
++  sleep 25
++  for port in 8805 8806; do printf "oracle %s: " "$port"; curl -s "http://172.17.0.1:$port/api/v1/analyze?level=run_summary" | head -c 120; echo; done
++else
++  echo "!! prefill oracle bake failed (k3_prefill_bake.log) -> prefill rounds will keep waiting for 8805/8806"; exit 1
++fi
++echo "==== $(date +%F_%T) handing over to run_k3_prefill_when_free.sh $K0 $N"
++exec "$HERE/run_k3_prefill_when_free.sh" "$K0" "$N"
+diff --git a/scripts-local/vibesim-analysis-container/rebake_mla_b512_oracle.sh b/scripts-local/vibesim-analysis-container/rebake_mla_b512_oracle.sh
+new file mode 100755
+index 0000000..7672fdb
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/rebake_mla_b512_oracle.sh
+@@ -0,0 +1,17 @@
++#!/usr/bin/env bash
++# Re-bake the oracle image with the B12a-fixed MLA-b512 prediction and restart ONLY the 8804 container
++# (8801/8802/8803 keep serving; the running KDA-b512 trial talks to 8803).
++set -uo pipefail
++HERE="$(cd "$(dirname "$0")" && pwd)"
++# (no codex wait: "codex exec" also matches the optimizer-loop trial agents inside their containers;
++#  the worktree B12a run had already exited when this was launched)
++echo "==== $(date +%F_%T) rebake with $(git -C /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/main-k3-rust log --oneline -1)"
++"$HERE/build_context_k3.sh" > "$HERE/k3_mla_b512_rebake.log" 2>&1 \
++  && sed 's#COPY context/#COPY context_k3/#' "$HERE/Dockerfile" | docker build -q -t vibesim-analysis:k3 -f - "$HERE" >> "$HERE/k3_mla_b512_rebake.log" 2>&1 \
++  || { echo "!! bake failed (k3_mla_b512_rebake.log)"; exit 1; }
++docker rm -f vibesim_oracle_k3_mla_b512 >/dev/null 2>&1 || true
++docker run -d --name vibesim_oracle_k3_mla_b512 -e VIBESIM_PREBAKED_RUN=k3_mla_b512 -e VIBESIM_API_PORT=8804 \
++  -p 172.17.0.1:8804:8804 vibesim-analysis:k3 >/dev/null
++sleep 25; curl -s "http://172.17.0.1:8804/api/v1/analyze?level=iteration" | python3 -c "
++import json,sys,re; t=json.load(sys.stdin)['tree_text']; print([l for l in t.splitlines() if l.startswith('total') or 'mla_decode_attention (' in l][:6])"
++echo "==== $(date +%F_%T) 8804 restarted"
+diff --git a/scripts-local/vibesim-analysis-container/recheck_best_trees_seeds.sh b/scripts-local/vibesim-analysis-container/recheck_best_trees_seeds.sh
+new file mode 100755
+index 0000000..c4e474e
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/recheck_best_trees_seeds.sh
+@@ -0,0 +1,33 @@
++#!/usr/bin/env bash
++# Accuracy hardening: re-judge the final best trees against FRESH pristine goldens under extra
++# seeds (new weights/state/inputs). The continuous loop only ever checked seed 0. Verdict files:
++#   iter_opt_eval_k3_<case>/best_tree_seed<k>_verdict.json  (improvement is vs the PRISTINE tree)
++# Usage: recheck_best_trees_seeds.sh <gpu> <seed> [<seed> ...]
++set -uo pipefail
++HERE="$(cd "$(dirname "$0")" && pwd)"
++GPU_IDX="$1"; shift
++export DOCKER_GPU_ARG="\"device=$GPU_IDX\""
++for seed in "$@"; do
++  for case_name in mla kda; do
++    OUT="$HERE/iter_opt_eval_k3_${case_name}"
++    CFG="$OUT/issue_k3_${case_name}_seed${seed}.json"
++    python3 - "$HERE/issue_k3_${case_name}.json" "$CFG" "$seed" <<'PY'
++import json, sys
++c = json.load(open(sys.argv[1])); c["seed"] = int(sys.argv[3]); c["min_improvement"] = 0.0
++json.dump(c, open(sys.argv[2], "w"), indent=2)
++PY
++    echo "==== $(date +%F_%T) recheck $case_name best_tree, seed $seed"
++    python3 "$HERE/judge_k3.py" --agent-container "recheck_${case_name}_seed${seed}" --config "$CFG" \
++      --golden-dir /raid/yilegu/eval_goldens --out "$OUT/best_tree_seed${seed}_verdict.json" \
++      --tree-dir "$OUT/best_tree" --pristine-dir "$OUT/pristine_tree" > "$OUT/best_tree_seed${seed}_judge.log" 2>&1
++    python3 - "$OUT/best_tree_seed${seed}_verdict.json" <<'PY'
++import json, sys
++d = json.load(open(sys.argv[1]))
++print(d.get("verdict"), (d.get("reason") or "")[:120])
++for k, p in (d.get("points") or {}).items():
++    print(f"  {k}: pristine {p['before_us']:.1f} -> best {p['after_us']:.1f} us ({p['improvement']*100:+.1f}%), "
++          f"CHECK {p['correctness'].get('pass')} rel {p['correctness'].get('max_rel_err')}")
++PY
++  done
++done
++echo "==== $(date +%F_%T) recheck done"
+diff --git a/scripts-local/vibesim-analysis-container/restart_mla_b512_after_b12.sh b/scripts-local/vibesim-analysis-container/restart_mla_b512_after_b12.sh
+new file mode 100755
+index 0000000..2487cd1
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/restart_mla_b512_after_b12.sh
+@@ -0,0 +1,23 @@
++#!/usr/bin/env bash
++# MLA-b512 round 1 (20:13-21:07) was measured while Codex B12 profiled 16k-token prefill kernels on the
++# same GPU 7: the B=512 baseline reps were 2104/995/3363/3530/3419 us (clean value 978-992) -> the round
++# is infra noise, round 2 was stopped at 21:10. Restart the MLA-b512 rounds once the B12 launcher (PID $1)
++# has exited and GPU 7 has been quiet for 5 consecutive checks; drop the polluted pristine-baseline stats
++# (baseline.json; the goldens themselves are deterministic and stay) so the judge re-measures them.
++# Usage: restart_mla_b512_after_b12.sh <b12_launcher_pid> <first_round_k> <n_rounds>
++set -uo pipefail
++HERE="$(cd "$(dirname "$0")" && pwd)"
++WAIT_PID="$1"; K0="$2"; N="$3"
++while kill -0 "$WAIT_PID" 2>/dev/null; do sleep 60; done
++echo "==== $(date +%F_%T) B12 launcher exited"
++quiet=0
++while [ "$quiet" -lt 5 ]; do
++  util="$(nvidia-smi -i 7 --query-gpu=utilization.gpu --format=csv,noheader,nounits | tr -d ' ')"
++  used="$(nvidia-smi -i 7 --query-gpu=memory.used --format=csv,noheader,nounits | tr -d ' ')"
++  if [ "${util:-100}" -lt 5 ] && [ "${used:-999999}" -lt 20000 ]; then quiet=$((quiet+1)); else quiet=0; fi
++  sleep 30
++done
++echo "==== $(date +%F_%T) GPU 7 quiet -> dropping polluted baseline stats and restarting MLA-b512 rounds $K0..$((K0+N-1))"
++rm -f /raid/yilegu/eval_goldens/golden_k3_16a2cf1adf84/baseline.json
++export AGENT_TIMEOUT="${AGENT_TIMEOUT:-2700}" K3_SHARED_GPU=1 DOCKER_GPU_ARG="\"device=7\""
++CASES="mla_b512" exec "$HERE/run_k3_alternate.sh" 7 "$K0" "$N"
+diff --git a/scripts-local/vibesim-analysis-container/resume_k3_loop_when_free.sh b/scripts-local/vibesim-analysis-container/resume_k3_loop_when_free.sh
+new file mode 100755
+index 0000000..ea82a0a
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/resume_k3_loop_when_free.sh
+@@ -0,0 +1,33 @@
++#!/usr/bin/env bash
++# Resume the K3 continuous loop as soon as an authorized GPU has room again.
++#   GPU 2/3: must be idle (< 1000 MiB used)      -> idle-gated rounds
++#   GPU 7:   user-shared; needs >= 60 GB free   -> K3_SHARED_GPU=1 (no idle gate)
++# 2026-09-24 20:25: all three were full (vLLM TP workers on 2/3 at 168 GB, sglang scheduler on 7 at
++# 167 GB) and the judge OOM'd (KDA round 20) -> the loop must not run under those conditions.
++# Usage: resume_k3_loop_when_free.sh <first_round_k> <n_rounds_per_case>
++set -uo pipefail
++HERE="$(cd "$(dirname "$0")" && pwd)"
++K0="$1"; N="$2"
++export AGENT_TIMEOUT="${AGENT_TIMEOUT:-2700}"
++# A GPU counts as idle only after IDLE_CHECKS consecutive idle readings (default 30 = 1 h): the
++# user's vLLM jobs on 2/3 cycle with 5-10 min gaps (22:44 and 22:53 on 2026-09-24 both fooled a
++# 10-min streak), and grabbing one during a gap double-books their next run.
++IDLE_CHECKS="${IDLE_CHECKS:-30}"
++declare -A IDLE_STREAK=([2]=0 [3]=0)
++while :; do
++  for g in 3 2; do
++    used="$(nvidia-smi -i "$g" --query-gpu=memory.used --format=csv,noheader,nounits | tr -d ' ')"
++    if [ "${used:-99999}" -lt 1000 ]; then IDLE_STREAK[$g]=$((IDLE_STREAK[$g] + 1)); else IDLE_STREAK[$g]=0; fi
++    if [ "${IDLE_STREAK[$g]}" -ge "$IDLE_CHECKS" ]; then
++      echo "==== $(date +%F_%T) GPU $g idle for $IDLE_CHECKS checks -> resuming rounds $K0..$((K0+N-1)) there"
++      exec "$HERE/run_k3_alternate.sh" "$g" "$K0" "$N"
++    fi
++  done
++  used7="$(nvidia-smi -i 7 --query-gpu=memory.used --format=csv,noheader,nounits | tr -d ' ')"
++  total7="$(nvidia-smi -i 7 --query-gpu=memory.total --format=csv,noheader,nounits | tr -d ' ')"
++  if [ $((total7 - used7)) -ge 61440 ]; then
++    echo "==== $(date +%F_%T) GPU 7 has $((total7 - used7)) MiB free -> resuming (shared) rounds $K0..$((K0+N-1))"
++    K3_SHARED_GPU=1 exec "$HERE/run_k3_alternate.sh" 7 "$K0" "$N"
++  fi
++  echo "$(date +%T) GPUs 2/3 busy, GPU 7 free=$((total7 - used7)) MiB -> wait 120s"; sleep 120
++done
+diff --git a/scripts-local/vibesim-analysis-container/run_k3_alternate.sh b/scripts-local/vibesim-analysis-container/run_k3_alternate.sh
+new file mode 100755
+index 0000000..3bb17f7
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/run_k3_alternate.sh
+@@ -0,0 +1,14 @@
++#!/usr/bin/env bash
++# Alternate MLA and KDA continuous rounds on one GPU so two trials never overlap (overlapping
++# measurements on a shared device would inject noise into the judge's before/after medians).
++# Usage: run_k3_alternate.sh <gpu> <first_round_k> <n_rounds_per_case>
++#   K3_SHARED_GPU=1 AGENT_TIMEOUT=2700 ./run_k3_alternate.sh 7 20 3
++#   CASES="mla_b512 kda_b512" ./run_k3_alternate.sh 7 1 3   (other case pairs; default "mla kda")
++set -uo pipefail
++HERE="$(cd "$(dirname "$0")" && pwd)"
++GPU_IDX="$1"; K0="$2"; N="$3"; CASES="${CASES:-mla kda}"
++for i in $(seq 0 $((N - 1))); do
++  k=$((K0 + i))
++  for c in $CASES; do "$HERE/run_k3_continuous.sh" "$GPU_IDX" "$c" "$k" 1; done
++done
++echo "==== $(date +%F_%T) alternate loop done"
+diff --git a/scripts-local/vibesim-analysis-container/run_k3_b512_when_free.sh b/scripts-local/vibesim-analysis-container/run_k3_b512_when_free.sh
+new file mode 100755
+index 0000000..db7b135
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/run_k3_b512_when_free.sh
+@@ -0,0 +1,86 @@
++#!/usr/bin/env bash
++# Large-batch decode campaign (B=512/256 @ 8k; user request 2026-09-24), warm-started from the
++# decode best trees. Waits for an authorized GPU (same policy as resume_k3_loop_when_free.sh:
++# GPU 2/3 idle for IDLE_CHECKS consecutive checks, or GPU 7 with >= 60 GB free), then per case:
++#   1. seed iter_opt_eval_k3_<case>_b512/best_tree from iter_opt_eval_k3_<case>/best_tree,
++#   2. TRANSFER CHECK: judge that seed tree on the new points against the pristine tree
++#      (captures the new goldens; tells whether the inherited levers transfer and stay correct).
++#      If CHECK fails on any new point, the case starts from the pristine tree instead
++#      (seed kept as best_tree.transfer_failed).
++#   3. then alternate continuous rounds mla_b512 / kda_b512 (K0..K0+N-1).
++# Usage: run_k3_b512_when_free.sh <first_round_k> <n_rounds_per_case>
++set -uo pipefail
++HERE="$(cd "$(dirname "$0")" && pwd)"
++K0="$1"; N="$2"
++export AGENT_TIMEOUT="${AGENT_TIMEOUT:-2700}"
++IDLE_CHECKS="${IDLE_CHECKS:-30}"
++declare -A IDLE_STREAK=([2]=0 [3]=0)
++GPU_IDX=""
++while [ -z "$GPU_IDX" ]; do
++  for g in 3 2; do
++    used="$(nvidia-smi -i "$g" --query-gpu=memory.used --format=csv,noheader,nounits | tr -d ' ')"
++    if [ "${used:-99999}" -lt 1000 ]; then IDLE_STREAK[$g]=$((IDLE_STREAK[$g] + 1)); else IDLE_STREAK[$g]=0; fi
++    if [ "${IDLE_STREAK[$g]}" -ge "$IDLE_CHECKS" ]; then GPU_IDX="$g"; break; fi
++  done
++  [ -n "$GPU_IDX" ] && break
++  used7="$(nvidia-smi -i 7 --query-gpu=memory.used --format=csv,noheader,nounits | tr -d ' ')"
++  total7="$(nvidia-smi -i 7 --query-gpu=memory.total --format=csv,noheader,nounits | tr -d ' ')"
++  if [ $((total7 - used7)) -ge 61440 ]; then GPU_IDX=7; export K3_SHARED_GPU=1; break; fi
++  echo "$(date +%T) GPUs 2/3 busy, GPU 7 free=$((total7 - used7)) MiB -> wait 120s"; sleep 120
++done
++echo "==== $(date +%F_%T) using GPU $GPU_IDX (shared=${K3_SHARED_GPU:-0})"
++export DOCKER_GPU_ARG="\"device=$GPU_IDX\""
++
++# 0. VibeSim side: JIT-fill the rows the B=512/256 presets need (branch profile.db), bake the
++#    large-batch predictions into the oracle image and serve them on 8803 (KDA) / 8804 (MLA).
++if [ "${SKIP_ORACLE:-0}" != 1 ]; then
++  echo "==== $(date +%F_%T) JIT fill for the b512 presets on GPU $GPU_IDX"
++  K3_GPU_INDEX="$GPU_IDX" "$HERE/run_k3_jit_fill.sh" \
++    presets/predict_kimi_k3_b200_rank1_layer_kda_b512.json \
++    presets/predict_kimi_k3_b200_rank1_layer_mla_b512.json > "$HERE/k3_b512_fill.log" 2>&1
++  grep "^RESULT" "$HERE/k3_b512_fill.log"
++  echo "==== $(date +%F_%T) baking oracle image with the b512 predictions"
++  if "$HERE/build_context_k3.sh" > "$HERE/k3_b512_bake.log" 2>&1 \
++     && sed 's#COPY context/#COPY context_k3/#' "$HERE/Dockerfile" | docker build -q -t vibesim-analysis:k3 -f - "$HERE" >> "$HERE/k3_b512_bake.log" 2>&1; then
++    for spec in k3_kda_b512:8803 k3_mla_b512:8804; do
++      run="${spec%%:*}"; port="${spec##*:}"
++      docker rm -f "vibesim_oracle_${run}" >/dev/null 2>&1 || true
++      docker run -d --name "vibesim_oracle_${run}" -e VIBESIM_PREBAKED_RUN="$run" -e VIBESIM_API_PORT="$port" \
++        -p "172.17.0.1:${port}:${port}" vibesim-analysis:k3 >/dev/null
++    done
++    sleep 25
++    for port in 8803 8804; do
++      printf "oracle %s: " "$port"; curl -s "http://172.17.0.1:$port/api/v1/analyze?level=run_summary" | head -c 200; echo
++    done
++  else
++    echo "!! oracle bake failed (see k3_b512_bake.log); b512 cases would talk to dead ports 8803/8804 -> stopping"
++    exit 1
++  fi
++fi
++
++for c in mla kda; do
++  SRC="$HERE/iter_opt_eval_k3_${c}"; OUT="$HERE/iter_opt_eval_k3_${c}_b512"; mkdir -p "$OUT"
++  [ -d "$OUT/pristine_tree" ] || cp -a "$SRC/pristine_tree" "$OUT/pristine_tree"
++  if [ ! -d "$OUT/best_tree" ]; then
++    cp -a "$SRC/best_tree" "$OUT/best_tree"; echo "==== seeded ${c}_b512 best_tree from $SRC/best_tree"
++    echo "==== $(date +%F_%T) transfer check: ${c}_b512 seed tree vs pristine on the new points"
++    python3 "$HERE/judge_k3.py" --agent-container transfer_check --config "$HERE/issue_k3_${c}_b512.json" \
++      --golden-dir /raid/yilegu/eval_goldens --out "$OUT/seed_transfer_verdict.json" \
++      --tree-dir "$OUT/best_tree" --pristine-dir "$OUT/pristine_tree" --min-improvement 0 \
++      > "$OUT/seed_transfer_judge.log" 2>&1
++    python3 - "$OUT/seed_transfer_verdict.json" "$OUT" <<'PY'
++import json, sys, shutil, os
++d = json.load(open(sys.argv[1])); out = sys.argv[2]
++print("transfer:", d.get("verdict"), (d.get("reason") or "")[:120])
++ok = True
++for k, p in (d.get("points") or {}).items():
++    c = p["correctness"]; ok &= bool(c.get("pass"))
++    print(f"  {k}: pristine {p['before_us']:.1f} -> seed {p['after_us']:.1f} us ({p['improvement']*100:+.1f}%) CHECK {c.get('pass')} rel {c.get('max_rel_err')}")
++if not ok or not d.get("points"):
++    print("!! seed tree fails CHECK (or no result) on the new points -> starting this case from PRISTINE")
++    shutil.move(os.path.join(out, "best_tree"), os.path.join(out, "best_tree.transfer_failed"))
++PY
++  fi
++done
++echo "==== $(date +%F_%T) starting alternate rounds $K0..$((K0+N-1)) for mla_b512 kda_b512 on GPU $GPU_IDX"
++CASES="mla_b512 kda_b512" exec "$HERE/run_k3_alternate.sh" "$GPU_IDX" "$K0" "$N"
+diff --git a/scripts-local/vibesim-analysis-container/run_k3_continuous.sh b/scripts-local/vibesim-analysis-container/run_k3_continuous.sh
+new file mode 100755
+index 0000000..839a799
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/run_k3_continuous.sh
+@@ -0,0 +1,52 @@
++#!/usr/bin/env bash
++# Continuous optimization loop for one Kimi-K3 case (user decision 2026-09-24: no fixed 5% gate;
++# keep optimizing from the latest accepted tree, re-analyze, optimize further, never regress
++# accuracy). Each round:
++#   1. seed the agent with best_tree (pristine on the very first round),
++#   2. run one trial (agent + judge) via run_iter_opt_eval.sh with START_TREE/MIN_IMPROVEMENT=0,
++#      so the judge measures the round's latency baseline from best_tree and checks the output +
++#      post-step state against the PRISTINE goldens (accuracy can never drift across rounds),
++#   3. on PASS (primary gain >= max(3 sigma, 0.5%), no secondary regression, CHECK pass) promote
++#      the judged tree to best_tree and append to rounds.jsonl; otherwise keep best_tree.
++# Usage: run_k3_continuous.sh <gpu> <kda|mla> <first_round_k> <n_rounds> [seed_tree]
++#   K3_SHARED_GPU=1 AGENT_TIMEOUT=2700 ./run_k3_continuous.sh 7 mla 20 3 [path/to/seed_tree]
++set -uo pipefail
++HERE="$(cd "$(dirname "$0")" && pwd)"
++GPU_IDX="$1"; CASE="$2"; K0="$3"; N="$4"; SEED="${5:-}"
++case "$GPU_IDX" in 2|3|7) ;; *) echo "!! GPU $GPU_IDX not authorized (only 2,3,7)"; exit 1;; esac
++export DOCKER_GPU_ARG="\"device=$GPU_IDX\"" AGENT_TIMEOUT="${AGENT_TIMEOUT:-2700}" MIN_IMPROVEMENT=0
++OUT="$HERE/iter_opt_eval_k3_${CASE}"; BEST="$OUT/best_tree"; HIST="$OUT/rounds.jsonl"
++mkdir -p "$OUT"
++if [ -n "$SEED" ] && [ ! -d "$BEST" ]; then cp -a "$SEED" "$BEST"; echo "seeded best_tree from $SEED"; fi
++
++for k in $(seq "$K0" $((K0 + N - 1))); do
++  if [ "${K3_SHARED_GPU:-0}" != 1 ]; then
++    while :; do used="$(nvidia-smi -i "$GPU_IDX" --query-gpu=memory.used --format=csv,noheader,nounits | tr -d ' ')"
++      [ "${used:-99999}" -lt 1000 ] && break; echo "$(date +%T) GPU $GPU_IDX busy -> wait 60s"; sleep 60; done
++  fi
++  echo "==== $(date +%F_%T) $CASE round $k (best_tree: $([ -d "$BEST" ] && echo yes || echo pristine))"
++  if [ -d "$BEST" ]; then export START_TREE="$BEST"; else unset START_TREE; fi
++  START="$k" "$HERE/run_iter_opt_eval.sh" "$HERE/issue_k3_${CASE}.json" "$k" max \
++    > "$HERE/direct_${CASE}_trial_${k}.out" 2>&1 || echo "!! round $k runner exited non-zero"
++  V="$OUT/trial_${k}_verdict.json"
++  if [ ! -f "$V" ]; then echo "!! no verdict for round $k"; continue; fi
++  python3 - "$V" "$k" "$CASE" "$HIST" <<'PY'
++import json, sys, time
++v = json.load(open(sys.argv[1])); k, case, hist = sys.argv[2], sys.argv[3], sys.argv[4]
++pts = {p: (round(d["before_us"], 1), round(d["after_us"], 1), d["improvement"], d["correctness"].get("pass"))
++       for p, d in (v.get("points") or {}).items()}
++rec = {"round": int(k), "case": case, "verdict": v.get("verdict"), "reason": v.get("reason"),
++       "points": pts, "files": v.get("changed_files"), "diff_lines": v.get("diff_lines"),
++       "pristine_points": v.get("pristine_points"), "time": time.strftime("%F %T")}
++open(hist, "a").write(json.dumps(rec) + "\n")
++print(f"round {k}: {v.get('verdict')} {pts}")
++PY
++  if grep -q '"verdict": "PASS"' "$V"; then
++    rm -rf "$BEST.prev"; [ -d "$BEST" ] && mv "$BEST" "$BEST.prev"
++    cp -a "$OUT/trial_${k}_tree_judged" "$BEST"
++    echo "==== round $k PASS -> promoted trial_${k}_tree_judged to best_tree"
++  else
++    echo "==== round $k not accepted -> best_tree unchanged"
++  fi
++done
++echo "==== $(date +%F_%T) $CASE continuous loop done; history: $HIST"
+diff --git a/scripts-local/vibesim-analysis-container/run_k3_controls.sh b/scripts-local/vibesim-analysis-container/run_k3_controls.sh
+new file mode 100755
+index 0000000..887fa51
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/run_k3_controls.sh
+@@ -0,0 +1,29 @@
++#!/usr/bin/env bash
++# Judge-integrity controls for the Kimi-K3 open-ended case (C1 of the plan). Runs three
++# "trials" of run_iter_opt_eval.sh with the agent step disabled (AGENT_TIMEOUT=1):
++#   trial 1  null control      pristine tree            -> expect FAIL(latency_improved), CHECK pass,
++#                                                          improvement ~ 0 +- noise
++#   trial 2  planted slowdown  controls/planted_slowdown -> expect FAIL(latency_improved), CHECK pass,
++#                                                          improvement clearly negative
++#   trial 3  planted numerics  controls/planted_numerics -> expect FAIL(correctness)
++# Usage: sbatch slurm_gpu.sh ./run_k3_controls.sh [issue_k3_kda.json]
++set -Eeuo pipefail
++HERE="$(cd "$(dirname "$0")" && pwd)"
++CFG="${1:-issue_k3_kda.json}"
++CASE="$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['case'])" "$HERE/$CFG")"
++OUT="$HERE/iter_opt_eval_${CASE}"
++export AGENT_TIMEOUT=1
++echo "######## control 1/3: null (pristine tree)"
++START=1 "$HERE/run_iter_opt_eval.sh" "$CFG" 1 max || true
++echo "######## control 2/3: planted slowdown"
++START=2 PLANT_PATCH="$HERE/controls/planted_slowdown.patch" "$HERE/run_iter_opt_eval.sh" "$CFG" 2 max || true
++echo "######## control 3/3: planted numerics change"
++START=3 PLANT_PATCH="$HERE/controls/planted_numerics.patch" "$HERE/run_iter_opt_eval.sh" "$CFG" 3 max || true
++echo "######## verdicts"
++python3 - "$OUT" <<'PY'
++import json,glob,os,sys
++for f in sorted(glob.glob(os.path.join(sys.argv[1], "trial_*_verdict.json"))):
++    d=json.load(open(f))
++    pts={k:(round(v.get("improvement",0),4), v.get("correctness",{}).get("pass")) for k,v in (d.get("points") or {}).items()}
++    print(os.path.basename(f), d.get("verdict"), d.get("reason"), "required=",d.get("required_improvement"), pts)
++PY
+diff --git a/scripts-local/vibesim-analysis-container/run_k3_jit_fill.sh b/scripts-local/vibesim-analysis-container/run_k3_jit_fill.sh
+new file mode 100755
+index 0000000..c57ba3b
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/run_k3_jit_fill.sh
+@@ -0,0 +1,48 @@
++#!/usr/bin/env bash
++# JIT-fill the Kimi-K3 kernel rows a timing-predict preset needs, on the slurm-granted B200,
++# into a BRANCH copy of profile.db (never the shared profiling/profile.db — merging that needs
++# the user's explicit OK, per skills/impl-register-kernel). Runs in the clean worktree
++# (main-k3-rust) because the user's main/ checkout cannot build Rust (rewound submodule).
++#   sbatch slurm_gpu.sh ./run_k3_jit_fill.sh [preset ...]
++# Default presets: the single-rank KDA and MLA layer presets (alignment) then the full TP8/EP8/PP2.
++set -uo pipefail
++HERE="$(cd "$(dirname "$0")" && pwd)"
++REPO="${VIBESIM_REPO:-/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/main-k3-rust}"
++DB="${VIBESIM_PROFILE_DB:-$HERE/kimi_single_layer/k3_branch_profile.db}"
++[ -f "$DB" ] || cp "$REPO/profiling/profile.db" "$DB"
++# Under slurm the cgroup shows only the granted GPU; when run directly on the host, pass
++# K3_GPU_INDEX=3 (or 2) so the fill never lands on the first visible device (GPU 0).
++if [ -n "${K3_GPU_INDEX:-}" ]; then
++  case "$K3_GPU_INDEX" in 2|3|7) ;; *) echo "!! GPU $K3_GPU_INDEX not authorized (only 2,3,7)"; exit 1;; esac
++  UUID="$(nvidia-smi -i "$K3_GPU_INDEX" --query-gpu=uuid --format=csv,noheader | tr -d ' ')"
++else
++  UUID="$(nvidia-smi --query-gpu=uuid --format=csv,noheader | head -1 | tr -d ' ')"
++fi
++[ -n "$UUID" ] || { echo "!! no GPU visible"; exit 1; }
++export VIBESIM_PROFILE_GPUS="$UUID" VIBESIM_PROFILE_DB="$DB"
++export PATH="$HOME/.cargo/bin:$PATH"
++export TMPDIR="/raid/tmp/yilegu_k3_tmp"; mkdir -p "$TMPDIR"
++PRESETS=("$@")
++[ ${#PRESETS[@]} -gt 0 ] || PRESETS=(presets/predict_kimi_k3_b200_rank1_layer_kda.json
++                                     presets/predict_kimi_k3_b200_rank1_layer_mla.json
++                                     presets/predict_kimi_k3_b200_sglang_tp8ep8pp2.json)
++echo "==== K3 JIT fill: repo=$REPO db=$DB gpu=$UUID ===="
++cd "$REPO"
++for p in "${PRESETS[@]}"; do
++  echo; echo "---- $p ----"
++  timeout 5400 uv run --no-sync python -m launcher timing-predict "$p" 2>&1 | tail -40
++  echo "RESULT $p exit=${PIPESTATUS[0]}"
++done
++echo; echo "==== rows per K3 table in $DB ===="
++python3 - "$DB" <<'PY'
++import sqlite3, sys
++con = sqlite3.connect(sys.argv[1])
++for t in ("kda_recurrent_decode","kda_fused_decode","mla_decode_attention","mxfp4_fused_moe",
++          "gdn_causal_conv_decode","gdn_gated_rms_norm","batched_gemm","single_gemm","rms_norm",
++          "residual_rms_norm","mla_cache_append","elementwise","gemm_fp32_output"):
++    try:
++        n = con.execute(f'select count(*) from "{t}" where gpu_name like "%B200%"').fetchone()[0]
++        print(f"{t}: {n} B200 rows")
++    except Exception as e:
++        print(f"{t}: {e}")
++PY
+diff --git a/scripts-local/vibesim-analysis-container/run_k3_kernel_smoke.sh b/scripts-local/vibesim-analysis-container/run_k3_kernel_smoke.sh
+new file mode 100755
+index 0000000..344e093
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/run_k3_kernel_smoke.sh
+@@ -0,0 +1,55 @@
++#!/usr/bin/env bash
++# GPU smoke of the Kimi-K3 profiling kinds/backends added on VibeSim branch kimi-k3 (B2):
++# one representative K3 shape per kind, measured into a PRIVATE sqlite (never the shared
++# profiling/profile.db). Run under slurm so the launcher's docker workers bind the granted
++# GPU by UUID (VIBESIM_PROFILE_GPUS accepts UUIDs on this branch):
++#   sbatch slurm_gpu.sh ./run_k3_kernel_smoke.sh [DB=kimi_single_layer/k3_smoke.db]
++set -uo pipefail
++HERE="$(cd "$(dirname "$0")" && pwd)"
++REPO="${VIBESIM_REPO:-/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/main}"
++DB="${1:-$HERE/kimi_single_layer/k3_smoke.db}"
++UUID="$(nvidia-smi --query-gpu=uuid --format=csv,noheader | head -1 | tr -d ' ')"
++[ -n "$UUID" ] || { echo "!! no GPU visible"; exit 1; }
++export VIBESIM_PROFILE_GPUS="$UUID"
++export PATH="$HOME/.cargo/bin:$PATH"
++# the host (torch) backend builds its CUPTI extension under $TMPDIR/moesim_cupti_ext;
++# the shared /raid/tmp one belongs to another user -> use our own.
++export TMPDIR="/raid/tmp/yilegu_k3_tmp"; mkdir -p "$TMPDIR"
++echo "==== K3 kernel smoke: repo=$REPO db=$DB gpu=$UUID ===="
++cd "$REPO"
++run () {  # run <kind> <backend> <spec-json>
++  local kind="$1" be="$2" spec="$3"
++  echo; echo "---- $kind / $be ----"; echo "spec: $spec"
++  if timeout 1500 uv run --no-sync python -m launcher kernel-profile run "$kind" --backend "$be" \
++       --spec "$spec" --db "$DB" --gpu-name "NVIDIA B200" 2>&1 | tail -25; then
++    echo "RESULT $kind/$be OK"
++  else
++    echo "RESULT $kind/$be FAIL"
++  fi
++}
++KDA='{"batch_size":32,"num_heads":12,"head_k_dim":128,"head_v_dim":128,"dtype":"bf16","state_dtype":"fp32","lower_bound":-5.0}'
++# fused KDA decode is only covered for an fp32 recurrent state (kda_fused_decode.covered)
++KDA_BF16='{"batch_size":128,"num_heads":12,"head_k_dim":128,"head_v_dim":128,"dtype":"bf16","state_dtype":"fp32","lower_bound":-5.0}'
++KDA_STATE_BF16='{"batch_size":128,"num_heads":12,"head_k_dim":128,"head_v_dim":128,"dtype":"bf16","state_dtype":"bf16","lower_bound":-5.0}'
++MLA='{"num_heads":12,"kv_lora_rank":512,"rope_dim":64,"q_dtype":"bf16","kv_dtype":"bf16","page_size":64,"batch_size":128,"kv_len":8192}'
++MLA_FP8='{"num_heads":12,"kv_lora_rank":512,"rope_dim":64,"q_dtype":"bf16","kv_dtype":"fp8_e4m3","page_size":64,"batch_size":128,"kv_len":8192}'
++MOE="$(python3 -c 'import json; print(json.dumps({"num_tokens":128,"hidden_size":3584,"intermediate_size":3072,"num_experts":896,"num_local_experts":112,"top_k":16,"input_dtype":"bf16","weight_format":"mxfp4_e2m1_ue8m0","group_size":32,"routing_method":"deepseek_v3_sigmoid","activation":"situ","n_group":1,"topk_group":1,"routed_scaling_factor":1.0,"gemm1_alpha":4.0,"gemm1_clamp_limit":25.0,"per_expert_batches":[128]*16+[0]*880},separators=(",",":")))')"
++run kda_recurrent_decode torch          "$KDA"
++run kda_recurrent_decode sglang_triton  "$KDA"
++run kda_fused_decode     sglang_fused   "$KDA_BF16"
++run kda_recurrent_decode sglang_triton  "$KDA_STATE_BF16"
++run mla_decode_attention sglang_cutedsl_mla "$MLA_FP8"
++run mla_decode_attention sglang_trtllm_mla  "$MLA"
++run mla_decode_attention sglang_triton      "$MLA"
++run mxfp4_fused_moe      sglang_trtllm_mxfp4 "$MOE"
++run gdn_causal_conv_decode sglang_triton '{"batch_size":32,"channels":4608,"kernel_size":4,"dtype":"bf16","state_dtype":"bf16"}'
++run gdn_gated_rms_norm     sglang_triton '{"m":32,"hidden":128,"dtype":"bf16"}'
++run batched_gemm           sglang_k3_absorb '{"num_batches":12,"m":1,"n":512,"k":128,"dtype":"bf16"}'
++echo; echo "==== summary ===="; grep -h "^RESULT" /dev/null "$0" >/dev/null 2>&1; true
++python3 - "$DB" <<'PY'
++import sqlite3, sys
++con = sqlite3.connect(sys.argv[1])
++for (t,) in con.execute("select name from sqlite_master where type='table' and name not like '\\_%' escape '\\'"):
++    n = con.execute(f'select count(*) from "{t}"').fetchone()[0]
++    if n: print(f"{t}: {n} rows")
++PY
+diff --git a/scripts-local/vibesim-analysis-container/run_k3_nvtx_capture.sh b/scripts-local/vibesim-analysis-container/run_k3_nvtx_capture.sh
+new file mode 100755
+index 0000000..5920f97
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/run_k3_nvtx_capture.sh
+@@ -0,0 +1,45 @@
++#!/usr/bin/env bash
++# B5 alignment PROBE capture: run the Kimi-K3 single-layer driver under Nsight Systems inside
++# the sglang v0.5.20 container with --nvtx-align, so VibeSim's alignment pipeline
++# (alignment/nsys/parse.py -> label -> analyze) can compare measured per-kernel time of the
++# real layer against the kimi_k3_sglang single-rank prediction. Produces, per case:
++#   kimi_single_layer/align/<name>/{profile.nsys-rep, profile.sqlite, records/server.log}
++# Usage: sbatch slurm_gpu.sh ./run_k3_nvtx_capture.sh [kda|mla|both]
++set -Eeuo pipefail
++HERE="$(cd "$(dirname "$0")" && pwd)"
++WHICH="${1:-both}"
++IMG="${SGLANG_IMG:-lmsysorg/sglang:v0.5.20}"
++GPU="${DOCKER_GPU_ARG:-\"device=3\"}"
++OUT="$HERE/kimi_single_layer/align"; mkdir -p "$OUT"
++KDA_ARGS="--attn-type kda --moe-backend flashinfer_mxfp4 --attn-heads 12 --mamba-ssm-dtype bfloat16 --experts 112 --ep 8 --cuda-graph --iters 20 --warmup 5"
++MLA_ARGS="--attn-type mla --moe-backend flashinfer_mxfp4 --attention-backend cutedsl_mla --attn-heads 12 --kv-cache-dtype fp8_e4m3 --experts 112 --ep 8 --cuda-graph --iters 20 --warmup 5"
++
++capture () {  # capture <name> <point> <driver args...>
++  local name="$1" point="$2"; shift 2
++  local d="$OUT/$name"; rm -rf "$d"; mkdir -p "$d/records"
++  echo "==== capture $name point=$point ===="
++  docker run --rm --name "k3nsys_$$_$name" --gpus "$GPU" --shm-size 32g \
++    -e CUDA_VISIBLE_DEVICES=0 -e HF_HUB_OFFLINE=1 -e TOKENIZERS_PARALLELISM=false \
++    -e SGLANG_OPT_FUSED_KDA_VERIFY=0 \
++    -v /raid/hf/hub:/raid/hf/hub:ro -v "$HERE":/work --workdir /tmp \
++    --entrypoint bash "$IMG" -c '
++      NSYS=$(ls /opt/nvidia/nsight-systems-cli/*/bin/nsys 2>/dev/null | head -1)
++      [ -n "$NSYS" ] || NSYS=$(which nsys)
++      echo "nsys=$NSYS"; "$NSYS" --version | head -1
++      "$NSYS" profile --force-overwrite=true -t cuda,nvtx --cuda-graph-trace=node \
++        --capture-range=none -o /work/kimi_single_layer/align/'"$name"'/profile \
++        python3 /work/kimi_single_layer_decode.py --point '"$point"' '"$*"' \
++          --nvtx-align /work/kimi_single_layer/align/'"$name"'/records --nvtx-align-steps 20 \
++          --json-out /work/kimi_single_layer/align/'"$name"'/run.json 2>&1 | tail -25
++      "$NSYS" export --type sqlite --force-overwrite=true \
++        -o /work/kimi_single_layer/align/'"$name"'/profile.sqlite \
++        /work/kimi_single_layer/align/'"$name"'/profile.nsys-rep 2>&1 | tail -2
++      ls -la /work/kimi_single_layer/align/'"$name"'/
++    '
++}
++case "$WHICH" in
++  kda)  capture kda_b128_l8192 128,8192 $KDA_ARGS ;;
++  mla)  capture mla_b128_l8192 128,8192 $MLA_ARGS ;;
++  both) capture kda_b128_l8192 128,8192 $KDA_ARGS; capture mla_b128_l8192 128,8192 $MLA_ARGS ;;
++esac
++echo "==== done ===="
+diff --git a/scripts-local/vibesim-analysis-container/run_k3_prefill_when_free.sh b/scripts-local/vibesim-analysis-container/run_k3_prefill_when_free.sh
+new file mode 100755
+index 0000000..44f6414
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/run_k3_prefill_when_free.sh
+@@ -0,0 +1,61 @@
++#!/usr/bin/env bash
++# Chunked-prefill campaign (cases k3_{kda,mla}_prefill; user request 2026-09-24), warm-started from the
++# decode best trees. Waits until (a) the prefill oracles answer on 8805/8806 (baked after VibeSim B12) and
++# (b) an authorized GPU has room (GPU 2/3 idle for IDLE_CHECKS checks, or GPU 7 with >= 60 GB free), then
++# per case: seed best_tree from iter_opt_eval_k3_<case>/best_tree, TRANSFER CHECK on the prefill points
++# (falls back to the pristine tree if CHECK fails), then alternate continuous rounds mla_prefill / kda_prefill.
++# Usage: run_k3_prefill_when_free.sh <first_round_k> <n_rounds_per_case>
++set -uo pipefail
++HERE="$(cd "$(dirname "$0")" && pwd)"
++K0="$1"; N="$2"
++export AGENT_TIMEOUT="${AGENT_TIMEOUT:-2700}"
++IDLE_CHECKS="${IDLE_CHECKS:-30}"
++oracles_up () {
++  for port in 8805 8806; do
++    curl -s -m 5 "http://172.17.0.1:$port/api/v1/analyze?level=run_summary" | grep -q '"' || return 1
++  done
++}
++until oracles_up; do echo "$(date +%T) prefill oracles 8805/8806 not up yet -> wait 300s"; sleep 300; done
++echo "==== $(date +%F_%T) prefill oracles up"
++declare -A IDLE_STREAK=([2]=0 [3]=0)
++GPU_IDX=""
++while [ -z "$GPU_IDX" ]; do
++  for g in 3 2; do
++    used="$(nvidia-smi -i "$g" --query-gpu=memory.used --format=csv,noheader,nounits | tr -d ' ')"
++    if [ "${used:-99999}" -lt 1000 ]; then IDLE_STREAK[$g]=$((IDLE_STREAK[$g] + 1)); else IDLE_STREAK[$g]=0; fi
++    if [ "${IDLE_STREAK[$g]}" -ge "$IDLE_CHECKS" ]; then GPU_IDX="$g"; break; fi
++  done
++  [ -n "$GPU_IDX" ] && break
++  used7="$(nvidia-smi -i 7 --query-gpu=memory.used --format=csv,noheader,nounits | tr -d ' ')"
++  total7="$(nvidia-smi -i 7 --query-gpu=memory.total --format=csv,noheader,nounits | tr -d ' ')"
++  if [ $((total7 - used7)) -ge 61440 ]; then GPU_IDX=7; export K3_SHARED_GPU=1; break; fi
++  echo "$(date +%T) GPUs 2/3 busy, GPU 7 free=$((total7 - used7)) MiB -> wait 120s"; sleep 120
++done
++echo "==== $(date +%F_%T) using GPU $GPU_IDX (shared=${K3_SHARED_GPU:-0})"
++export DOCKER_GPU_ARG="\"device=$GPU_IDX\""
++for c in mla kda; do
++  SRC="$HERE/iter_opt_eval_k3_${c}"; OUT="$HERE/iter_opt_eval_k3_${c}_prefill"; mkdir -p "$OUT"
++  [ -d "$OUT/pristine_tree" ] || cp -a "$SRC/pristine_tree" "$OUT/pristine_tree"
++  if [ ! -d "$OUT/best_tree" ]; then
++    cp -a "$SRC/best_tree" "$OUT/best_tree"; echo "==== seeded ${c}_prefill best_tree from $SRC/best_tree"
++    echo "==== $(date +%F_%T) transfer check: ${c}_prefill seed tree vs pristine on the prefill points"
++    python3 "$HERE/judge_k3.py" --agent-container transfer_check --config "$HERE/issue_k3_${c}_prefill.json" \
++      --golden-dir /raid/yilegu/eval_goldens --out "$OUT/seed_transfer_verdict.json" \
++      --tree-dir "$OUT/best_tree" --pristine-dir "$OUT/pristine_tree" --min-improvement 0 \
++      > "$OUT/seed_transfer_judge.log" 2>&1
++    python3 - "$OUT/seed_transfer_verdict.json" "$OUT" <<'PY'
++import json, sys, shutil, os
++d = json.load(open(sys.argv[1])); out = sys.argv[2]
++print("transfer:", d.get("verdict"), (d.get("reason") or "")[:120])
++ok = True
++for k, p in (d.get("points") or {}).items():
++    c = p["correctness"]; ok &= bool(c.get("pass"))
++    print(f"  {k}: pristine {p['before_us']:.1f} -> seed {p['after_us']:.1f} us ({p['improvement']*100:+.1f}%) CHECK {c.get('pass')} rel {c.get('max_rel_err')}")
++if not ok or not d.get("points"):
++    print("!! seed tree fails CHECK (or no result) on the prefill points -> starting this case from PRISTINE")
++    shutil.move(os.path.join(out, "best_tree"), os.path.join(out, "best_tree.transfer_failed"))
++PY
++  fi
++done
++echo "==== $(date +%F_%T) starting alternate rounds $K0..$((K0+N-1)) for mla_prefill kda_prefill on GPU $GPU_IDX"
++CASES="mla_prefill kda_prefill" exec "$HERE/run_k3_alternate.sh" "$GPU_IDX" "$K0" "$N"
+diff --git a/scripts-local/vibesim-analysis-container/run_k3_trials_direct.sh b/scripts-local/vibesim-analysis-container/run_k3_trials_direct.sh
+new file mode 100755
+index 0000000..45422da
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/run_k3_trials_direct.sh
+@@ -0,0 +1,37 @@
++#!/usr/bin/env bash
++# Run K3 optimizer trials DIRECTLY on one GPU (no slurm allocation), sequentially.
++#
++# Why: a trial holds a GPU only while the driver/judge run (~10 of ~55 min); under
++# sbatch the whole session pins an allocation. Direct docker `--gpus device=N` on the
++# authorized repro GPU shares it instead (user decision 2026-09-23: "do not use slurm
++# for your run just directly use GPU"; GPU 2/3 are the authorized ones, never 0,1,4-7).
++#
++# Usage: run_k3_trials_direct.sh GPU_INDEX "<case>:<trial>" ["<case>:<trial>" ...]
++#   e.g. run_k3_trials_direct.sh 3 kda:6 mla:5 kda:7 mla:6
++# Waits for the GPU to be idle (< 1000 MiB used) before each trial.
++set -Eeuo pipefail
++HERE="$(cd "$(dirname "$0")" && pwd)"
++GPU_IDX="$1"; shift
++# GPU 7 authorized by the user on 2026-09-24 (shared with a light-load run; skip the idle gate
++# with K3_SHARED_GPU=1). Still never 0,1,4,5,6.
++case "$GPU_IDX" in 2|3|7) ;; *) echo "!! GPU $GPU_IDX not authorized (only 2,3,7)"; exit 1;; esac
++export DOCKER_GPU_ARG="\"device=$GPU_IDX\""
++export AGENT_TIMEOUT="${AGENT_TIMEOUT:-1800}"
++
++wait_idle () {
++  [ "${K3_SHARED_GPU:-0}" = 1 ] && return 0
++  while :; do
++    used="$(nvidia-smi -i "$GPU_IDX" --query-gpu=memory.used --format=csv,noheader,nounits | tr -d ' ')"
++    [ "${used:-99999}" -lt 1000 ] && return 0
++    echo "== GPU $GPU_IDX busy (${used} MiB used) -> waiting 60s"; sleep 60
++  done
++}
++
++for spec in "$@"; do
++  case_name="${spec%%:*}"; k="${spec##*:}"
++  wait_idle
++  echo "==== $(date +%F_%T) start ${case_name} trial ${k} on GPU $GPU_IDX (agent budget ${AGENT_TIMEOUT}s)"
++  START="$k" "$HERE/run_iter_opt_eval.sh" "$HERE/issue_k3_${case_name}.json" "$k" max \
++    > "$HERE/direct_${case_name}_trial_${k}.out" 2>&1 || echo "!! ${case_name} trial ${k} exited non-zero"
++  echo "==== $(date +%F_%T) done ${case_name} trial ${k}"
++done
