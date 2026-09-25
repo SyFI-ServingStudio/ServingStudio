@@ -1247,6 +1247,7 @@ def _point_path(path, B, L, tag=""):
 
 
 HIDDEN_SCALE = 0.02   # set from --hidden-scale in main()
+FLASHINFER_AUTOTUNE = False   # set from --flashinfer-autotune in main()
 
 
 def install_routing_probe(num_experts):
@@ -1506,6 +1507,17 @@ def time_point(cfg, sa, layer, B, seq_len, iters, warmup, split=False,
                                "write_layer": ar.is_write_layer}
 
         with forward_ctx(backend_for_ctx), torch.inference_mode():
+            if FLASHINFER_AUTOTUNE:
+                # Production: BaseRunner.warmup() runs one dummy forward under
+                # flashinfer.autotuner.autotune(True) (runner/flashinfer_autotune.py), so the
+                # trtllm-gen MXFP4 MoE (and other FlashInfer ops) run their TUNED tactic for each
+                # shape bucket. Without it FlashInfer falls back to a default tactic (tile_N one
+                # below nextPow2(rows/expert)) -- identical at B <= 256, ~9% slower at B=512.
+                from flashinfer.autotuner import autotune
+                with autotune(True):
+                    out = call_layer(layer, fb, positions, hidden, ar)
+                torch.cuda.synchronize()
+                log("[autotune] FlashInfer tactics profiled for this point (production warmup)")
             for _ in range(warmup):
                 out = call_layer(layer, fb, positions, hidden, ar)
             torch.cuda.synchronize()
@@ -1757,6 +1769,10 @@ def main():
                     help="call sglang's initialize_bf16_gemm_config() as the production scheduler "
                          "does (auto -> cutedsl TGV/split-K dispatch on SM100 for eligible bf16 GEMM "
                          "shapes); default off = the legacy driver behaviour (all bf16 GEMMs cuBLAS)")
+    ap.add_argument("--flashinfer-autotune", action="store_true",
+                    help="run the first warmup forward of every point under flashinfer.autotuner.autotune(True), "
+                         "as the production runner's startup warmup does (tuned MXFP4 MoE tactics per shape "
+                         "bucket); default off = FlashInfer's fallback tactics (the legacy driver behaviour)")
     ap.add_argument("--bf16-gemm-backend", type=str, default="",
                     choices=["", "auto", "cutedsl", "torch"],
                     help="override --bf16-gemm-backend passed to ServerArgs (default: sglang's auto)")
@@ -1794,8 +1810,9 @@ def main():
     os.environ["SGLANG_MAMBA_SSM_DTYPE"] = args.mamba_ssm_dtype
     kv_dtype = torch.float8_e4m3fn if args.kv_cache_dtype == "fp8_e4m3" else torch.bfloat16
     sa_kv_dtype = "fp8_e4m3" if args.kv_cache_dtype == "fp8_e4m3" else "auto"
-    global HIDDEN_SCALE
+    global HIDDEN_SCALE, FLASHINFER_AUTOTUNE
     HIDDEN_SCALE = args.hidden_scale
+    FLASHINFER_AUTOTUNE = bool(args.flashinfer_autotune)
     if args.dump_routing:
         install_routing_probe(args.experts)
 
@@ -1808,7 +1825,7 @@ def main():
         f"attention_backend={args.attention_backend if args.attn_type == 'mla' else 'n/a'} "
         f"page_size={args.page_size} attn_heads={args.attn_heads} cuda_graph={args.cuda_graph} "
         f"kv_cache_dtype={args.kv_cache_dtype} mamba_ssm_dtype={args.mamba_ssm_dtype} "
-        f"bf16_gemm_init={args.bf16_gemm_init}")
+        f"bf16_gemm_init={args.bf16_gemm_init} flashinfer_autotune={args.flashinfer_autotune}")
     log(f"torch={torch.__version__}  dev={torch.cuda.get_device_name(0)}")
     import sglang
     log(f"sglang={getattr(sglang, '__version__', '??')}")
