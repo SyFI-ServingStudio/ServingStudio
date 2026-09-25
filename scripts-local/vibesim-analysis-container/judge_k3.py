@@ -147,7 +147,7 @@ def ensure_baseline(cfg, driver_path, golden_dir, points, key):
     if meta.exists():
         return gdir, json.loads(meta.read_text())
     gdir.mkdir(parents=True, exist_ok=True)
-    cont = Container(cfg, f"judge_k3_golden_{int(time.time())}")
+    cont = Container(cfg, f"judge_k3_golden_{int(time.time())}_{os.getpid()}")
     try:
         cont.cp_in(driver_path, f"/tmp/{driver_path.name}")
         cont.exec(["mkdir", "-p", "/tmp/golden"])
@@ -195,7 +195,7 @@ def measure_tree(cfg, driver_path, points, tree_dir, reps):
     """Latency-only measurement of an arbitrary (host) tree mounted read-only: the
     continuous loop's per-round baseline is the CURRENT BEST tree, not the pristine one.
     Goldens still come from the pristine tree, so correctness never drifts across rounds."""
-    cont = Container(cfg, f"judge_k3_base_{int(time.time())}",
+    cont = Container(cfg, f"judge_k3_base_{int(time.time())}_{os.getpid()}",
                      tree_mount=(str(tree_dir), cfg["edit_tree"]["container_path"]))
     try:
         cont.cp_in(driver_path, f"/tmp/{driver_path.name}")
@@ -289,7 +289,7 @@ def main():
     v.update(changed_files=changed, diff_patch=str(patch_path), diff_lines=len(patch.splitlines()))
 
     # 3) replay on a fresh pristine container with the judged tree mounted read-only
-    cont = Container(cfg, f"judge_k3_replay_{int(time.time())}",
+    cont = Container(cfg, f"judge_k3_replay_{int(time.time())}_{os.getpid()}",
                      tree_mount=(str(judged_dir), cfg["edit_tree"]["container_path"]))
     try:
         cont.cp_in(driver_path, f"/tmp/{driver_path.name}")
