@@ -195,6 +195,21 @@ Codex rounds (KDA 1–3, MLA 2–4) found nothing further: every remaining large
 or a regression. Both layers are MoE-bound on the closed TRT-LLM MXFP4 cubin at every batch size we can run.
 Prefill rounds start after B12b.
 
+**Accuracy hardening of the Claude trees (07:31–, fresh pristine goldens under seeds 1 and 2; Δ = latency change):**
+
+| tree | seed | primary point | secondaries | max rel err | verdict |
+|---|---|---|---|---|---|
+| KDA-b512 Claude (r1) | 1 | 512×8k 708.0 → 584.2 (−17.5%) | 256: −6.5%, 128: −6.7% | 0.016 | PASS |
+| KDA-b512 Claude (r1) | 2 | 512×8k 719.1 → 591.2 (−17.8%) | 256: −6.4%, 128: −6.4% | 0.016 | PASS |
+| MLA-b512 Claude (r3) | 2 | 512×8k 1006.1 → 891.3 (−11.4%) | 256: −8.2%, mixed 16×64k: −11.7% | 0.011 | PASS |
+| MLA-b512 Claude (r3) | 1 | pending (first attempt lost to a judge container-name collision, fixed) | | | |
+| MLA-prefill Claude (r2) | 1 | 1×16k @ prefix 48k 12172.6 → 11311.5 (−7.1%) | first chunk −0.2%, 4×4k −3.7% | 0.014 | PASS |
+| MLA-prefill Claude (r2) | 2 | 12152.1 → 11232.4 (−7.6%) | first chunk −2.8%, 4×4k −3.6% | 0.017 | PASS |
+
+(The b512 deltas vs pristine are larger than the round-1 verdicts because the pristine baseline runs FlashInfer's
+fallback MoE tactic while these trees carry the one-shot autotune — the harness gap of §3 — plus the genuine kernel
+wins; against a production-dispatch baseline the KDA-b512 gain is ≈−10%, MLA-b512 ≈−5%.)
+
 **Harness fidelity gap, quantified (CUDA-graph µs, legacy cuBLAS-only → production dispatch):** KDA pristine
 406.9/255.6/134.7 → 407.0/255.5/132.6 (B=128/32/1), best tree 388.6/245.2/128.5 → 388.6/245.3/124.4; MLA
 pristine 304.7/493.0/293.3 → 302.6/493.0/292.3 (1×1M / 128×8k / 16×64k mix), best tree 253.4/475.7/271.8 →
