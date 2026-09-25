@@ -1,6 +1,6 @@
 # Kimi-K3 optimization history (warm start index)
 
-*generated 2026-09-25 06:34:39 by build_opt_history.py; read TECHNIQUES.md first*
+*generated 2026-09-25 07:22:08 by build_opt_history.py; read TECHNIQUES.md first*
 
 Each row is one judged trial/round. `Δ` = latency change per point (positive = faster), `chk` = output+state match vs the pristine goldens. Continuous rounds start from the previous accepted tree; their `incremental.diff` is what that round changed. Campaign-1 rows (c1) ran on a workload with collapsed MoE routing -- directions are valid, effect sizes are not.
 
@@ -55,6 +55,7 @@ Each row is one judged trial/round. `Δ` = latency change per point (positive = 
 | mla_b512_claude | 3 | PASS | 512,8192: 887.3→877.8 (+1.1%, ok); 256,8192: 619.8→609.2 (+1.7%, ok); 16,65536mix: 269.5→261.5 (+3.0%, ok) | set_mla_kv_concat_q.cuh, route_quant_fused.cuh, route_radix.cuh, fused_tma.cuh, set_mla_kv_concat_q.py, mla_decode_tail_split.py, attn_res.py, moe_route_quant_f | ACCEPTED (Claude): output-gate GEMM launched into the MLA decode kernel's tail wave + pending residual add fused into the attn-res TMA kernel (addend in the TMA ring): 887.3->877.8 @512, mixed -3.0%, exact | `trials/mla_b512_claude_3` |
 | mla_prefill_claude | 1 | PASS | 1,16384pf49152: 12128.5→11573.4 (+4.6%, ok); 1,16384pf: 8573.0→8226.0 (+4.0%, ok); 4,4096pf: 8057.8→7848.0 (+2.6%, ok) | set_mla_kv_concat_q.cuh, route_quant_fused.cuh, route_radix.cuh, fused_tma.cuh, set_mla_kv_concat_q.py, attn_res.py, mla_buffer.py, kv_indices.py, moe_route_qua | ACCEPTED (Claude): Triton mla_kv_pack_quantize_fp8 (one-pass K/V pack + fp8 quant for chunk+prefix, Q cast once; replaces ~800us elementwise) + residual add fused into attn-res TMA (418->361us @16k): 12128->11573 @pf49152 (-4.6%), -4.0% first chunk, -2.6% 4x4k; bit-exact | `trials/mla_prefill_claude_1` |
 | mla_prefill_claude | 2 | PASS | 1,16384pf49152: 11538.6→11229.3 (+2.7%, ok); 1,16384pf: 8368.2→8313.9 (+0.7%, ok); 4,4096pf: 7842.9→7740.4 (+1.3%, ok) | set_mla_kv_concat_q.cuh, route_quant_fused.cuh, route_radix.cuh, fused_tma.cuh, set_mla_kv_concat_q.py, cute_dsl_fmha_fp8.py, attn_res.py, mla_buffer.py, kv_ind | ACCEPTED (Claude): non-causal prefix attention TRT-LLM ragged FMHA -> sglang CuTe-DSL JIT FMHA with full softmax correction (fp8 P prescale 2^8): 11539->11229 @pf49152 (-2.7%), rel 0.0156 | `trials/mla_prefill_claude_2` |
+| mla_prefill_claude | 3 | FAIL | 1,16384pf49152: 11277.4→11331.8 (-0.5%, ok); 1,16384pf: 8333.3→8337.5 (-0.1%, ok); 4,4096pf: 7893.0→7737.7 (+2.0%, ok) | set_mla_kv_concat_q.cuh, route_quant_fused.cuh, route_radix.cuh, fused_tma.cuh, set_mla_kv_concat_q.py, cute_dsl_fmha_fp8.py, attn_res.py, mla_buffer.py, kv_ind | Claude: null (re-judged clean after a foreign-job-noise verdict): -0.5% @pf49152, +2.0% 4x4k; agent hit its cap without an accepted change | `trials/mla_prefill_claude_3` |
 
 ## How to use
 

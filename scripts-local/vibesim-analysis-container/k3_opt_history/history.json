@@ -2055,5 +2055,59 @@
   "incremental_diff_lines": 196,
   "note": "ACCEPTED (Claude): non-causal prefix attention TRT-LLM ragged FMHA -> sglang CuTe-DSL JIT FMHA with full softmax correction (fp8 P prescale 2^8): 11539->11229 @pf49152 (-2.7%), rel 0.0156",
   "dir": "trials/mla_prefill_claude_2"
+ },
+ {
+  "case": "mla_prefill_claude",
+  "trial": 3,
+  "verdict": "FAIL",
+  "reason": "failed: latency_improved",
+  "continuous_round": true,
+  "campaign1_unrealistic_routing": false,
+  "points": {
+   "1,16384pf49152": {
+    "before_us": 11277.4,
+    "after_us": 11331.8,
+    "improvement": -0.0048,
+    "check": true,
+    "rel_err": 0.015624999177631622
+   },
+   "1,16384pf": {
+    "before_us": 8333.3,
+    "after_us": 8337.5,
+    "improvement": -0.0005,
+    "check": true,
+    "rel_err": 0.0
+   },
+   "4,4096pf": {
+    "before_us": 7893.0,
+    "after_us": 7737.7,
+    "improvement": 0.0197,
+    "check": true,
+    "rel_err": 0.0
+   }
+  },
+  "files": [
+   "kernels/jit/csrc/elementwise/set_mla_kv_concat_q.cuh",
+   "kernels/jit/csrc/moe/route_quant_fused.cuh",
+   "kernels/jit/csrc/moe/route_radix.cuh",
+   "kernels/jit/csrc/kimi_k3/attn_res/fused_tma.cuh",
+   "kernels/ops/attention/set_mla_kv_concat_q.py",
+   "kernels/ops/attention/cute_dsl_fmha_fp8.py",
+   "kernels/ops/kimi_k3/attn_res.py",
+   "kernels/ops/kvcache/mla_buffer.py",
+   "kernels/ops/kvcache/kv_indices.py",
+   "kernels/ops/moe/moe_route_quant_fused.py",
+   "srt/model_executor/forward_batch_deepseek_mha_mixin.py",
+   "srt/models/kimi_k3.py",
+   "srt/layers/attn_residual.py",
+   "srt/models/deepseek_common/attention_forward_methods/forward_mha.py",
+   "srt/layers/attention/trtllm_mla_backend.py",
+   "srt/layers/attention/cutedsl_mla_backend.py",
+   "srt/layers/moe/topk.py"
+  ],
+  "diff_lines": 1246,
+  "incremental_diff_lines": 0,
+  "note": "Claude: null (re-judged clean after a foreign-job-noise verdict): -0.5% @pf49152, +2.0% 4x4k; agent hit its cap without an accepted change",
+  "dir": "trials/mla_prefill_claude_3"
  }
 ]
