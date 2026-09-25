@@ -264,6 +264,8 @@ consistent); the b512 and prefill cases run with `--bf16-gemm-init` from here on
 
 **Claude KDA-b512 round 3 (04:42–05:36): FAIL correctness** — 601.4→582.9 @512 (+3.1%) but rel 0.029/0.022/0.021 (8/1/1 rows over tol): attn-res TMA fused residual add (fp32 add + RNE) changed rounding; other parts (r2 kernel port via the KB, routed-before-shared capture order) exact. Operator-stacked tree without the fusion queued (GPU 1, 7 reps). Claude KDA-b512 campaign: 1/3 PASS (r1 −11.1%).
 
+**Claude MLA-prefill round 1 (04:52–05:45, GPU 6): PASS** 12128.5→11573.4 (+4.6%) / 8573.0→8226.0 (+4.1%) / 8057.8→7848.0 (+2.6%), bit-exact: Triton `mla_kv_pack_quantize_fp8` (one pass K/V pack + fp8 quant for chunk and prefix, Q cast once) + residual add fused into the attn-res TMA kernel (418→361 µs). First accepted prefill optimization. Round 2 started 05:45.
+
 **Second fidelity gap (03:20, found by both Claude Opus 5.5 b512 agents):** no FlashInfer autotune warmup in the driver → fallback MXFP4 MoE tactic; new `--flashinfer-autotune`; pristine legacy → production (GPU 6): KDA 755.1→693.6 @512, 516.6→501.2 @256, 407.0→406.9 @128; MLA 991.6→930.2 @512, 662.0→650.5 @256, 295.3→294.3 mixed; B ≤ 128 unchanged. Claude round-1 PASSes on b512 are this warmup (harness-gap reproduction).
 
 **Chunked prefill.** Driver point tag `B,L,pf[<prefix>]` (ForwardMode.EXTEND; KDA runs `chunk_kda` with the

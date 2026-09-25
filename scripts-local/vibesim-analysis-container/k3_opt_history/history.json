@@ -1899,5 +1899,58 @@
   "incremental_diff_lines": 428,
   "note": "ACCEPTED (Claude): output-gate GEMM launched into the MLA decode kernel's tail wave + pending residual add fused into the attn-res TMA kernel (addend in the TMA ring): 887.3->877.8 @512, mixed -3.0%, exact",
   "dir": "trials/mla_b512_claude_3"
+ },
+ {
+  "case": "mla_prefill_claude",
+  "trial": 1,
+  "verdict": "PASS",
+  "reason": "all gates passed",
+  "continuous_round": true,
+  "campaign1_unrealistic_routing": false,
+  "points": {
+   "1,16384pf49152": {
+    "before_us": 12128.5,
+    "after_us": 11573.4,
+    "improvement": 0.0458,
+    "check": true,
+    "rel_err": 0.0
+   },
+   "1,16384pf": {
+    "before_us": 8573.0,
+    "after_us": 8226.0,
+    "improvement": 0.0405,
+    "check": true,
+    "rel_err": 0.0
+   },
+   "4,4096pf": {
+    "before_us": 8057.8,
+    "after_us": 7848.0,
+    "improvement": 0.026,
+    "check": true,
+    "rel_err": 0.0
+   }
+  },
+  "files": [
+   "kernels/jit/csrc/elementwise/set_mla_kv_concat_q.cuh",
+   "kernels/jit/csrc/moe/route_quant_fused.cuh",
+   "kernels/jit/csrc/moe/route_radix.cuh",
+   "kernels/jit/csrc/kimi_k3/attn_res/fused_tma.cuh",
+   "kernels/ops/attention/set_mla_kv_concat_q.py",
+   "kernels/ops/kimi_k3/attn_res.py",
+   "kernels/ops/kvcache/mla_buffer.py",
+   "kernels/ops/kvcache/kv_indices.py",
+   "kernels/ops/moe/moe_route_quant_fused.py",
+   "srt/model_executor/forward_batch_deepseek_mha_mixin.py",
+   "srt/models/kimi_k3.py",
+   "srt/layers/attn_residual.py",
+   "srt/models/deepseek_common/attention_forward_methods/forward_mha.py",
+   "srt/layers/attention/trtllm_mla_backend.py",
+   "srt/layers/attention/cutedsl_mla_backend.py",
+   "srt/layers/moe/topk.py"
+  ],
+  "diff_lines": 1053,
+  "incremental_diff_lines": 1053,
+  "note": "ACCEPTED (Claude): Triton mla_kv_pack_quantize_fp8 (one-pass K/V pack + fp8 quant for chunk+prefix, Q cast once; replaces ~800us elementwise) + residual add fused into attn-res TMA (418->361us @16k): 12128->11573 @pf49152 (-4.6%), -4.0% first chunk, -2.6% 4x4k; bit-exact",
+  "dir": "trials/mla_prefill_claude_1"
  }
 ]
