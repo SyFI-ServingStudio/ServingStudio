@@ -89,7 +89,12 @@ python3 /tmp/kimi_single_layer_decode.py --point "$POINTS" $ARGS --replay /tmp/g
 - `CHECK {... "pass": ...}`: output and post-step state must match the golden
   (`max_rel_err <= 0.02`, no NaN). **A change that speeds things up but alters the output or
   state FAILS**, on every point in `$POINTS` (the first point is the one scored for speed; the
-  others must not regress).
+  others must not regress). Prefill points (`pf` tag) are judged per token instead (`rule` in
+  the CHECK line): at most 0.5% of the rows may exceed the tolerance, the 99th-percentile row
+  error and the mean drift must stay small, and the post-step state must match — because the
+  MoE/GEMM autotuners pick among near-equal tactics at m = thousands, which flips the routing
+  of ~0.1% of the tokens between processes. A `max_rel_err` of ~0.3 on a prefill point with
+  `rows_over_tol` of a few is therefore normal; `pass` is what counts.
 - Do NOT edit the driver or pass different workload flags: the judge re-measures with its own
   copy and the fixed flags on a pristine container; only your edits under
   `$CHECKOUT/python/sglang` carry over.
