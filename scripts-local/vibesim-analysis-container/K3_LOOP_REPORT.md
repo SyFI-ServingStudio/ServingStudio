@@ -256,6 +256,8 @@ production's heuristic, so the reported gains stand (≤0.7% shift) and rounds 2
 heuristic rather than duplicating it. The original decode cases keep the legacy dispatch (history stays
 consistent); the b512 and prefill cases run with `--bf16-gemm-init` from here on.
 
+**Second fidelity gap (03:20, found by both Claude Opus 5.5 b512 agents):** no FlashInfer autotune warmup in the driver → fallback MXFP4 MoE tactic; new `--flashinfer-autotune`; pristine legacy → production (GPU 6): KDA 755.1→693.6 @512, 516.6→501.2 @256, 407.0→406.9 @128; MLA 991.6→930.2 @512, 662.0→650.5 @256, 295.3→294.3 mixed; B ≤ 128 unchanged. Claude round-1 PASSes on b512 are this warmup (harness-gap reproduction).
+
 **Chunked prefill.** Driver point tag `B,L,pf[<prefix>]` (ForwardMode.EXTEND; KDA runs `chunk_kda` with the
 carried-in conv/recurrent state, MLA runs the production `trtllm_mla` MHA_CHUNKED_KV path: fp8 ragged
 attention + chunked prefix-KV merge; eager timing since sglang does not graph-capture prefill). Cases

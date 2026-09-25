@@ -190,6 +190,20 @@ pristine 304.7/493.0/293.3 → 302.6/493.0/292.3 (1×1M / 128×8k / 16×64k mix)
 253.4/475.7/271.9. The decode shapes are essentially not TGV-eligible under production's heuristic, so the
 reported gains stand and rounds 21/23 go beyond the production heuristic rather than duplicating it.
 
+**Second harness fidelity gap (found 03:20 by BOTH Claude agents independently, their first iteration):** the
+production runner performs a FlashInfer autotune warmup at startup (`runner/flashinfer_autotune.py`: one dummy
+decode forward under `autotune(True)`), so the trtllm-gen MXFP4 MoE runs its *tuned* tactic per shape bucket; the
+driver never did, so the MoE ran FlashInfer's fallback tactic (tile_N one below nextPow2(rows/expert)). New driver
+flag `--flashinfer-autotune` reproduces the warmup. Quantified on GPU 6 (pristine tree, CUDA-graph µs, legacy →
+`--bf16-gemm-init --flashinfer-autotune`): KDA 755.1 → 693.6 at 512×8k (−8.1%), 516.6 → 501.2 at 256 (−3.0%),
+407.0 → 406.9 at 128; MLA 991.6 → 930.2 at 512 (−6.2%), 662.0 → 650.5 at 256 (−1.7%), mixed 16×64k 295.3 → 294.3;
+the B ≤ 128 decode points are unchanged (KDA 406.9/257.4/130.5, MLA 306.5/492.0/293.3 vs 304.7/493.0/293.3), so
+every result in §3 stands. Consequences: (a) the Codex b512 baselines (724.5 / 991.8 µs) were 8–9% pessimistic and
+the Codex agents' "tactic ceiling" ideas never engaged because the runner-level autotune data they extended did not
+exist; (b) the Claude agents' first accepted change on each layer (a one-shot autotune when no runner data exists)
+*is* this warmup — a harness-gap reproduction, not a production gain, recorded like MLA round 20; (c) prefill cases
+now run with both flags; prefill baselines are re-measured before the prefill rounds.
+
 **Prefill baselines (pristine, eager, 16,384 tokens per step):** KDA 22.1 / 22.5 / 22.1 ms, MLA 20.6 / 29.5 /
 17.8 ms; ~95% kernel time, dominated by cuBLAS GEMMs (projections + shared experts, ~11–12 ms) and the MXFP4
 expert GEMM (~3 ms); ~6 ms of the MLA prefix point is the fp8 prefix attention.
@@ -273,9 +287,10 @@ moves the critical path (stacked check: −4.8%, not −7%).
 10. **Prefill is reproducible per process, not across processes.** Autotuner tactic choice at m = thousands
     re-routes ~0.1% of tokens; the judge needs a per-token rule there, and agents are told that `max_rel_err`
     of ~0.3 with a handful of rows over tolerance is normal on prefill points.
-11. **Check what the harness leaves uninitialized.** The production scheduler initialises the bf16 GEMM backend;
-    the single-layer driver did not — harmless here (≤0.7%), found only because a VibeSim runner tried to
-    reproduce the layer's exact launches.
+11. **Check what the harness leaves uninitialized.** The production scheduler initialises the bf16 GEMM backend
+    and runs a FlashInfer autotune warmup; the single-layer driver did neither. The first was harmless (≤0.7%),
+    the second cost 8–9% at B=512 (fallback MoE tactic) and was found by the optimizing agents themselves —
+    an agent that finds a 'speedup' by re-creating a production default is a fidelity alarm, not a result.
 
 ## 6. Code changes, as patches
 
