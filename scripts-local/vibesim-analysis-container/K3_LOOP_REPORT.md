@@ -241,7 +241,7 @@ engaged for the 112/top-2 path, KDA TMA stage counts, in-kernel TRT-LLM routing 
 512 tokens so the strict decode CHECK rejected it). Round 1 measured +1.2% at B=512 against a 1.5%
 requirement (3σ inflated by concurrent VibeSim JIT fills on the shared GPU); rounds 2–3 were 0.0/+0.1%.
 VibeSim ranks the routed MXFP4 MoE first at every batch (R0 961 µs vs R5 53 µs at B=512, 57% of the step):
-the KDA layer is at the closed-cubin wall at B=512 as it was at B=128. MLA-b512 rounds started 20:13.
+the KDA layer is at the closed-cubin wall at B=512 as it was at B=128. MLA-b512: round 1 (20:13) was infra noise (B=512 baseline reps 2104/995/3363/3530/3419 µs while Codex B12 kernel-profiled on the same GPU; stopped and restarted after B12 with a clean baseline: pristine 991.7 µs, σ 0.4); round 2 FAIL null (0.00%: MoE tactic buckets, PDL toggle, low-priority overlap −1 µs, bf16 front GEMM rejected on correctness); round 3 (01:00–) tried bf16-activation MoE ×2 (no kernel), route+quant cap 64→512 (exact, −1.5 µs, kept), variable-schedule attention (null), tuning ceiling 512→1024 (null), TGV for the m=512 front GEMM (+8% slower) and shared-down (+2% slower) — verdict pending at the time of writing.
 
 **Harness fidelity gap found 23:05 (via Codex B12):** the driver never called sglang's
 `initialize_bf16_gemm_config()` (the production scheduler does; `auto` → `cutedsl` on SM100), so every bf16
