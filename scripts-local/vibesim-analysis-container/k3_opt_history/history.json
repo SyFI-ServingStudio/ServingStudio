@@ -954,6 +954,57 @@
   "dir": "trials/kda_prefill_claude_1"
  },
  {
+  "case": "kda_prefill_claude",
+  "trial": 2,
+  "verdict": "FAIL",
+  "reason": "failed: latency_improved",
+  "continuous_round": true,
+  "campaign1_unrealistic_routing": false,
+  "points": {
+   "1,16384pf": {
+    "before_us": 8592.5,
+    "after_us": 8500.3,
+    "improvement": 0.0107,
+    "check": true,
+    "rel_err": 0.0
+   },
+   "1,16384pf49152": {
+    "before_us": 8748.2,
+    "after_us": 8491.9,
+    "improvement": 0.0293,
+    "check": true,
+    "rel_err": 0.0
+   },
+   "4,4096pf": {
+    "before_us": 8599.0,
+    "after_us": 8451.2,
+    "improvement": 0.0172,
+    "check": true,
+    "rel_err": 0.0
+   }
+  },
+  "files": [
+   "kernels/jit/csrc/attention/kda_fused_decode.cuh",
+   "kernels/jit/csrc/attention/kda_chunk_h.cuh",
+   "kernels/jit/csrc/kimi_k3/attn_res/fused_tma.cuh",
+   "kernels/ops/attention/kda_chunk_h.py",
+   "kernels/ops/attention/kda_fused_decode.py",
+   "kernels/ops/kimi_k3/attn_res.py",
+   "kernels/ops/attention/fla/fused_norm_gate.py",
+   "kernels/ops/attention/fla/kda.py",
+   "kernels/ops/attention/fla/fused_recurrent.py",
+   "kernels/ops/attention/fla/l2norm.py",
+   "kernels/ops/attention/fla/chunk_delta_h.py",
+   "srt/models/kimi_k3.py",
+   "srt/layers/attn_residual.py",
+   "srt/layers/attention/linear/kda_backend.py"
+  ],
+  "diff_lines": 1926,
+  "incremental_diff_lines": 716,
+  "note": "Claude: FAIL below 3-sigma (+1.07% first chunk vs 1.33% need; +2.9% @pf49152, +1.7% 4x4k; bit-exact): CUDA kda_chunk_h h-scan kernel replacing Triton chunk_delta_h (516->281us) -- real, worth porting",
+  "dir": "trials/kda_prefill_claude_2"
+ },
+ {
   "case": "mla",
   "trial": 1,
   "verdict": "FAIL",

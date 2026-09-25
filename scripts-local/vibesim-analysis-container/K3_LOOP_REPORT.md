@@ -272,6 +272,8 @@ consistent); the b512 and prefill cases run with `--bf16-gemm-init` from here on
 
 **Claude MLA-prefill round 3 (06:17–07:08):** first verdict infra noise (27247/18194/18132 µs baselines: foreign job on GPU 6; kept as trial_3_verdict_v1_noise.json); re-judged clean on GPU 6: FAIL null (11277.4→11331.8 @pf49152, −0.5%; 4x4k +2.0%). MLA-prefill Claude campaign closed at the round-2 tree: 12128.5→11229.3 µs (−7.4%).
 
+**Claude KDA-prefill round 2 (06:32–07:25, GPU 7): FAIL below 3σ** — 8592.5→8500.3 first chunk (+1.07% vs 1.33% needed, σ 38 µs), 8748.2→8491.9 @pf49152 (+2.9%), 8599.0→8451.2 4x4k (+1.7%), bit-exact: CUDA `kda_chunk_h` h-scan replacing the Triton chunk_delta_h (516→281 µs). Round 3 started 07:25.
+
 **Second fidelity gap (03:20, found by both Claude Opus 5.5 b512 agents):** no FlashInfer autotune warmup in the driver → fallback MXFP4 MoE tactic; new `--flashinfer-autotune`; pristine legacy → production (GPU 6): KDA 755.1→693.6 @512, 516.6→501.2 @256, 407.0→406.9 @128; MLA 991.6→930.2 @512, 662.0→650.5 @256, 295.3→294.3 mixed; B ≤ 128 unchanged. Claude round-1 PASSes on b512 are this warmup (harness-gap reproduction).
 
 **Chunked prefill.** Driver point tag `B,L,pf[<prefix>]` (ForwardMode.EXTEND; KDA runs `chunk_kda` with the
