@@ -1,5 +1,5 @@
 {
-  "_note": "Kimi-K3 open-ended optimizer case, CHUNKED PREFILL variant: ONE MLA decoder layer on sglang v0.5.20, B200, cookbook production shape (12 heads/rank, trtllm_mla prefill backend: MHA_CHUNKED_KV = TRT-LLM ragged fp8 attention over the chunk + chunked prefix-KV attention merged with merge_state, fp8_e4m3 latent KV written per token, EP8 rank = 112 mxfp4 experts). Points are prefill chunks (EXTEND): B requests x L NEW tokens on a <prefix>-token cached context. Metric = eager step time. Correctness = output + the written fp8 KV rows vs a seeded golden from the pristine tree. Driver runs with --bf16-gemm-init (production scheduler's bf16 GEMM backend init: auto -> cutedsl TGV/split-K dispatch on SM100); the original decode cases keep the legacy cuBLAS-only dispatch (measured effect <= 0.7%).",
+  "_note": "Kimi-K3 open-ended optimizer case, CHUNKED PREFILL variant: ONE MLA decoder layer on sglang v0.5.20, B200, cookbook production shape (12 heads/rank, trtllm_mla prefill backend: MHA_CHUNKED_KV = TRT-LLM ragged fp8 attention over the chunk + chunked prefix-KV attention merged with merge_state, fp8_e4m3 latent KV written per token, EP8 rank = 112 mxfp4 experts). Points are prefill chunks (EXTEND): B requests x L NEW tokens on a <prefix>-token cached context. Metric = eager step time. Correctness = output + the written fp8 KV rows vs a seeded golden from the pristine tree. Driver runs with --bf16-gemm-init (production scheduler's bf16 GEMM backend init: auto -> cutedsl TGV/split-K dispatch on SM100); the original decode cases keep the legacy cuBLAS-only dispatch (measured effect <= 0.7%). Also --flashinfer-autotune (production's FlashInfer autotune warmup; without it the MXFP4 MoE runs a fallback tactic).",
   "case": "k3_mla_prefill",
   "mode": "open_ended",
   "framework": "sglang",
@@ -8,7 +8,7 @@
   "judge": "judge_k3.py",
   "task_template": "agent_task_k3_opt.md",
   "driver": "kimi_single_layer_decode.py",
-  "driver_args": "--attn-type mla --moe-backend flashinfer_mxfp4 --attention-backend cutedsl_mla --attn-heads 12 --kv-cache-dtype fp8_e4m3 --experts 112 --ep 8 --local-topk 2 --hidden-scale 1.0 --cuda-graph --iters 40 --warmup 10 --bf16-gemm-init",
+  "driver_args": "--attn-type mla --moe-backend flashinfer_mxfp4 --attention-backend cutedsl_mla --attn-heads 12 --kv-cache-dtype fp8_e4m3 --experts 112 --ep 8 --local-topk 2 --hidden-scale 1.0 --cuda-graph --iters 40 --warmup 10 --bf16-gemm-init --flashinfer-autotune",
   "points": {
     "primary": [
       1,
@@ -47,10 +47,10 @@
     "CHECKOUT": "/sgl-workspace/sglang",
     "MODEL_NAME": "Kimi-K3 (moonshotai/Kimi-K3): one MLA (dense multi-head latent attention) decoder layer, as it runs on one B200 of the production TP8/EP8 deployment (12 attention heads, cutedsl_mla decode over a paged fp8 latent KV, 112 local mxfp4 experts)",
     "WORKLOAD": "chunked prefill (ForwardMode.EXTEND), one chunk per step: 1 request x 16,384 new tokens as the 4th chunk of a 64k prompt (primary: prefix 49,152 cached fp8 latent-KV tokens attended through the chunked-prefix path, plus causal attention within the chunk; the MoE sees ~32k local rows), plus the same 16k chunk as a FIRST chunk (prefix 0) and a mixed batch of 4 requests x 4,096 first-chunk tokens (must not regress)",
-    "DRIVER_ARGS": "--attn-type mla --moe-backend flashinfer_mxfp4 --attention-backend cutedsl_mla --attn-heads 12 --kv-cache-dtype fp8_e4m3 --experts 112 --ep 8 --local-topk 2 --hidden-scale 1.0 --cuda-graph --iters 40 --warmup 10 --bf16-gemm-init",
+    "DRIVER_ARGS": "--attn-type mla --moe-backend flashinfer_mxfp4 --attention-backend cutedsl_mla --attn-heads 12 --kv-cache-dtype fp8_e4m3 --experts 112 --ep 8 --local-topk 2 --hidden-scale 1.0 --cuda-graph --iters 40 --warmup 10 --bf16-gemm-init --flashinfer-autotune",
     "POINTS": "1,16384,pf49152;1,16384,pf;4,4096,pf",
     "INSTALL_CMD": "true",
-    "REBUILD_CMD": "find /sgl-workspace/sglang/python/sglang -name __pycache__ -prune -exec rm -rf {} + ; cd /tmp && python3 /tmp/kimi_single_layer_decode.py --point 1,2048,pf --attn-type mla --moe-backend flashinfer_mxfp4 --attention-backend cutedsl_mla --attn-heads 12 --kv-cache-dtype fp8_e4m3 --experts 112 --ep 8 --local-topk 2 --hidden-scale 1.0 --cuda-graph --iters 5 --warmup 2 --bf16-gemm-init && echo LAYER_SMOKE_OK",
+    "REBUILD_CMD": "find /sgl-workspace/sglang/python/sglang -name __pycache__ -prune -exec rm -rf {} + ; cd /tmp && python3 /tmp/kimi_single_layer_decode.py --point 1,2048,pf --attn-type mla --moe-backend flashinfer_mxfp4 --attention-backend cutedsl_mla --attn-heads 12 --kv-cache-dtype fp8_e4m3 --experts 112 --ep 8 --local-topk 2 --hidden-scale 1.0 --cuda-graph --iters 5 --warmup 2 --bf16-gemm-init --flashinfer-autotune && echo LAYER_SMOKE_OK",
     "ORACLE_URL": "http://172.17.0.1:8806",
     "OPT_HISTORY": "/workspace/opt_history"
   }
