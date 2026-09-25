@@ -243,6 +243,17 @@ requirement (3σ inflated by concurrent VibeSim JIT fills on the shared GPU); ro
 VibeSim ranks the routed MXFP4 MoE first at every batch (R0 961 µs vs R5 53 µs at B=512, 57% of the step):
 the KDA layer is at the closed-cubin wall at B=512 as it was at B=128. MLA-b512 rounds started 20:13.
 
+**Harness fidelity gap found 23:05 (via Codex B12):** the driver never called sglang's
+`initialize_bf16_gemm_config()` (the production scheduler does; `auto` → `cutedsl` on SM100), so every bf16
+GEMM ran cuBLAS in all runs so far, while production dispatches eligible shapes to the CuTe-DSL TGV/split-K
+kernels. Quantified on GPU 7 with a new driver flag `--bf16-gemm-init` (CUDA-graph µs, legacy → production
+dispatch): KDA pristine 406.9/255.6/134.7 → 407.0/255.5/132.6 (B=128/32/1), KDA best tree 388.6/245.2/128.5 →
+388.6/245.3/124.4; MLA pristine 304.7/493.0/293.3 → 302.6/493.0/292.3 (1×1M / 128×8k / 16×64k mix), MLA best
+tree 253.4/475.7/271.8 → 253.4/475.7/271.9. The decode shapes are essentially not TGV-eligible under
+production's heuristic, so the reported gains stand (≤0.7% shift) and rounds 21/23 go beyond the production
+heuristic rather than duplicating it. The original decode cases keep the legacy dispatch (history stays
+consistent); the b512 and prefill cases run with `--bf16-gemm-init` from here on.
+
 **Chunked prefill.** Driver point tag `B,L,pf[<prefix>]` (ForwardMode.EXTEND; KDA runs `chunk_kda` with the
 carried-in conv/recurrent state, MLA runs the production `trtllm_mla` MHA_CHUNKED_KV path: fp8 ragged
 attention + chunked prefix-KV merge; eager timing since sglang does not graph-capture prefill). Cases
