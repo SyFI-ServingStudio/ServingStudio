@@ -1,0 +1,445 @@
+diff -ruN -x __pycache__ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512_claude/trial_1_tree_judged/kernels/jit/csrc/attention/kda_fused_decode.cuh /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512_claude/trial_2_tree_judged/kernels/jit/csrc/attention/kda_fused_decode.cuh
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512_claude/trial_1_tree_judged/kernels/jit/csrc/attention/kda_fused_decode.cuh	2026-09-25 03:45:25.497584101 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512_claude/trial_2_tree_judged/kernels/jit/csrc/attention/kda_fused_decode.cuh	2026-09-25 04:22:14.215249617 -0700
+@@ -314,6 +314,26 @@
+   return value;
+ }
+ 
++// Four rows at once over the same xor-16/8/4/2/1 butterfly tree as
++// warp_reduce_sum_pair_split (bit-identical totals): each level halves the
++// values a lane carries, so 4 rows cost 6 shuffles instead of 2 x 5. Totals
++// end in lanes [0,8) = a, [8,16) = c, [16,24) = b, [24,32) = d.
++SGL_DEVICE float warp_reduce_sum_quad_split(float a, float b, float c, float d) {
++  const bool upper = (threadIdx.x & 16) != 0;
++  float lo = upper ? b : a;
++  float hi = upper ? d : c;
++  lo += __shfl_xor_sync(0xffffffffu, upper ? a : b, 16);
++  hi += __shfl_xor_sync(0xffffffffu, upper ? c : d, 16);
++  const bool upper8 = (threadIdx.x & 8) != 0;
++  float value = upper8 ? hi : lo;
++  value += __shfl_xor_sync(0xffffffffu, upper8 ? lo : hi, 8);
++#pragma unroll
++  for (int mask = 4; mask >= 1; mask >>= 1) {
++    value += __shfl_xor_sync(0xffffffffu, value, mask);
++  }
++  return value;
++}
++
+ // Both totals in every lane (one extra shuffle across the halves).
+ SGL_DEVICE Sum2 warp_reduce_sum_pair_packed(float x, float y) {
+   const float value = warp_reduce_sum_pair_split(x, y);
+@@ -595,8 +615,15 @@
+     cp_async_state_chunk(s_state, state, slot, i_hv, state_slot_stride, 0);
+   }
+ 
+-  if constexpr (kUpdateConvState) {
+-    // Lower warps: q conv + decay; upper warps: k conv, then the v conv below.
++  // K3 path: every prologue global read (conv taps/state/x for q, k and v,
++  // gate, beta, onorm params) is issued before the first conv-state store.
++  // The compiler cannot hoist loads above those stores itself (cs_qk is a
++  // runtime pointer select), so the unfused order paid three dependent
++  // memory round trips here; the arithmetic below is unchanged.
++  constexpr bool kHoistPrologueLoads = kUpdateConvState && kApplyOnorm && kPreloadOnormParams;
++  static_assert(kThreads == kDimK + kDimV);
++  if constexpr (kHoistPrologueLoads) {
++    // Lower warps: q conv + decay (+ onorm params); upper warps: k conv + v conv.
+     const bool is_q = tid < kDimK;
+     const int k = is_q ? tid : tid - (kThreads - kDimK);
+     const int hk = hk_off + k;
+@@ -604,125 +631,222 @@
+     __nv_bfloat16* cs_qk = is_q ? cs_q : cs_k;
+     const float* w_qk_t = is_q ? w_q_t : w_k_t;
+ 
+-    float acc = is_q ? bias_q[hk] : bias_k[hk];
+-    __nv_bfloat16 shift0 = __float2bfloat16(0.0f);
+-    __nv_bfloat16 shift1 = __float2bfloat16(0.0f);
++    const float qk_bias = is_q ? bias_q[hk] : bias_k[hk];
++    __nv_bfloat16 qk_state[kConvStateWidth];
++    float qk_w[kKernelWidth];
+ #pragma unroll
+     for (int w = 0; w < kConvStateWidth; ++w) {
+-      const __nv_bfloat16 state_w = cs_qk[cs_base + w * cs_w_stride];
+-      acc += __bfloat162float(state_w) * fp32_at(w_qk_t, w * hkv_dim + hk);
+-      if (w == 1) {
+-        shift0 = state_w;
+-      } else if (w == 2) {
+-        shift1 = state_w;
+-      }
++      qk_state[w] = cs_qk[cs_base + w * cs_w_stride];
++    }
++#pragma unroll
++    for (int w = 0; w < kKernelWidth; ++w) {
++      qk_w[w] = fp32_at(w_qk_t, w * hkv_dim + hk);
+     }
+     const __nv_bfloat16 x_new = (is_q ? x_q : x_k)[bos * x_row_stride + hk];
+-    acc += __bfloat162float(x_new) * fp32_at(w_qk_t, (kKernelWidth - 1) * hkv_dim + hk);
+ 
+-    cs_qk[cs_base + 0] = shift0;
+-    cs_qk[cs_base + cs_w_stride] = shift1;
++    float a_log_raw = 0.0f;
++    float g_raw = 0.0f;
++    float onorm_gate_raw = 0.0f;
++    float beta_raw = 0.0f;
++    const int v = k;
++    const int hvv = hv_off + v;
++    const int64_t cs_v_base = slot * cs_slot_stride + hvv;
++    float v_bias = 0.0f;
++    __nv_bfloat16 v_state[kConvStateWidth];
++    float v_w[kKernelWidth];
++    __nv_bfloat16 v_new = __float2bfloat16(0.0f);
++    if (is_q) {
++      if (lane == 0) {
++        a_log_raw = a_log[i_h];
++      }
++      g_raw = bf16_load(g, bos * g_row_stride + i_hv * kDimK + k) + dt_bias[hk];
++      onorm_gate_raw = bf16_load(onorm_g, i_n * onormg_row_stride + i_hv * kDimV + tid);
++      pre_onorm_weight = onorm_weight[tid];
++      if (tid == 0) {
++        beta_raw = bf16_load(beta, bos * beta_row_stride + i_hv);
++      }
++    } else {
++      v_bias = bias_v[hvv];
++#pragma unroll
++      for (int w = 0; w < kConvStateWidth; ++w) {
++        v_state[w] = cs_v[cs_v_base + w * cs_w_stride];
++      }
++#pragma unroll
++      for (int w = 0; w < kKernelWidth; ++w) {
++        v_w[w] = fp32_at(w_v_t, w * hvv_dim + hvv);
++      }
++      v_new = x_v[bos * x_row_stride + hvv];
++    }
++
++    float acc = qk_bias;
++#pragma unroll
++    for (int w = 0; w < kConvStateWidth; ++w) {
++      acc += __bfloat162float(qk_state[w]) * qk_w[w];
++    }
++    acc += __bfloat162float(x_new) * qk_w[kKernelWidth - 1];
++
++    cs_qk[cs_base + 0] = qk_state[1];
++    cs_qk[cs_base + cs_w_stride] = qk_state[2];
+     cs_qk[cs_base + 2 * cs_w_stride] = x_new;
+     (is_q ? s_q : s_k)[k] = conv_silu_bf16(acc);
+ 
+     if (is_q) {
+-      const float exp_a = __shfl_sync(0xffffffffu, lane == 0 ? __expf(a_log[i_h]) : 0.0f, 0);
+-      const float g_raw = bf16_load(g, bos * g_row_stride + i_hv * kDimK + k) + dt_bias[hk];
++      const float exp_a = __shfl_sync(0xffffffffu, lane == 0 ? __expf(a_log_raw) : 0.0f, 0);
+       if constexpr (kUseLowerBound) {
+         s_decay[k] = __expf(lower_bound * device::math::sigmoid_fast(exp_a * g_raw));
+       } else {
+         s_decay[k] = __expf(-exp_a * device::math::softplus_fast(g_raw));
+       }
++      pre_onorm_gate = device::math::sigmoid_fast(onorm_gate_raw);
++      if (tid == 0) {
++        if constexpr (kApplyBetaSigmoid) {
++          s_beta = device::math::sigmoid_fast(beta_raw);
++        } else {
++          s_beta = beta_raw;
++        }
++      }
++    } else {
++      float v_acc = v_bias;
++#pragma unroll
++      for (int w = 0; w < kConvStateWidth; ++w) {
++        v_acc += __bfloat162float(v_state[w]) * v_w[w];
++      }
++      v_acc += __bfloat162float(v_new) * v_w[kKernelWidth - 1];
++      cs_v[cs_v_base + 0] = v_state[1];
++      cs_v[cs_v_base + cs_w_stride] = v_state[2];
++      cs_v[cs_v_base + 2 * cs_w_stride] = v_new;
++      s_v[v] = conv_silu_bf16(v_acc);
+     }
+   } else {
+-    if (tid < kDimK) {
+-      const int k = tid;
++    if constexpr (kUpdateConvState) {
++      // Lower warps: q conv + decay; upper warps: k conv, then the v conv below.
++      const bool is_q = tid < kDimK;
++      const int k = is_q ? tid : tid - (kThreads - kDimK);
+       const int hk = hk_off + k;
+-      const float exp_a = __shfl_sync(0xffffffffu, lane == 0 ? __expf(a_log[i_h]) : 0.0f, 0);
+-
+-      float q_acc = bias_q[hk];
+-      float k_acc = bias_k[hk];
+-#pragma unroll
++      const int64_t cs_base = slot * cs_slot_stride + hk;
++      __nv_bfloat16* cs_qk = is_q ? cs_q : cs_k;
++      const float* w_qk_t = is_q ? w_q_t : w_k_t;
++
++      float acc = is_q ? bias_q[hk] : bias_k[hk];
++      __nv_bfloat16 shift0 = __float2bfloat16(0.0f);
++      __nv_bfloat16 shift1 = __float2bfloat16(0.0f);
++  #pragma unroll
+       for (int w = 0; w < kConvStateWidth; ++w) {
+-        const int64_t cs_idx = slot * cs_slot_stride + hk + w * cs_w_stride;
+-        q_acc += bf16_load(cs_q, cs_idx) * fp32_at(w_q_t, w * hkv_dim + hk);
+-        k_acc += bf16_load(cs_k, cs_idx) * fp32_at(w_k_t, w * hkv_dim + hk);
++        const __nv_bfloat16 state_w = cs_qk[cs_base + w * cs_w_stride];
++        acc += __bfloat162float(state_w) * fp32_at(w_qk_t, w * hkv_dim + hk);
++        if (w == 1) {
++          shift0 = state_w;
++        } else if (w == 2) {
++          shift1 = state_w;
++        }
+       }
+-      q_acc += bf16_load(x_q, bos * x_row_stride + hk) * fp32_at(w_q_t, (kKernelWidth - 1) * hkv_dim + hk);
+-      k_acc += bf16_load(x_k, bos * x_row_stride + hk) * fp32_at(w_k_t, (kKernelWidth - 1) * hkv_dim + hk);
++      const __nv_bfloat16 x_new = (is_q ? x_q : x_k)[bos * x_row_stride + hk];
++      acc += __bfloat162float(x_new) * fp32_at(w_qk_t, (kKernelWidth - 1) * hkv_dim + hk);
+ 
+-      s_q[k] = conv_silu_bf16(q_acc);
+-      s_k[k] = conv_silu_bf16(k_acc);
+-
+-      const float g_raw = bf16_load(g, bos * g_row_stride + i_hv * kDimK + k) + dt_bias[hk];
+-      if constexpr (kUseLowerBound) {
+-        s_decay[k] = __expf(lower_bound * device::math::sigmoid_fast(exp_a * g_raw));
+-      } else {
+-        s_decay[k] = __expf(-exp_a * device::math::softplus_fast(g_raw));
++      cs_qk[cs_base + 0] = shift0;
++      cs_qk[cs_base + cs_w_stride] = shift1;
++      cs_qk[cs_base + 2 * cs_w_stride] = x_new;
++      (is_q ? s_q : s_k)[k] = conv_silu_bf16(acc);
++
++      if (is_q) {
++        const float exp_a = __shfl_sync(0xffffffffu, lane == 0 ? __expf(a_log[i_h]) : 0.0f, 0);
++        const float g_raw = bf16_load(g, bos * g_row_stride + i_hv * kDimK + k) + dt_bias[hk];
++        if constexpr (kUseLowerBound) {
++          s_decay[k] = __expf(lower_bound * device::math::sigmoid_fast(exp_a * g_raw));
++        } else {
++          s_decay[k] = __expf(-exp_a * device::math::softplus_fast(g_raw));
++        }
+       }
+-    }
+-  }
++    } else {
++      if (tid < kDimK) {
++        const int k = tid;
++        const int hk = hk_off + k;
++        const float exp_a = __shfl_sync(0xffffffffu, lane == 0 ? __expf(a_log[i_h]) : 0.0f, 0);
++
++        float q_acc = bias_q[hk];
++        float k_acc = bias_k[hk];
++  #pragma unroll
++        for (int w = 0; w < kConvStateWidth; ++w) {
++          const int64_t cs_idx = slot * cs_slot_stride + hk + w * cs_w_stride;
++          q_acc += bf16_load(cs_q, cs_idx) * fp32_at(w_q_t, w * hkv_dim + hk);
++          k_acc += bf16_load(cs_k, cs_idx) * fp32_at(w_k_t, w * hkv_dim + hk);
++        }
++        q_acc += bf16_load(x_q, bos * x_row_stride + hk) * fp32_at(w_q_t, (kKernelWidth - 1) * hkv_dim + hk);
++        k_acc += bf16_load(x_k, bos * x_row_stride + hk) * fp32_at(w_k_t, (kKernelWidth - 1) * hkv_dim + hk);
+ 
+-  static_assert(kThreads >= kDimK + kDimV);
+-  // The v conv runs on the upper warps, concurrently with the q/k conv on the lower ones.
+-  if constexpr (kUpdateConvState) {
+-    if (tid >= kThreads - kDimV) {
+-      const int v = tid - (kThreads - kDimV);
+-      const int hvv = hv_off + v;
+-      const int64_t cs_base = slot * cs_slot_stride + hvv;
+-      const int64_t xv_idx = bos * x_row_stride + hvv;
+-
+-      float v_acc = bias_v[hvv];
+-      __nv_bfloat16 v_shift0 = __float2bfloat16(0.0f);
+-      __nv_bfloat16 v_shift1 = __float2bfloat16(0.0f);
+-#pragma unroll
+-      for (int w = 0; w < kConvStateWidth; ++w) {
+-        const __nv_bfloat16 v_state = cs_v[cs_base + w * cs_w_stride];
+-        v_acc += __bfloat162float(v_state) * fp32_at(w_v_t, w * hvv_dim + hvv);
+-        if (w == 1) {
+-          v_shift0 = v_state;
+-        } else if (w == 2) {
+-          v_shift1 = v_state;
++        s_q[k] = conv_silu_bf16(q_acc);
++        s_k[k] = conv_silu_bf16(k_acc);
++
++        const float g_raw = bf16_load(g, bos * g_row_stride + i_hv * kDimK + k) + dt_bias[hk];
++        if constexpr (kUseLowerBound) {
++          s_decay[k] = __expf(lower_bound * device::math::sigmoid_fast(exp_a * g_raw));
++        } else {
++          s_decay[k] = __expf(-exp_a * device::math::softplus_fast(g_raw));
+         }
+       }
+-      const __nv_bfloat16 v_new = x_v[xv_idx];
+-      v_acc += __bfloat162float(v_new) * fp32_at(w_v_t, (kKernelWidth - 1) * hvv_dim + hvv);
+-      cs_v[cs_base + 0] = v_shift0;
+-      cs_v[cs_base + cs_w_stride] = v_shift1;
+-      cs_v[cs_base + 2 * cs_w_stride] = v_new;
+-      s_v[v] = conv_silu_bf16(v_acc);
+     }
+-  } else {
+-    if (tid >= kThreads - kDimV) {
+-      const int v = tid - (kThreads - kDimV);
+-      const int hvv = hv_off + v;
+ 
+-      float v_acc = bias_v[hvv];
+-#pragma unroll
+-      for (int w = 0; w < kConvStateWidth; ++w) {
+-        const int64_t cs_idx = slot * cs_slot_stride + hvv + w * cs_w_stride;
+-        v_acc += bf16_load(cs_v, cs_idx) * fp32_at(w_v_t, w * hvv_dim + hvv);
++    static_assert(kThreads >= kDimK + kDimV);
++    // The v conv runs on the upper warps, concurrently with the q/k conv on the lower ones.
++    if constexpr (kUpdateConvState) {
++      if (tid >= kThreads - kDimV) {
++        const int v = tid - (kThreads - kDimV);
++        const int hvv = hv_off + v;
++        const int64_t cs_base = slot * cs_slot_stride + hvv;
++        const int64_t xv_idx = bos * x_row_stride + hvv;
++
++        float v_acc = bias_v[hvv];
++        __nv_bfloat16 v_shift0 = __float2bfloat16(0.0f);
++        __nv_bfloat16 v_shift1 = __float2bfloat16(0.0f);
++  #pragma unroll
++        for (int w = 0; w < kConvStateWidth; ++w) {
++          const __nv_bfloat16 v_state = cs_v[cs_base + w * cs_w_stride];
++          v_acc += __bfloat162float(v_state) * fp32_at(w_v_t, w * hvv_dim + hvv);
++          if (w == 1) {
++            v_shift0 = v_state;
++          } else if (w == 2) {
++            v_shift1 = v_state;
++          }
++        }
++        const __nv_bfloat16 v_new = x_v[xv_idx];
++        v_acc += __bfloat162float(v_new) * fp32_at(w_v_t, (kKernelWidth - 1) * hvv_dim + hvv);
++        cs_v[cs_base + 0] = v_shift0;
++        cs_v[cs_base + cs_w_stride] = v_shift1;
++        cs_v[cs_base + 2 * cs_w_stride] = v_new;
++        s_v[v] = conv_silu_bf16(v_acc);
++      }
++    } else {
++      if (tid >= kThreads - kDimV) {
++        const int v = tid - (kThreads - kDimV);
++        const int hvv = hv_off + v;
++
++        float v_acc = bias_v[hvv];
++  #pragma unroll
++        for (int w = 0; w < kConvStateWidth; ++w) {
++          const int64_t cs_idx = slot * cs_slot_stride + hvv + w * cs_w_stride;
++          v_acc += bf16_load(cs_v, cs_idx) * fp32_at(w_v_t, w * hvv_dim + hvv);
++        }
++        v_acc += bf16_load(x_v, bos * x_row_stride + hvv) * fp32_at(w_v_t, (kKernelWidth - 1) * hvv_dim + hvv);
++        s_v[v] = conv_silu_bf16(v_acc);
+       }
+-      v_acc += bf16_load(x_v, bos * x_row_stride + hvv) * fp32_at(w_v_t, (kKernelWidth - 1) * hvv_dim + hvv);
+-      s_v[v] = conv_silu_bf16(v_acc);
+     }
+-  }
+ 
+-  if constexpr (kApplyOnorm && kPreloadOnormParams) {
+-    // Loaded by the threads that write `out` in the epilogue.
+-    if (tid < kDimV) {
+-      const int64_t onorm_idx = i_n * onormg_row_stride + i_hv * kDimV + tid;
+-      pre_onorm_gate = device::math::sigmoid_fast(bf16_load(onorm_g, onorm_idx));
+-      pre_onorm_weight = onorm_weight[tid];
++    if constexpr (kApplyOnorm && kPreloadOnormParams) {
++      // Loaded by the threads that write `out` in the epilogue.
++      if (tid < kDimV) {
++        const int64_t onorm_idx = i_n * onormg_row_stride + i_hv * kDimV + tid;
++        pre_onorm_gate = device::math::sigmoid_fast(bf16_load(onorm_g, onorm_idx));
++        pre_onorm_weight = onorm_weight[tid];
++      }
+     }
+-  }
+ 
+-  if (tid == 0) {
+-    const float beta_raw = bf16_load(beta, bos * beta_row_stride + i_hv);
+-    if constexpr (kApplyBetaSigmoid) {
+-      s_beta = device::math::sigmoid_fast(beta_raw);
+-    } else {
+-      s_beta = beta_raw;
++    if (tid == 0) {
++      const float beta_raw = bf16_load(beta, bos * beta_row_stride + i_hv);
++      if constexpr (kApplyBetaSigmoid) {
++        s_beta = device::math::sigmoid_fast(beta_raw);
++      } else {
++        s_beta = beta_raw;
++      }
+     }
+   }
+   __syncthreads();
+@@ -753,6 +877,7 @@
+   float r_k[4] = {k4.x, k4.y, k4.z, k4.w};
+   float r_decay[4] = {decay4.x, decay4.y, decay4.z, decay4.w};
+   float o_sumsq = 0.0f;
++  constexpr bool kQuadRowReduce = kRowsPerWarp == 4 && !(kApplyOnorm && kAccumulateOnormSumsq);
+ 
+ #pragma unroll
+   for (int chunk = 0; chunk < kNumChunks; ++chunk) {
+@@ -783,6 +908,48 @@
+ 
+     const StateT* state_stage = s_state + (kUseTmaLoad ? (chunk % kTmaStages) : (chunk & 1)) * kChunkV * kDimK;
+ 
++    if constexpr (kQuadRowReduce) {
++      // All kRowsPerWarp = 4 rows of this chunk in one reduction chain; per-row
++      // math identical to the pair loop below.
++      float h_vals[4][4];
++      float dot_hk_p[4];
++#pragma unroll
++      for (int r = 0; r < 4; ++r) {
++        const float4 raw_h = load_state4(state_stage + (warp + r * kWarps) * kDimK + k_base);
++        h_vals[r][0] = raw_h.x * r_decay[0];
++        h_vals[r][1] = raw_h.y * r_decay[1];
++        h_vals[r][2] = raw_h.z * r_decay[2];
++        h_vals[r][3] = raw_h.w * r_decay[3];
++        dot_hk_p[r] = h_vals[r][0] * r_k[0] + h_vals[r][1] * r_k[1] + h_vals[r][2] * r_k[2] + h_vals[r][3] * r_k[3];
++      }
++      // Row r's total sits in lane kQuadLane[r] (see warp_reduce_sum_quad_split).
++      const float hk_red = warp_reduce_sum_quad_split(dot_hk_p[0], dot_hk_p[1], dot_hk_p[2], dot_hk_p[3]);
++      const float dot_hk_r[4] = {
++          __shfl_sync(0xffffffffu, hk_red, 0),
++          __shfl_sync(0xffffffffu, hk_red, 16),
++          __shfl_sync(0xffffffffu, hk_red, 8),
++          __shfl_sync(0xffffffffu, hk_red, 24)};
++      const int64_t slot_base_wb = static_cast<int64_t>(slot) * state_slot_stride;
++      float dot_hq_p[4];
++#pragma unroll
++      for (int r = 0; r < 4; ++r) {
++        const int vr = chunk * kChunkV + warp + r * kWarps;
++        const float v_new = (s_v[vr] - dot_hk_r[r]) * s_beta;
++        const float h0 = h_vals[r][0] + r_k[0] * v_new;
++        const float h1 = h_vals[r][1] + r_k[1] * v_new;
++        const float h2 = h_vals[r][2] + r_k[2] * v_new;
++        const float h3 = h_vals[r][3] + r_k[3] * v_new;
++        store_state4<kUseCacheGlobalStore>(
++            state + slot_base_wb + ((i_hv * kDimV + vr) * kDimK + k_base), make_float4(h0, h1, h2, h3));
++        dot_hq_p[r] = h0 * r_q[0] + h1 * r_q[1] + h2 * r_q[2] + h3 * r_q[3];
++      }
++      const float hq_red = warp_reduce_sum_quad_split(dot_hq_p[0], dot_hq_p[1], dot_hq_p[2], dot_hq_p[3]);
++      if ((lane & 7) == 0) {
++        // lane 0/8/16/24 -> row 0/2/1/3
++        const int r = ((lane >> 4) & 1) | ((lane >> 2) & 2);
++        s_o[chunk * kChunkV + warp + r * kWarps] = bf16_round(hq_red);
++      }
++    } else
+ #pragma unroll
+     for (int row = 0; row < kRowsPerWarp; row += 2) {
+       const int v_row_a = warp + row * kWarps;
+diff -ruN -x __pycache__ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512_claude/trial_1_tree_judged/srt/models/kimi_k3.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512_claude/trial_2_tree_judged/srt/models/kimi_k3.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512_claude/trial_1_tree_judged/srt/models/kimi_k3.py	2026-09-25 03:37:14.516674397 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512_claude/trial_2_tree_judged/srt/models/kimi_k3.py	2026-09-25 04:35:52.909174369 -0700
+@@ -1343,14 +1343,21 @@
+             )
+             shared_event = None
+             if overlap_shared:
++                # Fork here, but enqueue the shared work after the routed path:
++                # graph capture then keeps the router -> quant -> routing chain
++                # as the in-stream (PDL) continuation of the front GEMM instead
++                # of the shared branch, taking the cross-branch launch gap off
++                # the critical path (the shared GEMMs have ample slack).
+                 current_stream = torch.cuda.current_stream()
+-                self.alt_stream.wait_stream(current_stream)
+-                with torch.cuda.stream(self.alt_stream):
+-                    self._forward_shared(gate_up, shared_output)
+-                    shared_event = self.alt_stream.record_event()
++                fork_event = current_stream.record_event()
+             else:
+                 self._forward_shared(gate_up, shared_output)
+             self._forward_routed(hidden_states, router_logits, routed_input, latent)
++            if overlap_shared:
++                self.alt_stream.wait_event(fork_event)
++                with torch.cuda.stream(self.alt_stream):
++                    self._forward_shared(gate_up, shared_output)
++                    shared_event = self.alt_stream.record_event()
+             if shared_event is not None:
+                 current_stream.wait_event(shared_event)
+             if self.fuse_ar_norm and k3_ar_fusion.enabled():

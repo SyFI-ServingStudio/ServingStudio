@@ -816,6 +816,49 @@
   "dir": "trials/kda_b512_claude_1"
  },
  {
+  "case": "kda_b512_claude",
+  "trial": 2,
+  "verdict": "FAIL",
+  "reason": "failed: latency_improved",
+  "continuous_round": true,
+  "campaign1_unrealistic_routing": false,
+  "points": {
+   "512,8192": {
+    "before_us": 603.5,
+    "after_us": 595.3,
+    "improvement": 0.0136,
+    "check": true,
+    "rel_err": 0.016597509271534656
+   },
+   "256,8192": {
+    "before_us": 473.3,
+    "after_us": 468.3,
+    "improvement": 0.0105,
+    "check": true,
+    "rel_err": 0.015019378913526888
+   },
+   "128,8192": {
+    "before_us": 378.1,
+    "after_us": 374.1,
+    "improvement": 0.0104,
+    "check": true,
+    "rel_err": 0.012605041169408998
+   }
+  },
+  "files": [
+   "kernels/jit/csrc/attention/kda_fused_decode.cuh",
+   "kernels/ops/attention/kda_fused_decode.py",
+   "kernels/ops/attention/fla/fused_recurrent.py",
+   "srt/models/kimi_k3.py",
+   "srt/layers/attention/linear/kda_backend.py",
+   "srt/layers/moe/moe_runner/flashinfer_trtllm.py"
+  ],
+  "diff_lines": 1151,
+  "incremental_diff_lines": 445,
+  "note": "Claude: FAIL by noise (+1.4% @512 exact vs 3.65% need, sigma 7.3us): fused-kernel prologue load hoist + quad-row warp reduction (80.4->76.6us) -- real but lost",
+  "dir": "trials/kda_b512_claude_2"
+ },
+ {
   "case": "mla",
   "trial": 1,
   "verdict": "FAIL",
@@ -1711,5 +1754,53 @@
   "incremental_diff_lines": 900,
   "note": "ACCEPTED (Claude Opus 5.5): tuned MoE tactic (HARNESS GAP ~6.4 pts) + fp8 set_mla_kv_concat_q satfinite cvt + exact NOSAT fixup (17.8->8.0us, real): 976.3->904.6 @512, exact; merged-front split rejected (slower)",
   "dir": "trials/mla_b512_claude_1"
+ },
+ {
+  "case": "mla_b512_claude",
+  "trial": 2,
+  "verdict": "PASS",
+  "reason": "all gates passed",
+  "continuous_round": true,
+  "campaign1_unrealistic_routing": false,
+  "points": {
+   "512,8192": {
+    "before_us": 904.6,
+    "after_us": 888.0,
+    "improvement": 0.0184,
+    "check": true,
+    "rel_err": 0.012048191996903325
+   },
+   "256,8192": {
+    "before_us": 617.8,
+    "after_us": 618.8,
+    "improvement": -0.0017,
+    "check": true,
+    "rel_err": 0.013157893813481137
+   },
+   "16,65536mix": {
+    "before_us": 269.7,
+    "after_us": 269.7,
+    "improvement": 0.0002,
+    "check": true,
+    "rel_err": 0.004566209712057738
+   }
+  },
+  "files": [
+   "kernels/jit/csrc/elementwise/set_mla_kv_concat_q.cuh",
+   "kernels/jit/csrc/moe/route_quant_fused.cuh",
+   "kernels/jit/csrc/moe/route_radix.cuh",
+   "kernels/ops/attention/set_mla_kv_concat_q.py",
+   "kernels/ops/attention/mla_decode_tail_split.py",
+   "kernels/ops/moe/moe_route_quant_fused.py",
+   "srt/models/kimi_k3.py",
+   "srt/layers/attention/trtllm_mla_backend.py",
+   "srt/layers/attention/cutedsl_mla_backend.py",
+   "srt/layers/moe/topk.py",
+   "srt/layers/moe/moe_runner/flashinfer_trtllm.py"
+  ],
+  "diff_lines": 1354,
+  "incremental_diff_lines": 490,
+  "note": "ACCEPTED (Claude): tail split of the persistent MLA decode kernel's last wave (B=148*3+68 -> split 68 trailing requests into 136 half-KV pseudo-requests, LSE merge; mla_decode_tail_split.py): 904.6->888.0 @512, exact",
+  "dir": "trials/mla_b512_claude_2"
  }
 ]

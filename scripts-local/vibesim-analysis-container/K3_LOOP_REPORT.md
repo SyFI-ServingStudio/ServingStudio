@@ -258,6 +258,8 @@ consistent); the b512 and prefill cases run with `--bf16-gemm-init` from here on
 
 **Claude Opus 5.5 (Bedrock) as agent, b512 round 1 (02:56–03:50, GPUs 1/2 in parallel):** KDA PASS 675.2→600.4 @512 (+11.1% judge improvement), 482.7→472.4 @256, 380.2→378.2 @128 — one-shot MoE autotune (harness gap, ~9 pts) + vectorized bf16 state ld/st with launch_bounds in `kda_fused_decode.cuh` (kernel 92.6→83.0 µs) + bfa overlap limit 128→512; MLA PASS 976.3→904.6 @512 (+7.3%), 638.3→617.8 @256, mixed 271.8→270.7 — tuned MoE tactic (gap, ~6.4 pts) + fp8 `set_mla_kv_concat_q` satfinite/NOSAT kernel (17.8→8.0 µs). All exact. Both rejected splitting the merged front across streams. Round 2 started 03:49.
 
+**Claude b512 round 2 (03:49–04:44):** KDA FAIL-by-noise (603.5→595.3 @512, +1.4%, exact; σ 7.3 µs → 3.65% required; fused-kernel prologue hoist + quad-row warp reduction, kernel 80.4→76.6 µs); MLA PASS 904.6→888.0 @512 (+1.8%): tail split of the persistent MLA decode kernel's last wave (68 trailing requests split into 136 half-KV pseudo-requests, LSE merge; new `kernels/ops/attention/mla_decode_tail_split.py`). Round 3 started 04:42. Driver autotune now caches tactics on disk to remove the per-rep tactic re-pick noise.
+
 **Second fidelity gap (03:20, found by both Claude Opus 5.5 b512 agents):** no FlashInfer autotune warmup in the driver → fallback MXFP4 MoE tactic; new `--flashinfer-autotune`; pristine legacy → production (GPU 6): KDA 755.1→693.6 @512, 516.6→501.2 @256, 407.0→406.9 @128; MLA 991.6→930.2 @512, 662.0→650.5 @256, 295.3→294.3 mixed; B ≤ 128 unchanged. Claude round-1 PASSes on b512 are this warmup (harness-gap reproduction).
 
 **Chunked prefill.** Driver point tag `B,L,pf[<prefix>]` (ForwardMode.EXTEND; KDA runs `chunk_kda` with the

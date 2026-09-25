@@ -69,6 +69,8 @@ NOTES = {
     ("mla_b512", 3): "Codex: null +0.17%; route+quant cap 64->512 (-1.5us kept), TGV at m=512 8%/2% SLOWER (reverted)",
     ("mla_b512", 4): "Codex: null 0.00%; PDL policy regressed, var-seq scheduler neutral",
     ("kda_b512_claude", 1): "ACCEPTED (Claude Opus 5.5): one-shot MXFP4 MoE autotune when rows/expert>8 (= production warmup, HARNESS GAP ~9 pts) + vectorized bf16 state ld/st & launch_bounds in kda_fused_decode.cuh (92.6->83.0us, real) + bfa overlap limit 128->512: 675.2->600.4 @512, exact",
+    ("kda_b512_claude", 2): "Claude: FAIL by noise (+1.4% @512 exact vs 3.65% need, sigma 7.3us): fused-kernel prologue load hoist + quad-row warp reduction (80.4->76.6us) -- real but lost",
+    ("mla_b512_claude", 2): "ACCEPTED (Claude): tail split of the persistent MLA decode kernel's last wave (B=148*3+68 -> split 68 trailing requests into 136 half-KV pseudo-requests, LSE merge; mla_decode_tail_split.py): 904.6->888.0 @512, exact",
     ("mla_b512_claude", 1): "ACCEPTED (Claude Opus 5.5): tuned MoE tactic (HARNESS GAP ~6.4 pts) + fp8 set_mla_kv_concat_q satfinite cvt + exact NOSAT fixup (17.8->8.0us, real): 976.3->904.6 @512, exact; merged-front split rejected (slower)",
 }
 CAMPAIGN1 = {("kda", k) for k in (4, 5, 6, 7)} | {("mla", k) for k in (4, 5, 6, 7)}
