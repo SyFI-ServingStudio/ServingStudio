@@ -1,0 +1,52 @@
+diff -ruN -x __pycache__ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/trial_21_tree_judged/srt/models/kimi_k3.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/trial_23_tree_judged/srt/models/kimi_k3.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/trial_21_tree_judged/srt/models/kimi_k3.py	2026-09-24 00:39:51.407072171 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/trial_23_tree_judged/srt/models/kimi_k3.py	2026-09-24 03:56:10.751238561 -0700
+@@ -212,6 +212,29 @@
+ 
+         cutedsl_bf16_gemm_out(x, weight, out)
+         return out
++    if (
++        out is None
++        and x.dtype == torch.bfloat16
++        and weight.dtype == torch.bfloat16
++        and x.shape[0] <= 16
++        and tuple(weight.shape) == (7168, 3584)
++    ):
++        from sglang.kernels.ops.gemm.cutedsl_bf16_gemm import cutedsl_bf16_gemm
++
++        return cutedsl_bf16_gemm(x, weight)
++    if (
++        out is not None
++        and out.dtype == torch.bfloat16
++        and out.is_contiguous()
++        and x.dtype == torch.bfloat16
++        and weight.dtype == torch.bfloat16
++        and x.shape[0] <= 16
++        and tuple(weight.shape) == (7168, 6144)
++    ):
++        from sglang.kernels.ops.gemm.cutedsl_bf16_gemm import cutedsl_bf16_gemm_out
++
++        cutedsl_bf16_gemm_out(x, weight, out)
++        return out
+     if x.dtype == torch.bfloat16 and weight.dtype == torch.bfloat16:
+         from sglang.srt.layers.quantization.unquant import get_bf16_gemm_backend
+ 
+@@ -1353,7 +1376,17 @@
+         shared_output = buf[latent_numel:].view(num_tokens, hidden_size)
+         if not fused_norm:
+             latent = self._latent_norm(latent)
+-        out, _ = self.routed_expert_up_proj(latent)
++        up_weight = getattr(self.routed_expert_up_proj, "weight", None)
++        if (
++            isinstance(up_weight, torch.Tensor)
++            and up_weight.dtype == torch.bfloat16
++            and up_weight.is_contiguous()
++            and tuple(up_weight.shape) == (7168, 3584)
++            and latent.shape[0] <= 16
++        ):
++            out = _k3_bf16_gemm(latent, up_weight)
++        else:
++            out, _ = self.routed_expert_up_proj(latent)
+ 
+         # prefetch_bc: b (shared_output) was produced by the all-reduce and
+         # c (prefix_sum) even earlier; the AR is a plain launch (full

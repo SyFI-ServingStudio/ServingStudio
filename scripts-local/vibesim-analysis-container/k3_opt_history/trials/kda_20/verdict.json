@@ -1,0 +1,32 @@
+{
+  "agent_container": "iteropt_k3_kda_run_20",
+  "case_key": "cf7e7118b872",
+  "points": {},
+  "driver_sha": "7030da61d198",
+  "pristine_points": {
+    "128,8192": {
+      "median": 403.03999185562134,
+      "sigma": 0.7366992504358744
+    },
+    "32,8192": {
+      "median": 263.64800333976746,
+      "sigma": 0.7904965198037573
+    },
+    "1,8192": {
+      "median": 138.75199854373932,
+      "sigma": 0.020238731460726335
+    }
+  },
+  "baseline_tree": "/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda/best_tree",
+  "changed_files": [
+    "kernels/ops/attention/fla/fused_recurrent.py",
+    "srt/models/kimi_k3.py",
+    "srt/layers/attention/linear/kda_backend.py"
+  ],
+  "diff_patch": "/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda/trial_20_tree_judged.patch",
+  "diff_lines": 98,
+  "verdict": "FAIL",
+  "reason": "driver failed on agent tree: driver produced no JSON line for [(128, 8192), (32, 8192), (1, 8192)]:\nh-cuda-alloc-conf)\nTraceback (most recent call last):\n  File \"/tmp/kimi_single_layer_decode.py\", line 492, in _fill_mxfp4_experts\n    qm.process_weights_after_loading(experts)\n  File \"/sgl-workspace/sglang/python/sglang/srt/layers/quantization/mxfp4.py\", line 866, in process_weights_after_loading\n    w2_weight[i]\ntorch.OutOfMemoryError: CUDA out of memory. Tried to allocate 20.00 MiB. GPU 0 has a total capacity of 178.35 GiB of which 17.38 MiB is free. Including non-PyTorch memory, this process has 6.17 GiB memory in use. Of the allocated memory 5.03 GiB is allocated by PyTorch, and 398.65 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)\n\n\n[rank0]:[W924 03:24:00.823099701 CUDACachingAllocator.cpp:3933] memory allocation failed with OOM on device 0 while trying to allocate 20971520 bytes (free: 18219008, total: 191502876672).\n[rank0]:[W924 03:24:00.823263274 CUDACachingAllocator.cpp:3933] memory allocation failed with OOM on device 0 while trying to allocate 20971520 bytes (free: 18219008, total: 191502876672).\n[rank0]: Traceback (most recent call last):\n[rank0]:   File \"/tmp/kimi_single_layer_decode.py\", line",
+  "trial": 20,
+  "agent_exit": 124
+}

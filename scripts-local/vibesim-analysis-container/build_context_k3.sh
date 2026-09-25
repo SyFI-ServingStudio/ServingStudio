@@ -19,7 +19,8 @@ API_PKG="${API_PKG:-/raid/yilegu/roofline_guided_agent/vibesim-api-package}"
 PROFILE_DB="${PROFILE_DB:-$HERE/kimi_single_layer/k3_branch_profile.db}"
 OUT="${OUT:-$HERE/context_k3}"
 REPO_OUT="$OUT/repo"
-declare -A BAKE=( [k3_kda]=predict_kimi_k3_b200_rank1_layer_kda [k3_mla]=predict_kimi_k3_b200_rank1_layer_mla )
+declare -A BAKE=( [k3_kda]=predict_kimi_k3_b200_rank1_layer_kda [k3_mla]=predict_kimi_k3_b200_rank1_layer_mla
+                  [k3_kda_b512]=predict_kimi_k3_b200_rank1_layer_kda_b512 [k3_mla_b512]=predict_kimi_k3_b200_rank1_layer_mla_b512 )
 
 echo "== staging into $OUT from $SRC_REPO @ $(git -C "$SRC_REPO" rev-parse --short HEAD) ($(git -C "$SRC_REPO" branch --show-current))"
 rm -rf "$OUT"; mkdir -p "$REPO_OUT" "$OUT/app"
@@ -67,3 +68,4 @@ du -sh "$OUT" "$REPO_OUT/profiling/profile.db" "$REPO_OUT/target/release/analyze
 echo "build:  sed 's#COPY context/#COPY context_k3/#' $HERE/Dockerfile | docker build -t vibesim-analysis:k3 -f - $HERE"
 echo "run:    docker run -d --name vibesim_oracle_k3_kda -e VIBESIM_PREBAKED_RUN=k3_kda -e VIBESIM_API_PORT=8801 -p 172.17.0.1:8801:8801 vibesim-analysis:k3"
 echo "        docker run -d --name vibesim_oracle_k3_mla -e VIBESIM_PREBAKED_RUN=k3_mla -e VIBESIM_API_PORT=8802 -p 172.17.0.1:8802:8802 vibesim-analysis:k3"
+echo "        large-batch cases: k3_kda_b512 -> 8803, k3_mla_b512 -> 8804 (same image, VIBESIM_PREBAKED_RUN=k3_{kda,mla}_b512)"

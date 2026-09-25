@@ -1,0 +1,12 @@
+diff -ruN -x __pycache__ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/trial_25_tree_judged/srt/layers/attention/trtllm_mla_backend.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/trial_26_tree_judged/srt/layers/attention/trtllm_mla_backend.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/trial_25_tree_judged/srt/layers/attention/trtllm_mla_backend.py	2026-09-24 06:59:06.973744766 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/trial_26_tree_judged/srt/layers/attention/trtllm_mla_backend.py	2026-09-24 08:50:06.920721695 -0700
+@@ -1075,7 +1075,7 @@
+                 and self.kv_lora_rank == 512
+                 and self.qk_rope_head_dim == 64
+             ):
+-                extra_kwargs["is_var_seq"] = False
++                extra_kwargs["is_var_seq"] = True
+         return flashinfer.decode.trtllm_batch_decode_with_kv_cache_mla(
+             query=query,
+             kv_cache=kv_cache,

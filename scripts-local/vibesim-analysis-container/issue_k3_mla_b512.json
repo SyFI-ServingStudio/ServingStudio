@@ -1,6 +1,6 @@
 {
-  "_note": "Kimi-K3 open-ended optimizer case: ONE MLA (dense full-attention) decoder layer of Kimi-K3 on sglang v0.5.20, B200, in the cookbook production shape (attention TP8 rank = 12 heads, cutedsl_mla decode backend with page 64 and fp8_e4m3 latent KV, EP8 rank = 112 mxfp4 routed experts). Metric = CUDA-graph replay time of the decode step. No PR answer key: improvement over the pristine tree + correctness (output + written KV row vs a seeded golden with planted high-norm keys).",
-  "case": "k3_mla",
+  "_note": "Kimi-K3 open-ended optimizer case: ONE MLA (dense full-attention) decoder layer of Kimi-K3 on sglang v0.5.20, B200, in the cookbook production shape (attention TP8 rank = 12 heads, cutedsl_mla decode backend with page 64 and fp8_e4m3 latent KV, EP8 rank = 112 mxfp4 routed experts). LARGE-BATCH variant (B=512/256 decode at 8k). Metric = CUDA-graph replay time of the decode step. No PR answer key: improvement over the pristine tree + correctness (output + written KV row vs a seeded golden with planted high-norm keys).",
+  "case": "k3_mla_b512",
   "mode": "open_ended",
   "framework": "sglang",
   "codex_image": "rga-local/sglang-k3:v0520-codex",
@@ -11,12 +11,12 @@
   "driver_args": "--attn-type mla --moe-backend flashinfer_mxfp4 --attention-backend cutedsl_mla --attn-heads 12 --kv-cache-dtype fp8_e4m3 --experts 112 --ep 8 --local-topk 2 --hidden-scale 1.0 --cuda-graph --iters 40 --warmup 10",
   "points": {
     "primary": [
-      1,
-      1048576
+      512,
+      8192
     ],
     "secondary": [
       [
-        128,
+        256,
         8192
       ],
       [
@@ -44,12 +44,12 @@
     "FRAMEWORK": "sglang",
     "CHECKOUT": "/sgl-workspace/sglang",
     "MODEL_NAME": "Kimi-K3 (moonshotai/Kimi-K3): one MLA (dense multi-head latent attention) decoder layer, as it runs on one B200 of the production TP8/EP8 deployment (12 attention heads, cutedsl_mla decode over a paged fp8 latent KV, 112 local mxfp4 experts)",
-    "WORKLOAD": "decode, one token per request per step: B=1 request at context 1,048,576 (primary: long-context decode), plus B=128 at 8192 and a MIXED-length batch of B=16 whose requests have contexts 65,536 / 49,152 / 32,768 / 16,384 (must not regress; requests in a real decode batch do not share a context length)",
+    "WORKLOAD": "batched decode, one token per request per step: B=512 requests at context 8192 (primary: large-batch regime -- ~1024 local MoE rows, attention over 512 x 8k fp8 latent KV), plus B=256 at 8192 and a MIXED-length batch of B=16 with contexts 65,536 / 49,152 / 32,768 / 16,384 (must not regress)",
     "DRIVER_ARGS": "--attn-type mla --moe-backend flashinfer_mxfp4 --attention-backend cutedsl_mla --attn-heads 12 --kv-cache-dtype fp8_e4m3 --experts 112 --ep 8 --local-topk 2 --hidden-scale 1.0 --cuda-graph --iters 40 --warmup 10",
-    "POINTS": "1,1048576;128,8192;16,65536,mix",
+    "POINTS": "512,8192;256,8192;16,65536,mix",
     "INSTALL_CMD": "true",
     "REBUILD_CMD": "find /sgl-workspace/sglang/python/sglang -name __pycache__ -prune -exec rm -rf {} + ; cd /tmp && python3 /tmp/kimi_single_layer_decode.py --point 1,8192 --attn-type mla --moe-backend flashinfer_mxfp4 --attention-backend cutedsl_mla --attn-heads 12 --kv-cache-dtype fp8_e4m3 --experts 112 --ep 8 --local-topk 2 --hidden-scale 1.0 --cuda-graph --iters 5 --warmup 2 && echo LAYER_SMOKE_OK",
-    "ORACLE_URL": "http://172.17.0.1:8802",
+    "ORACLE_URL": "http://172.17.0.1:8804",
     "OPT_HISTORY": "/workspace/opt_history"
   }
 }

@@ -1,0 +1,25 @@
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda/pristine_tree/srt/models/kimi_k3.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda/trial_4_tree_judged/srt/models/kimi_k3.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda/pristine_tree/srt/models/kimi_k3.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda/trial_4_tree_judged/srt/models/kimi_k3.py	2026-09-22 17:20:02.349951867 -0700
+@@ -1318,8 +1318,19 @@
+                     prefix_sum,
+                 )
+         else:  # single collective over the flat [latent | shared] pair
+-            self._forward_shared(gate_up, shared_output)
+-            self._forward_routed(hidden_states, router_logits, routed_input, latent)
++            if self.alt_stream is None or num_tokens <= 1:
++                self._forward_shared(gate_up, shared_output)
++                self._forward_routed(hidden_states, router_logits, routed_input, latent)
++            else:
++                # The shared and routed tails write disjoint slices of buf. Let
++                # the side stream consume the completed front GEMM while the
++                # current stream runs the much larger routed expert kernel.
++                current_stream = torch.cuda.current_stream()
++                self.alt_stream.wait_stream(current_stream)
++                with torch.cuda.stream(self.alt_stream):
++                    self._forward_shared(gate_up, shared_output)
++                self._forward_routed(hidden_states, router_logits, routed_input, latent)
++                current_stream.wait_stream(self.alt_stream)
+             if self.fuse_ar_norm and k3_ar_fusion.enabled():
+                 fused_norm = True
+                 k3_ar_fusion.all_reduce_norm(

@@ -1,0 +1,69 @@
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/pristine_tree/srt/layers/attention/trtllm_mla_backend.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/trial_7_tree_judged/srt/layers/attention/trtllm_mla_backend.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/pristine_tree/srt/layers/attention/trtllm_mla_backend.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/trial_7_tree_judged/srt/layers/attention/trtllm_mla_backend.py	2026-09-22 22:07:37.986583283 -0700
+@@ -184,6 +184,7 @@
+     seq_lens_q: Optional[torch.Tensor] = None
+     seq_lens_k: Optional[torch.Tensor] = None
+     global_seq_lens_k: Optional[torch.Tensor] = None
++    is_var_seq: bool = True
+ 
+ 
+ class TRTLLMMLABackend(FlashInferMLAAttnBackend):
+@@ -895,6 +896,22 @@
+                 self.forward_decode_metadata.seq_lens_q = forward_batch.extend_seq_lens
+                 self.forward_decode_metadata.seq_lens_k = seq_lens.to(torch.int32)
+ 
++            # CuTeDSL has a persistent MLA kernel for uniform-length batches.
++            # Determine this from the host metadata so graph replay never needs
++            # a device-side reduction or a synchronization.
++            seq_lens_cpu = getattr(forward_batch, "seq_lens_cpu", None)
++            if isinstance(seq_lens_cpu, torch.Tensor) and not seq_lens_cpu.is_cuda:
++                if bs > 0:
++                    first_seq_len = seq_lens_cpu[0]
++                    self.forward_decode_metadata.is_var_seq = bool(
++                        torch.any(seq_lens_cpu[:bs] != first_seq_len).item()
++                    )
++            elif isinstance(seq_lens_cpu, (list, tuple)) and seq_lens_cpu:
++                first_seq_len = seq_lens_cpu[0]
++                self.forward_decode_metadata.is_var_seq = any(
++                    seq_len != first_seq_len for seq_len in seq_lens_cpu[:bs]
++                )
++
+             max_seqlen_pad = self._calc_padded_blocks(max_seq)
+             block_kv_indices = self._create_block_kv_indices(
+                 bs,
+@@ -1078,6 +1095,7 @@
+             max_seq_len=max_seq_len,
+             bmm1_scale=bmm1_scale,
+             return_lse=return_lse,
++            is_var_seq=getattr(self.forward_decode_metadata, "is_var_seq", True),
+             skip_softmax_threshold_scale_factor=envs.SGLANG_SKIP_SOFTMAX_DECODE_THRESHOLD_SCALE_FACTOR.get(),
+             **extra_kwargs,
+         )
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/pristine_tree/srt/models/kimi_k3.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/trial_7_tree_judged/srt/models/kimi_k3.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/pristine_tree/srt/models/kimi_k3.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/trial_7_tree_judged/srt/models/kimi_k3.py	2026-09-22 21:50:35.212798234 -0700
+@@ -1318,8 +1318,21 @@
+                     prefix_sum,
+                 )
+         else:  # single collective over the flat [latent | shared] pair
+-            self._forward_shared(gate_up, shared_output)
+-            self._forward_routed(hidden_states, router_logits, routed_input, latent)
++            if self.alt_stream is not None:
++                # The shared MLP and routed experts only meet at the flat
++                # collective below. Run the shared branch on the layer's
++                # dedicated side stream while the routed branch uses the
++                # capture stream; this keeps the same per-branch arithmetic
++                # and joins before either result is consumed.
++                current_stream = torch.cuda.current_stream()
++                self.alt_stream.wait_stream(current_stream)
++                with torch.cuda.stream(self.alt_stream):
++                    self._forward_shared(gate_up, shared_output)
++                self._forward_routed(hidden_states, router_logits, routed_input, latent)
++                current_stream.wait_stream(self.alt_stream)
++            else:
++                self._forward_shared(gate_up, shared_output)
++                self._forward_routed(hidden_states, router_logits, routed_input, latent)
+             if self.fuse_ar_norm and k3_ar_fusion.enabled():
+                 fused_norm = True
+                 k3_ar_fusion.all_reduce_norm(

@@ -1,0 +1,213 @@
+diff -ruN -x __pycache__ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda/trial_22_tree_judged/kernels/jit/csrc/moe/route_quant_fused.cuh /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda/trial_23_tree_judged/kernels/jit/csrc/moe/route_quant_fused.cuh
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda/trial_22_tree_judged/kernels/jit/csrc/moe/route_quant_fused.cuh	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda/trial_23_tree_judged/kernels/jit/csrc/moe/route_quant_fused.cuh	2026-09-24 04:39:08.705259038 -0700
+@@ -10,7 +10,7 @@
+ // routing bit-exactness contract requires and the quant math tolerates: its
+ // only transcendentals are explicit intrinsics and exact bit manipulation),
+ // and QuantTrait::run is the per_token_group_quant math. Specialized like
+-// route_radix itself: 896 experts, top-16, and a 3584-wide bf16 activation row
++// route_radix itself: 112 local experts, top-2, and a 3584-wide bf16 activation row
+ // (112 ue8m0 groups of 32 = 224 lanes, exactly the routing block width).
+ 
+ #include "../gemm/per_token_group_quant.cuh"
+@@ -97,7 +97,7 @@
+ 
+     RuntimeCheck(
+         N_.unwrap() == kNumExperts_ && K_.unwrap() == kTopK_ && topk == kTopK_,
+-        "route_quant_fused is specialized for N=896, K=16");
++        "route_quant_fused is specialized for N=112, K=2");
+     RuntimeCheck(scores.stride(0) % 4 == 0, "route_quant_fused: scores row stride must be a multiple of 4");
+ 
+     // Quant half: shape/stride/alignment checks + byte-stride munging shared
+diff -ruN -x __pycache__ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda/trial_22_tree_judged/kernels/jit/csrc/moe/route_radix.cuh /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda/trial_23_tree_judged/kernels/jit/csrc/moe/route_radix.cuh
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda/trial_22_tree_judged/kernels/jit/csrc/moe/route_radix.cuh	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda/trial_23_tree_judged/kernels/jit/csrc/moe/route_radix.cuh	2026-09-24 04:41:58.300149601 -0700
+@@ -70,15 +70,18 @@
+ 
+ }  // namespace moe::radix
+ 
+-inline constexpr uint32_t kNumExperts_ = 896;
+-inline constexpr uint32_t kTopK_ = 16;
++inline constexpr uint32_t kNumExperts_ = 112;
++inline constexpr uint32_t kTopK_ = 2;
+ 
+ struct LargeRouterRadixTrait : moe::radix::RadixSelectBase {
+   static constexpr uint32_t kNumExperts = kNumExperts_;
+   static constexpr uint32_t kTopK = kTopK_;
+-  static constexpr uint32_t kVecSize = 4;
++  // Keep the 224-thread block used by the fused quant half. Only the first
++  // 112 lanes own an expert; the remaining lanes participate in barriers and
++  // reductions with an inactive register slot.
++  static constexpr uint32_t kVecSize = 1;
+ 
+-  static constexpr uint32_t kBlockSize = kNumExperts / kVecSize;  // 224 = 7 warps
++  static constexpr uint32_t kBlockSize = 224;
+   static constexpr uint32_t kNumWarps = kBlockSize / 32;
+   struct Smem {
+     uint32_t warp_sum[3][kNumWarps];  // cross-warp scan workspace
+@@ -132,36 +135,22 @@
+   // grid.x == M exactly; no row guard (an early return would deadlock the
+   // block-wide barriers below).
+ 
+-  // ---- Load + key transform: thread tx owns experts [4*tx, 4*tx+4) ----
++  // ---- Load + key transform: thread tx owns one expert when tx < 112 ----
+   uint32_t keys[kVecSize];
+   float act[kVecSize];  // raw sigmoid (weight source) — never NaN-sanitized
+   {
+     const auto scores = static_cast<const TScore*>(params.scores) + bx * params.scores_stride;
+-    AlignedVector<fp32x2_t, kVecSize / 2> bias_vec;
+-    // bf16: 2x bf16x2 (8B row loads); fp32: 2x fp32x2 (16B row loads). The
+-    // radix math below is fp32 either way — only the load width differs.
+-    AlignedVector<packed_t<TScore>, kVecSize / 2> scores_vec;
+ 
+     // Bias may be produced by a preceding cast or fill kernel (the caller
+     // does not guarantee a frozen weight), so wait before loading either input.
+     PDLWaitPrimary<kUsePDL>();
+-    bias_vec.load(params.bias, tx);
+-    scores_vec.load(scores, tx);
+-
+-#pragma unroll
+-    for (uint32_t i = 0; i < kVecSize / 2; ++i) {
+-      fp32x2_t xy;
+-      if constexpr (std::is_same_v<TScore, fp32_t>) {
+-        xy = scores_vec[i];
+-      } else {
+-        xy = cast<fp32x2_t>(scores_vec[i]);
+-      }
+-      const auto [x, y] = xy;
+-      const auto sx = moe::radix::sigmoid_match(x), sy = moe::radix::sigmoid_match(y);
+-      keys[2 * i + 0] = moe::radix::biased_to_key(moe::radix::nan_floor(sx + bias_vec[i].x));
+-      keys[2 * i + 1] = moe::radix::biased_to_key(moe::radix::nan_floor(sy + bias_vec[i].y));
+-      act[2 * i + 0] = sx;
+-      act[2 * i + 1] = sy;
++    keys[0] = 0;
++    act[0] = 0.0f;
++    if (tx < T::kNumExperts) {
++      const float score = cast<float>(scores[tx]);
++      const float sx = moe::radix::sigmoid_match(score);
++      keys[0] = moe::radix::biased_to_key(moe::radix::nan_floor(sx + params.bias[tx]));
++      act[0] = sx;
+     }
+   }
+ 
+@@ -173,7 +162,7 @@
+   bool active[kVecSize];
+ #pragma unroll
+   for (uint32_t i = 0; i < kVecSize; ++i) {
+-    active[i] = true;
++    active[i] = tx < T::kNumExperts;
+   }
+ 
+   uint32_t total_active = T::kNumExperts;
+@@ -616,7 +605,7 @@
+ 
+     RuntimeCheck(
+         N_.unwrap() == kNumExperts_ && K_.unwrap() == kTopK_ && topk == kTopK_,
+-        "route_radix is specialized for N=896, K=16");
++        "route_radix is specialized for N=112, K=2");
+     // Vectorized row loads (8B for bf16, 16B for fp32) need aligned row
+     // starts; stride % 4 elements covers both (4 x 2B = 8B / 4 x 4B = 16B).
+     RuntimeCheck(scores.stride(0) % 4 == 0, "route_radix: scores row stride must be a multiple of 4");
+diff -ruN -x __pycache__ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda/trial_22_tree_judged/kernels/ops/moe/moe_route_quant_fused.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda/trial_23_tree_judged/kernels/ops/moe/moe_route_quant_fused.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda/trial_22_tree_judged/kernels/ops/moe/moe_route_quant_fused.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda/trial_23_tree_judged/kernels/ops/moe/moe_route_quant_fused.py	2026-09-24 04:38:26.218798106 -0700
+@@ -9,7 +9,7 @@
+ standalone kernels' device code, so ids/weights, packed ids, and quantized
+ activations are bit-identical to the unfused chain.
+ 
+-Specialized like route_radix itself: 896 experts, top-16, bf16/fp32 scores,
++Specialized like route_radix itself: 112 local experts, top-2, bf16/fp32 scores,
+ and a 3584-wide bf16 activation row quantized to fp8 with row-major packed
+ UE8M0 group-32 scales (the trtllm-gen SiTU MoE input format). Wired into
+ serving through sglang.srt.layers.moe.route_quant_handoff.
+@@ -38,7 +38,7 @@
+ # Fusion trades the flat quant grid for one 224-thread CTA per token; that (and
+ # the win itself, which is launch overhead) only makes sense at small decode
+ # batches. Above the cap the callers run the unfused chain.
+-_MAX_TOKENS = 64
++_MAX_TOKENS = 128
+ 
+ 
+ @cache_once
+@@ -73,7 +73,7 @@
+ def covered(
+     scores: torch.Tensor, bias: torch.Tensor, topk: int, x: torch.Tensor
+ ) -> bool:
+-    """route_radix coverage plus the quant half: [M<=64, 3584] bf16 rows with
++    """route_radix coverage plus the quant half: [M<=128, 3584] bf16 rows with
+     32B-aligned starts (base and stride), same token count as the scores."""
+     return (
+         moe_route_radix.covered(scores, bias, topk)
+diff -ruN -x __pycache__ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda/trial_22_tree_judged/kernels/ops/moe/moe_route_radix.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda/trial_23_tree_judged/kernels/ops/moe/moe_route_radix.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda/trial_22_tree_judged/kernels/ops/moe/moe_route_radix.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda/trial_23_tree_judged/kernels/ops/moe/moe_route_radix.py	2026-09-24 04:38:20.877243195 -0700
+@@ -1,14 +1,15 @@
+ """Native-CUDA radix-select router for K3 routing (all batch sizes).
+ 
+-Keys and activations stay in registers (224 threads, 4 experts each), the
++Keys and activations stay in registers (224 threads, one valid expert for each
++of the first 112 threads), the
+ split-bin search runs on warp scans instead of cub, rounds exit early when the
+ top-k separates on a byte boundary, and the (biased desc, id asc) output sort
+ is optional. Consumers that only gather by expert id can pass sorted=False and
+ skip the epilogue rank-sort entirely.
+ 
+ Dispatched automatically from moe_fused_gate for covered inputs; the production
+-dispatch uses sorted=False. It is 3.1-3.5x faster than the Triton router at
+-[1..8192, 896] top-16 on B200. Correctness coverage lives in
++dispatch uses sorted=False. This specialization covers the 112 local experts
++and top-2 route used by one EP rank of Kimi-K3. Correctness coverage lives in
+ test_kimi_k3_prerequisite_ops.py, against a pure-torch fp32 oracle rather than the
+ Triton router: moe_fused_gate dispatches back here for every input this kernel
+ covers, so using it as the reference compares the kernel with itself.
+@@ -30,8 +31,8 @@
+ if TYPE_CHECKING:
+     from tvm_ffi.module import Module
+ 
+-_NUM_EXPERTS = 896
+-_TOPK = 16
++_NUM_EXPERTS = 112
++_TOPK = 2
+ 
+ 
+ @cache_once
+@@ -49,8 +50,8 @@
+ 
+ 
+ def covered(scores: torch.Tensor, bias: torch.Tensor, topk: int) -> bool:
+-    """Specialized for K3 decode routing: [M, 896] bf16 or fp32
+-    row-contiguous scores (8B/16B-aligned rows), fp32 bias, top-16."""
++    """Specialized for K3 decode routing: [M, 112] bf16 or fp32
++    row-contiguous scores (8B/16B-aligned rows), fp32 bias, top-2."""
+     return (
+         scores.dim() == 2
+         and scores.size(1) == _NUM_EXPERTS
+diff -ruN -x __pycache__ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda/trial_22_tree_judged/srt/layers/moe/topk.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda/trial_23_tree_judged/srt/layers/moe/topk.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda/trial_22_tree_judged/srt/layers/moe/topk.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda/trial_23_tree_judged/srt/layers/moe/topk.py	2026-09-24 04:38:35.119056560 -0700
+@@ -1896,6 +1896,25 @@
+             # router, which subsumes the jit grouped_topk.cuh kernel here.
+             from sglang.kernels.ops.moe.moe_fused_gate import moe_fused_gate as jit_gate
+ 
++            # K3 staged fusion also covers the EP-rank-shrunk <=512-expert
++            # branch. One production rank routes 112 local experts with top-2,
++            # so it does not enter the wide-expert branch above.
++            from sglang.srt.layers.moe import route_quant_handoff
++
++            fused = route_quant_handoff.try_route_quant_fused(
++                gating_output,
++                correction_bias.to(torch.float32),
++                topk,
++                num_fused_shared_experts=num_fused_shared_experts,
++                renormalize=renormalize,
++                routed_scaling_factor=routed_scaling_factor,
++                apply_routed_scaling_factor_on_output=bool(
++                    apply_routed_scaling_factor_on_output
++                ),
++            )
++            if fused is not None:
++                return fused
++
+             return jit_gate(
+                 gating_output,
+                 correction_bias.to(torch.float32),

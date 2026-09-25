@@ -1,0 +1,60 @@
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/pristine_tree/kernels/ops/gemm/cutedsl_bf16_gemm.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/trial_5_tree_judged/kernels/ops/gemm/cutedsl_bf16_gemm.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/pristine_tree/kernels/ops/gemm/cutedsl_bf16_gemm.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/trial_5_tree_judged/kernels/ops/gemm/cutedsl_bf16_gemm.py	2026-09-22 20:19:40.159761704 -0700
+@@ -1354,6 +1354,7 @@
+ )
+ 
+ 
++
+ def use_cutedsl_bf16_gemm(m: int, n: int, k: int) -> bool:
+     """TGV-vs-cuBLAS (``F.linear``) decision, CUPTI-measured on B300 under CUDA
+     graph capture (cold L2). Conservative: ties and unmeasured regions fall
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/pristine_tree/srt/layers/attention/cutedsl_mla_backend.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/trial_5_tree_judged/srt/layers/attention/cutedsl_mla_backend.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/pristine_tree/srt/layers/attention/cutedsl_mla_backend.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/trial_5_tree_judged/srt/layers/attention/cutedsl_mla_backend.py	2026-09-22 19:58:57.925076806 -0700
+@@ -62,7 +62,9 @@
+             skip_prefill,
+             kv_indptr_buf,
+             q_indptr_decode_buf,
+-            backend="cute-dsl",
++            # The non-DCP decode shapes use the cached TRT-LLM implementation;
++            # DCP still needs the cute-dsl kernel's rank-local LSE contract.
++            backend="cute-dsl" if get_parallel().dcp_enabled else "trtllm-gen",
+         )
+ 
+     # ------------------------------------------------------------------
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/pristine_tree/srt/models/kimi_k3.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/trial_5_tree_judged/srt/models/kimi_k3.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/pristine_tree/srt/models/kimi_k3.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/trial_5_tree_judged/srt/models/kimi_k3.py	2026-09-22 20:11:33.613030771 -0700
+@@ -1318,7 +1318,21 @@
+                     prefix_sum,
+                 )
+         else:  # single collective over the flat [latent | shared] pair
+-            self._forward_shared(gate_up, shared_output)
++            # On a single rank there is no collective to overlap the shared
++            # branch with the routed experts.  They write disjoint slices, so
++            # issue the shared GEMM on the existing side stream and join it
++            # before the final add; the tensor operations and their ordering
++            # remain unchanged.
++            single_rank_overlap = self.alt_stream is not None and self.tp_size == 1
++            if single_rank_overlap:
++                current_stream = torch.cuda.current_stream()
++                self.alt_stream.wait_stream(current_stream)
++                with torch.cuda.stream(self.alt_stream):
++                    self._forward_shared(gate_up, shared_output)
++                    shared_event = self.alt_stream.record_event()
++            else:
++                shared_event = None
++                self._forward_shared(gate_up, shared_output)
+             self._forward_routed(hidden_states, router_logits, routed_input, latent)
+             if self.fuse_ar_norm and k3_ar_fusion.enabled():
+                 fused_norm = True
+@@ -1342,6 +1356,8 @@
+         # c (prefix_sum) even earlier; the AR is a plain launch (full
+         # barrier), so both are complete once the norm / up_proj GEMM chain
+         # starts — only `a`'s producer can still be in flight at PDL entry.
++        if shared_event is not None:
++            torch.cuda.current_stream().wait_event(shared_event)
+         return _add3(out, shared_output, prefix_sum, prefetch_bc=True)
+ 
+     def forward(

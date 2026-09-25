@@ -1,0 +1,1304 @@
+[
+ {
+  "case": "kda",
+  "trial": 1,
+  "verdict": "FAIL",
+  "reason": "failed: latency_improved",
+  "continuous_round": false,
+  "campaign1_unrealistic_routing": false,
+  "points": {
+   "128,8192": {
+    "before_us": 560.4,
+    "after_us": 560.5,
+    "improvement": -0.0001,
+    "check": true,
+    "rel_err": 0.0
+   },
+   "32,8192": {
+    "before_us": 305.5,
+    "after_us": 305.5,
+    "improvement": -0.0001,
+    "check": true,
+    "rel_err": 0.0
+   },
+   "1,8192": {
+    "before_us": 175.4,
+    "after_us": 175.4,
+    "improvement": 0.0,
+    "check": true,
+    "rel_err": 0.0
+   }
+  },
+  "files": [],
+  "diff_lines": 0,
+  "incremental_diff_lines": null,
+  "note": "control: pristine tree (null)",
+  "dir": "trials/kda_1"
+ },
+ {
+  "case": "kda",
+  "trial": 2,
+  "verdict": "FAIL",
+  "reason": "failed: latency_improved,no_secondary_regression",
+  "continuous_round": false,
+  "campaign1_unrealistic_routing": false,
+  "points": {
+   "128,8192": {
+    "before_us": 560.4,
+    "after_us": 659.8,
+    "improvement": -0.1773,
+    "check": true,
+    "rel_err": 0.0
+   },
+   "32,8192": {
+    "before_us": 305.5,
+    "after_us": 406.9,
+    "improvement": -0.3321,
+    "check": true,
+    "rel_err": 0.0
+   },
+   "1,8192": {
+    "before_us": 175.4,
+    "after_us": 279.9,
+    "improvement": -0.5954,
+    "check": true,
+    "rel_err": 0.0
+   }
+  },
+  "files": [
+   "srt/models/kimi_k3.py"
+  ],
+  "diff_lines": 13,
+  "incremental_diff_lines": null,
+  "note": "control: planted slowdown",
+  "dir": "trials/kda_2"
+ },
+ {
+  "case": "kda",
+  "trial": 3,
+  "verdict": "FAIL",
+  "reason": "failed: correctness,latency_improved",
+  "continuous_round": false,
+  "campaign1_unrealistic_routing": false,
+  "points": {
+   "128,8192": {
+    "before_us": 560.4,
+    "after_us": 562.5,
+    "improvement": -0.0037,
+    "check": false,
+    "rel_err": 0.06666628740956496
+   },
+   "32,8192": {
+    "before_us": 305.5,
+    "after_us": 306.5,
+    "improvement": -0.0035,
+    "check": false,
+    "rel_err": 0.0666662529318606
+   },
+   "1,8192": {
+    "before_us": 175.4,
+    "after_us": 178.5,
+    "improvement": -0.0177,
+    "check": false,
+    "rel_err": 0.07291614815183536
+   }
+  },
+  "files": [
+   "srt/models/kimi_k3.py"
+  ],
+  "diff_lines": 12,
+  "incremental_diff_lines": null,
+  "note": "control: planted numerics",
+  "dir": "trials/kda_3"
+ },
+ {
+  "case": "kda",
+  "trial": 4,
+  "verdict": "FAIL",
+  "reason": "failed: latency_improved",
+  "continuous_round": false,
+  "campaign1_unrealistic_routing": true,
+  "points": {
+   "128,8192": {
+    "before_us": 558.6,
+    "after_us": 550.3,
+    "improvement": 0.0148,
+    "check": true,
+    "rel_err": 0.0
+   },
+   "32,8192": {
+    "before_us": 312.8,
+    "after_us": 308.8,
+    "improvement": 0.0127,
+    "check": true,
+    "rel_err": 0.0
+   },
+   "1,8192": {
+    "before_us": 181.7,
+    "after_us": 181.7,
+    "improvement": 0.0002,
+    "check": true,
+    "rel_err": 0.0
+   }
+  },
+  "files": [
+   "srt/models/kimi_k3.py"
+  ],
+  "diff_lines": 25,
+  "incremental_diff_lines": null,
+  "note": "campaign 1: shared experts overlapped on the alt stream (+1.5%, bit-exact)",
+  "dir": "trials/kda_4"
+ },
+ {
+  "case": "kda",
+  "trial": 5,
+  "verdict": "FAIL",
+  "reason": "point (128, 8192) failed on agent tree: RuntimeError: Tensor match failed for Tensor<129, 12, 128, 128>[strides=<196608, 16384, 128, 1>, dtype=bfloat16, device=cuda:0] at /sgl-workspace/sglang/python/sglang/kernels/jit/csrc/attention/kda_fused_decode.cuh:980\n- Root cause: Dtype value [bfloat16] not in the allowed options: [float32]",
+  "continuous_round": false,
+  "campaign1_unrealistic_routing": true,
+  "points": {},
+  "files": [
+   "kernels/ops/attention/kda_fused_decode.py",
+   "srt/models/kimi_k3.py"
+  ],
+  "diff_lines": 57,
+  "incremental_diff_lines": null,
+  "note": "campaign 1: forced the fused KDA decode kernel onto the bf16 state -> crashed at B=128",
+  "dir": "trials/kda_5"
+ },
+ {
+  "case": "kda",
+  "trial": 6,
+  "verdict": "FAIL",
+  "reason": "failed: latency_improved",
+  "continuous_round": false,
+  "campaign1_unrealistic_routing": true,
+  "points": {
+   "128,8192": {
+    "before_us": 558.6,
+    "after_us": 542.1,
+    "improvement": 0.0294,
+    "check": true,
+    "rel_err": 0.0
+   },
+   "32,8192": {
+    "before_us": 312.8,
+    "after_us": 304.6,
+    "improvement": 0.0262,
+    "check": true,
+    "rel_err": 0.0
+   },
+   "1,8192": {
+    "before_us": 181.7,
+    "after_us": 180.6,
+    "improvement": 0.0062,
+    "check": true,
+    "rel_err": 0.0
+   }
+  },
+  "files": [
+   "srt/models/kimi_k3.py",
+   "srt/layers/attention/linear/kda_backend.py"
+  ],
+  "diff_lines": 47,
+  "incremental_diff_lines": null,
+  "note": "campaign 1: best campaign-1 KDA result (-2.9% @128x8k)",
+  "dir": "trials/kda_6"
+ },
+ {
+  "case": "kda",
+  "trial": 7,
+  "verdict": "FAIL",
+  "reason": "failed: latency_improved",
+  "continuous_round": false,
+  "campaign1_unrealistic_routing": true,
+  "points": {
+   "128,8192": {
+    "before_us": 558.6,
+    "after_us": 552.3,
+    "improvement": 0.0112,
+    "check": true,
+    "rel_err": 0.01666657185239124
+   },
+   "32,8192": {
+    "before_us": 312.8,
+    "after_us": 304.5,
+    "improvement": 0.0263,
+    "check": true,
+    "rel_err": 0.01666656323296515
+   },
+   "1,8192": {
+    "before_us": 181.7,
+    "after_us": 175.5,
+    "improvement": 0.034,
+    "check": true,
+    "rel_err": 0.014756839506919061
+   }
+  },
+  "files": [
+   "kernels/jit/csrc/attention/kda_fused_decode.cuh",
+   "kernels/ops/attention/kda_fused_decode.py",
+   "srt/models/kimi_k3.py"
+  ],
+  "diff_lines": 533,
+  "incremental_diff_lines": null,
+  "note": "campaign 1: bf16 port of the fused KDA decode JIT kernel (.cuh); works, +1..3%, rel 0.017",
+  "dir": "trials/kda_7"
+ },
+ {
+  "case": "kda",
+  "trial": 8,
+  "verdict": "FAIL",
+  "reason": "failed: latency_improved",
+  "continuous_round": false,
+  "campaign1_unrealistic_routing": false,
+  "points": {
+   "128,8192": {
+    "before_us": 403.0,
+    "after_us": 390.7,
+    "improvement": 0.0306,
+    "check": true,
+    "rel_err": 0.0
+   },
+   "32,8192": {
+    "before_us": 263.6,
+    "after_us": 251.4,
+    "improvement": 0.0465,
+    "check": true,
+    "rel_err": 0.0
+   },
+   "1,8192": {
+    "before_us": 138.8,
+    "after_us": 130.5,
+    "improvement": 0.0593,
+    "check": true,
+    "rel_err": 0.0
+   }
+  },
+  "files": [
+   "srt/models/kimi_k3.py"
+  ],
+  "diff_lines": 45,
+  "incremental_diff_lines": null,
+  "note": "shared-expert down GEMM -> CuteDSL bf16 GEMM + side-stream overlap (-3.1%/-4.7%/-5.9%, bit-exact; 5% gate FAIL)",
+  "dir": "trials/kda_8"
+ },
+ {
+  "case": "kda",
+  "trial": 9,
+  "verdict": "FAIL",
+  "reason": "failed: latency_improved",
+  "continuous_round": false,
+  "campaign1_unrealistic_routing": false,
+  "points": {
+   "128,8192": {
+    "before_us": 403.0,
+    "after_us": 401.9,
+    "improvement": 0.0029,
+    "check": true,
+    "rel_err": 0.012605041169408998
+   },
+   "32,8192": {
+    "before_us": 263.6,
+    "after_us": 257.5,
+    "improvement": 0.0233,
+    "check": true,
+    "rel_err": 0.007177032943385038
+   },
+   "1,8192": {
+    "before_us": 138.8,
+    "after_us": 138.7,
+    "improvement": 0.0005,
+    "check": true,
+    "rel_err": 0.0
+   }
+  },
+  "files": [
+   "kernels/jit/csrc/attention/kda_fused_decode.cuh",
+   "kernels/ops/attention/kda_fused_decode.py"
+  ],
+  "diff_lines": 589,
+  "incremental_diff_lines": null,
+  "note": "589-line bf16 port of the fused KDA CUDA kernel; correct but no gain (-0.3%)",
+  "dir": "trials/kda_9"
+ },
+ {
+  "case": "kda",
+  "trial": 10,
+  "verdict": "FAIL",
+  "reason": "failed: latency_improved",
+  "continuous_round": false,
+  "campaign1_unrealistic_routing": false,
+  "points": {
+   "128,8192": {
+    "before_us": 403.0,
+    "after_us": 384.6,
+    "improvement": 0.0457,
+    "check": true,
+    "rel_err": 0.0
+   },
+   "32,8192": {
+    "before_us": 263.6,
+    "after_us": 249.4,
+    "improvement": 0.0539,
+    "check": true,
+    "rel_err": 0.0
+   },
+   "1,8192": {
+    "before_us": 138.8,
+    "after_us": 138.7,
+    "improvement": 0.0002,
+    "check": true,
+    "rel_err": 0.0
+   }
+  },
+  "files": [
+   "srt/models/kimi_k3.py",
+   "srt/layers/attention/linear/kda_backend.py"
+  ],
+  "diff_lines": 50,
+  "incremental_diff_lines": null,
+  "note": "packed KDA decode fast path kept for K3's lower-bounded gate + overlap (-4.6%, bit-exact; gate FAIL by 0.4pt)",
+  "dir": "trials/kda_10"
+ },
+ {
+  "case": "kda",
+  "trial": 11,
+  "verdict": "FAIL",
+  "reason": "failed: latency_improved",
+  "continuous_round": false,
+  "campaign1_unrealistic_routing": false,
+  "points": {
+   "128,8192": {
+    "before_us": 403.0,
+    "after_us": 385.5,
+    "improvement": 0.0436,
+    "check": true,
+    "rel_err": 0.0
+   },
+   "32,8192": {
+    "before_us": 263.6,
+    "after_us": 250.3,
+    "improvement": 0.0505,
+    "check": true,
+    "rel_err": 0.0
+   },
+   "1,8192": {
+    "before_us": 138.8,
+    "after_us": 130.6,
+    "improvement": 0.059,
+    "check": true,
+    "rel_err": 0.0
+   }
+  },
+  "files": [
+   "kernels/ops/attention/fla/fused_recurrent.py",
+   "srt/models/kimi_k3.py",
+   "srt/layers/attention/linear/kda_backend.py"
+  ],
+  "diff_lines": 62,
+  "incremental_diff_lines": null,
+  "note": "fast path + Triton recurrent-kernel launch tuning (num_warps) + overlap (-4.4%, bit-exact)",
+  "dir": "trials/kda_11"
+ },
+ {
+  "case": "kda",
+  "trial": 20,
+  "verdict": "FAIL",
+  "reason": "driver failed on agent tree: driver produced no JSON line for [(128, 8192), (32, 8192), (1, 8192)]:\nh-cuda-alloc-conf)\nTraceback (most recent call last):\n  File \"/tmp/kimi_single_layer_decode.py\", line 492, in _fill_mxfp4_experts\n    qm.process_weights_after_loading(experts)\n  File \"/sgl-workspace/sglang/python/sglang/srt/layers/quantization/mxfp4.py\", line 866, in process_weights_after_loading\n    w2_weight[i]\ntorch.OutOfMemoryError: CUDA out of memory. Tried to allocate 20.00 MiB. GPU 0 has a total capacity of 178.35 GiB of which 17.38 MiB is free. Including non-PyTorch memory, this process has 6.17 GiB memory in use. Of the allocated memory 5.03 GiB is allocated by PyTorch, and 398.65 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)\n\n\n[rank0]:[W924 03:24:00.823099701 CUDACachingAllocator.cpp:3933] memory allocation failed with OOM on device 0 while trying to allocate 20971520 bytes (free: 18219008, total: 191502876672).\n[rank0]:[W924 03:24:00.823263274 CUDACachingAllocator.cpp:3933] memory allocation failed with OOM on device 0 while trying to allocate 20971520 bytes (free: 18219008, total: 191502876672).\n[rank0]: Traceback (most recent call last):\n[rank0]:   File \"/tmp/kimi_single_layer_decode.py\", line",
+  "continuous_round": true,
+  "campaign1_unrealistic_routing": false,
+  "points": {},
+  "files": [
+   "kernels/ops/attention/fla/fused_recurrent.py",
+   "srt/models/kimi_k3.py",
+   "srt/layers/attention/linear/kda_backend.py"
+  ],
+  "diff_lines": 98,
+  "incremental_diff_lines": 18,
+  "note": "infra: judge OOM (167 GB co-tenant on the shared GPU); not a result",
+  "dir": "trials/kda_20"
+ },
+ {
+  "case": "kda",
+  "trial": 21,
+  "verdict": "FAIL",
+  "reason": "failed: correctness,latency_improved",
+  "continuous_round": true,
+  "campaign1_unrealistic_routing": false,
+  "points": {
+   "128,8192": {
+    "before_us": 394.7,
+    "after_us": 384.6,
+    "improvement": 0.0256,
+    "check": true,
+    "rel_err": 0.0
+   },
+   "32,8192": {
+    "before_us": 249.3,
+    "after_us": 251.5,
+    "improvement": -0.0085,
+    "check": false,
+    "rel_err": 0.41626791071633223
+   },
+   "1,8192": {
+    "before_us": 128.6,
+    "after_us": 128.5,
+    "improvement": 0.0005,
+    "check": false,
+    "rel_err": 0.062499994186047056
+   }
+  },
+  "files": [
+   "kernels/jit/csrc/moe/route_quant_fused.cuh",
+   "kernels/ops/moe/moe_route_quant_fused.py",
+   "kernels/ops/attention/fla/fused_recurrent.py",
+   "srt/models/kimi_k3.py",
+   "srt/layers/moe/topk.py",
+   "srt/layers/attention/linear/kda_backend.py"
+  ],
+  "diff_lines": 397,
+  "incremental_diff_lines": 314,
+  "note": "route+quant specialization broke numerics at B=32/1 (rel 0.42) -> correctness FAIL",
+  "dir": "trials/kda_21"
+ },
+ {
+  "case": "kda",
+  "trial": 22,
+  "verdict": "PASS",
+  "reason": "all gates passed",
+  "continuous_round": true,
+  "campaign1_unrealistic_routing": false,
+  "points": {
+   "128,8192": {
+    "before_us": 384.4,
+    "after_us": 379.4,
+    "improvement": 0.0128,
+    "check": true,
+    "rel_err": 0.012605041169408998
+   },
+   "32,8192": {
+    "before_us": 249.3,
+    "after_us": 243.1,
+    "improvement": 0.0248,
+    "check": true,
+    "rel_err": 0.007177032943385038
+   },
+   "1,8192": {
+    "before_us": 130.5,
+    "after_us": 126.4,
+    "improvement": 0.0311,
+    "check": true,
+    "rel_err": 0.0
+   }
+  },
+  "files": [
+   "kernels/jit/csrc/attention/kda_fused_decode.cuh",
+   "kernels/ops/attention/kda_fused_decode.py",
+   "kernels/ops/attention/fla/fused_recurrent.py",
+   "srt/models/kimi_k3.py",
+   "srt/layers/attention/linear/kda_backend.py"
+  ],
+  "diff_lines": 544,
+  "incremental_diff_lines": 461,
+  "note": "ACCEPTED: bf16-state port of the fused KDA decode JIT kernel (kda_fused_decode.cuh + .py): +1.3% @128, +2.5% @32, +3.1% @1",
+  "dir": "trials/kda_22"
+ },
+ {
+  "case": "kda",
+  "trial": 23,
+  "verdict": "FAIL",
+  "reason": "failed: latency_improved",
+  "continuous_round": true,
+  "campaign1_unrealistic_routing": false,
+  "points": {
+   "128,8192": {
+    "before_us": 379.4,
+    "after_us": 378.4,
+    "improvement": 0.0027,
+    "check": true,
+    "rel_err": 0.012605041169408998
+   },
+   "32,8192": {
+    "before_us": 243.1,
+    "after_us": 243.1,
+    "improvement": -0.0001,
+    "check": true,
+    "rel_err": 0.009569377257846718
+   },
+   "1,8192": {
+    "before_us": 126.5,
+    "after_us": 126.4,
+    "improvement": 0.0003,
+    "check": true,
+    "rel_err": 0.005813952947539261
+   }
+  },
+  "files": [
+   "kernels/jit/csrc/attention/kda_fused_decode.cuh",
+   "kernels/jit/csrc/moe/route_quant_fused.cuh",
+   "kernels/jit/csrc/moe/route_radix.cuh",
+   "kernels/ops/attention/kda_fused_decode.py",
+   "kernels/ops/moe/moe_route_radix.py",
+   "kernels/ops/moe/moe_route_quant_fused.py",
+   "kernels/ops/attention/fla/fused_recurrent.py",
+   "srt/models/kimi_k3.py",
+   "srt/layers/moe/topk.py",
+   "srt/layers/attention/linear/kda_backend.py"
+  ],
+  "diff_lines": 757,
+  "incremental_diff_lines": 213,
+  "note": "null: five ideas rejected by the agent itself; +0.3% below the 0.5% floor",
+  "dir": "trials/kda_23"
+ },
+ {
+  "case": "kda",
+  "trial": 24,
+  "verdict": "FAIL",
+  "reason": "failed: latency_improved",
+  "continuous_round": true,
+  "campaign1_unrealistic_routing": false,
+  "points": {
+   "128,8192": {
+    "before_us": 379.3,
+    "after_us": 379.3,
+    "improvement": -0.0001,
+    "check": true,
+    "rel_err": 0.012605041169408998
+   },
+   "32,8192": {
+    "before_us": 243.2,
+    "after_us": 243.2,
+    "improvement": 0.0,
+    "check": true,
+    "rel_err": 0.007177032943385038
+   },
+   "1,8192": {
+    "before_us": 126.5,
+    "after_us": 126.5,
+    "improvement": 0.0,
+    "check": true,
+    "rel_err": 0.0
+   }
+  },
+  "files": [
+   "kernels/jit/csrc/attention/kda_fused_decode.cuh",
+   "kernels/ops/attention/kda_fused_decode.py",
+   "kernels/ops/attention/fla/fused_recurrent.py",
+   "srt/models/kimi_k3.py",
+   "srt/layers/attention/linear/kda_backend.py"
+  ],
+  "diff_lines": 544,
+  "incremental_diff_lines": 0,
+  "note": "null: tree returned to the seed",
+  "dir": "trials/kda_24"
+ },
+ {
+  "case": "kda",
+  "trial": 25,
+  "verdict": "FAIL",
+  "reason": "failed: latency_improved",
+  "continuous_round": true,
+  "campaign1_unrealistic_routing": false,
+  "points": {
+   "128,8192": {
+    "before_us": 379.5,
+    "after_us": 378.4,
+    "improvement": 0.0029,
+    "check": true,
+    "rel_err": 0.012605041169408998
+   },
+   "32,8192": {
+    "before_us": 243.1,
+    "after_us": 241.1,
+    "improvement": 0.0083,
+    "check": true,
+    "rel_err": 0.007177032943385038
+   },
+   "1,8192": {
+    "before_us": 126.4,
+    "after_us": 124.4,
+    "improvement": 0.0159,
+    "check": true,
+    "rel_err": 0.0
+   }
+  },
+  "files": [
+   "kernels/jit/csrc/attention/kda_fused_decode.cuh",
+   "kernels/ops/attention/kda_fused_decode.py",
+   "kernels/ops/attention/fla/fused_recurrent.py",
+   "srt/models/kimi_k3.py",
+   "srt/layers/attention/linear/kda_backend.py"
+  ],
+  "diff_lines": 546,
+  "incremental_diff_lines": 16,
+  "note": "null: +0.3% below the 0.56% needed (KDA plateau)",
+  "dir": "trials/kda_25"
+ },
+ {
+  "case": "mla",
+  "trial": 1,
+  "verdict": "FAIL",
+  "reason": "failed: latency_improved",
+  "continuous_round": false,
+  "campaign1_unrealistic_routing": false,
+  "points": {
+   "128,8192": {
+    "before_us": 681.6,
+    "after_us": 682.4,
+    "improvement": -0.0012,
+    "check": true,
+    "rel_err": 0.0
+   },
+   "1,1048576": {
+    "before_us": 347.6,
+    "after_us": 347.6,
+    "improvement": 0.0001,
+    "check": true,
+    "rel_err": 0.0
+   },
+   "16,65536": {
+    "before_us": 357.9,
+    "after_us": 357.9,
+    "improvement": 0.0001,
+    "check": true,
+    "rel_err": 0.0
+   }
+  },
+  "files": [],
+  "diff_lines": 0,
+  "incremental_diff_lines": null,
+  "note": "control: pristine tree (null)",
+  "dir": "trials/mla_1"
+ },
+ {
+  "case": "mla",
+  "trial": 2,
+  "verdict": "FAIL",
+  "reason": "failed: latency_improved,no_secondary_regression",
+  "continuous_round": false,
+  "campaign1_unrealistic_routing": false,
+  "points": {
+   "128,8192": {
+    "before_us": 681.6,
+    "after_us": 787.0,
+    "improvement": -0.1546,
+    "check": true,
+    "rel_err": 0.0
+   },
+   "1,1048576": {
+    "before_us": 347.6,
+    "after_us": 453.7,
+    "improvement": -0.3051,
+    "check": true,
+    "rel_err": 0.0
+   },
+   "16,65536": {
+    "before_us": 357.9,
+    "after_us": 464.4,
+    "improvement": -0.2977,
+    "check": true,
+    "rel_err": 0.0
+   }
+  },
+  "files": [
+   "srt/models/kimi_k3.py"
+  ],
+  "diff_lines": 13,
+  "incremental_diff_lines": null,
+  "note": "control: planted slowdown",
+  "dir": "trials/mla_2"
+ },
+ {
+  "case": "mla",
+  "trial": 3,
+  "verdict": "FAIL",
+  "reason": "failed: correctness,latency_improved,no_secondary_regression",
+  "continuous_round": false,
+  "campaign1_unrealistic_routing": false,
+  "points": {
+   "128,8192": {
+    "before_us": 681.6,
+    "after_us": 683.5,
+    "improvement": -0.0028,
+    "check": false,
+    "rel_err": 0.06741534250949029
+   },
+   "1,1048576": {
+    "before_us": 347.6,
+    "after_us": 349.7,
+    "improvement": -0.0059,
+    "check": false,
+    "rel_err": 0.06060568448350963
+   },
+   "16,65536": {
+    "before_us": 357.9,
+    "after_us": 366.0,
+    "improvement": -0.0227,
+    "check": false,
+    "rel_err": 0.0654757913856525
+   }
+  },
+  "files": [
+   "srt/models/kimi_k3.py"
+  ],
+  "diff_lines": 12,
+  "incremental_diff_lines": null,
+  "note": "control: planted numerics",
+  "dir": "trials/mla_3"
+ },
+ {
+  "case": "mla",
+  "trial": 4,
+  "verdict": "FAIL",
+  "reason": "failed: latency_improved",
+  "continuous_round": false,
+  "campaign1_unrealistic_routing": true,
+  "points": {
+   "128,8192": {
+    "before_us": 681.3,
+    "after_us": 667.1,
+    "improvement": 0.0208,
+    "check": true,
+    "rel_err": 0.0
+   },
+   "1,1048576": {
+    "before_us": 345.5,
+    "after_us": 306.5,
+    "improvement": 0.1131,
+    "check": true,
+    "rel_err": 0.0
+   },
+   "16,65536": {
+    "before_us": 358.8,
+    "after_us": 357.8,
+    "improvement": 0.0029,
+    "check": true,
+    "rel_err": 0.0
+   }
+  },
+  "files": [
+   "srt/models/kimi_k3.py",
+   "srt/layers/attention/cutedsl_mla_backend.py"
+  ],
+  "diff_lines": 35,
+  "incremental_diff_lines": null,
+  "note": "campaign 1: cute-dsl -> trtllm-gen MLA decode + shared-expert overlap (-11.3% @1x1M, -2.1% @128x8k)",
+  "dir": "trials/mla_4"
+ },
+ {
+  "case": "mla",
+  "trial": 5,
+  "verdict": "FAIL",
+  "reason": "failed: latency_improved",
+  "continuous_round": false,
+  "campaign1_unrealistic_routing": true,
+  "points": {
+   "128,8192": {
+    "before_us": 681.3,
+    "after_us": 667.3,
+    "improvement": 0.0206,
+    "check": true,
+    "rel_err": 0.0
+   },
+   "1,1048576": {
+    "before_us": 345.5,
+    "after_us": 295.3,
+    "improvement": 0.1453,
+    "check": true,
+    "rel_err": 0.0
+   },
+   "16,65536": {
+    "before_us": 358.8,
+    "after_us": 355.8,
+    "improvement": 0.0086,
+    "check": true,
+    "rel_err": 0.0
+   }
+  },
+  "files": [
+   "kernels/ops/gemm/cutedsl_bf16_gemm.py",
+   "srt/models/kimi_k3.py",
+   "srt/layers/attention/cutedsl_mla_backend.py"
+  ],
+  "diff_lines": 60,
+  "incremental_diff_lines": null,
+  "note": "campaign 1: cute-dsl -> trtllm-gen MLA decode (-14.5% @1x1M)",
+  "dir": "trials/mla_5"
+ },
+ {
+  "case": "mla",
+  "trial": 6,
+  "verdict": "FAIL",
+  "reason": "failed: latency_improved",
+  "continuous_round": false,
+  "campaign1_unrealistic_routing": true,
+  "points": {
+   "128,8192": {
+    "before_us": 681.3,
+    "after_us": 680.4,
+    "improvement": 0.0013,
+    "check": true,
+    "rel_err": 0.0
+   },
+   "1,1048576": {
+    "before_us": 345.5,
+    "after_us": 345.5,
+    "improvement": 0.0,
+    "check": true,
+    "rel_err": 0.0
+   },
+   "16,65536": {
+    "before_us": 358.8,
+    "after_us": 358.9,
+    "improvement": -0.0001,
+    "check": true,
+    "rel_err": 0.0
+   }
+  },
+  "files": [
+   "srt/layers/moe/moe_runner/flashinfer_trtllm.py"
+  ],
+  "diff_lines": 39,
+  "incremental_diff_lines": null,
+  "note": "campaign 1: see agent_iterations.md",
+  "dir": "trials/mla_6"
+ },
+ {
+  "case": "mla",
+  "trial": 7,
+  "verdict": "FAIL",
+  "reason": "failed: latency_improved",
+  "continuous_round": false,
+  "campaign1_unrealistic_routing": true,
+  "points": {
+   "128,8192": {
+    "before_us": 681.3,
+    "after_us": 673.2,
+    "improvement": 0.0118,
+    "check": true,
+    "rel_err": 0.0
+   },
+   "1,1048576": {
+    "before_us": 345.5,
+    "after_us": 347.5,
+    "improvement": -0.0056,
+    "check": true,
+    "rel_err": 0.0
+   },
+   "16,65536": {
+    "before_us": 358.8,
+    "after_us": 360.0,
+    "improvement": -0.0032,
+    "check": true,
+    "rel_err": 0.0
+   }
+  },
+  "files": [
+   "srt/models/kimi_k3.py",
+   "srt/layers/attention/trtllm_mla_backend.py"
+  ],
+  "diff_lines": 69,
+  "incremental_diff_lines": null,
+  "note": "campaign 1 (re-run with the correct MLA oracle): see agent_iterations.md",
+  "dir": "trials/mla_7"
+ },
+ {
+  "case": "mla",
+  "trial": 8,
+  "verdict": "PASS",
+  "reason": "all gates passed",
+  "continuous_round": false,
+  "campaign1_unrealistic_routing": false,
+  "points": {
+   "1,1048576": {
+    "before_us": 304.6,
+    "after_us": 267.7,
+    "improvement": 0.1213,
+    "check": true,
+    "rel_err": 0.0
+   },
+   "128,8192": {
+    "before_us": 493.0,
+    "after_us": 484.9,
+    "improvement": 0.0164,
+    "check": true,
+    "rel_err": 0.01376146687989234
+   },
+   "16,65536": {
+    "before_us": 302.5,
+    "after_us": 300.5,
+    "improvement": 0.0066,
+    "check": true,
+    "rel_err": 0.005136985926064956
+   }
+  },
+  "files": [
+   "srt/layers/attention/cutedsl_mla_backend.py"
+  ],
+  "diff_lines": 15,
+  "incremental_diff_lines": null,
+  "note": "ACCEPTED: non-DCP decode routed cute-dsl -> TRT-LLM MLA generation kernel (15 lines, cutedsl_mla_backend.py): -12.1% @1x1M, bit-exact",
+  "dir": "trials/mla_8"
+ },
+ {
+  "case": "mla",
+  "trial": 20,
+  "verdict": "PASS",
+  "reason": "all gates passed",
+  "continuous_round": true,
+  "campaign1_unrealistic_routing": false,
+  "points": {
+   "1,1048576": {
+    "before_us": 267.7,
+    "after_us": 265.7,
+    "improvement": 0.0075,
+    "check": true,
+    "rel_err": 0.005555555061728439
+   },
+   "128,8192": {
+    "before_us": 486.9,
+    "after_us": 486.8,
+    "improvement": 0.0001,
+    "check": true,
+    "rel_err": 0.01376146687989234
+   },
+   "16,65536": {
+    "before_us": 302.5,
+    "after_us": 300.5,
+    "improvement": 0.0065,
+    "check": true,
+    "rel_err": 0.005136985926064956
+   }
+  },
+  "files": [
+   "kernels/jit/csrc/moe/route_quant_fused.cuh",
+   "kernels/jit/csrc/moe/route_radix.cuh",
+   "kernels/ops/attention/set_mla_kv_concat_q.py",
+   "kernels/ops/moe/moe_route_quant_fused.py",
+   "srt/layers/attention/cutedsl_mla_backend.py",
+   "srt/layers/moe/topk.py"
+  ],
+  "diff_lines": 455,
+  "incremental_diff_lines": 455,
+  "note": "ACCEPTED: route_quant_fused JIT specialized for the 112-expert/top-2 shape (+0.75%; harness-specific, production is 896/top-16)",
+  "dir": "trials/mla_20"
+ },
+ {
+  "case": "mla",
+  "trial": 21,
+  "verdict": "PASS",
+  "reason": "all gates passed",
+  "continuous_round": true,
+  "campaign1_unrealistic_routing": false,
+  "points": {
+   "1,1048576": {
+    "before_us": 267.8,
+    "after_us": 263.7,
+    "improvement": 0.0153,
+    "check": true,
+    "rel_err": 0.005555555061728439
+   },
+   "128,8192": {
+    "before_us": 503.1,
+    "after_us": 486.8,
+    "improvement": 0.0323,
+    "check": true,
+    "rel_err": 0.01376146687989234
+   },
+   "16,65536": {
+    "before_us": 300.5,
+    "after_us": 298.5,
+    "improvement": 0.0067,
+    "check": true,
+    "rel_err": 0.005136985926064956
+   }
+  },
+  "files": [
+   "kernels/jit/csrc/moe/route_quant_fused.cuh",
+   "kernels/jit/csrc/moe/route_radix.cuh",
+   "kernels/ops/attention/set_mla_kv_concat_q.py",
+   "kernels/ops/moe/moe_route_quant_fused.py",
+   "srt/models/kimi_k3.py",
+   "srt/layers/attention/cutedsl_mla_backend.py",
+   "srt/layers/moe/topk.py"
+  ],
+  "diff_lines": 482,
+  "incremental_diff_lines": 27,
+  "note": "ACCEPTED: fp32-output front GEMMs (15984x7168 / 6016x7168, m<=16) cuBLAS -> CuTe TGV (+1.5% @1x1M, +3.2% @128x8k)",
+  "dir": "trials/mla_21"
+ },
+ {
+  "case": "mla",
+  "trial": 22,
+  "verdict": "FAIL",
+  "reason": "failed: latency_improved",
+  "continuous_round": true,
+  "campaign1_unrealistic_routing": false,
+  "points": {
+   "1,1048576": {
+    "before_us": 263.7,
+    "after_us": 263.6,
+    "improvement": 0.0002,
+    "check": true,
+    "rel_err": 0.005555555061728439
+   },
+   "128,8192": {
+    "before_us": 486.9,
+    "after_us": 486.9,
+    "improvement": -0.0001,
+    "check": true,
+    "rel_err": 0.01376146687989234
+   },
+   "16,65536": {
+    "before_us": 298.7,
+    "after_us": 298.5,
+    "improvement": 0.0004,
+    "check": true,
+    "rel_err": 0.005136985926064956
+   }
+  },
+  "files": [
+   "kernels/jit/csrc/moe/route_quant_fused.cuh",
+   "kernels/jit/csrc/moe/route_radix.cuh",
+   "kernels/ops/gemm/cutedsl_bf16_gemm.py",
+   "kernels/ops/attention/set_mla_kv_concat_q.py",
+   "kernels/ops/moe/moe_route_quant_fused.py",
+   "srt/models/kimi_k3.py",
+   "srt/models/deepseek_v2.py",
+   "srt/layers/attention/cutedsl_mla_backend.py",
+   "srt/layers/moe/topk.py"
+  ],
+  "diff_lines": 515,
+  "incremental_diff_lines": 45,
+  "note": "null: cutedsl_bf16_gemm tweak, 0.0%",
+  "dir": "trials/mla_22"
+ },
+ {
+  "case": "mla",
+  "trial": 23,
+  "verdict": "PASS",
+  "reason": "all gates passed",
+  "continuous_round": true,
+  "campaign1_unrealistic_routing": false,
+  "points": {
+   "1,1048576": {
+    "before_us": 265.7,
+    "after_us": 261.6,
+    "improvement": 0.0153,
+    "check": true,
+    "rel_err": 0.005555555061728439
+   },
+   "128,8192": {
+    "before_us": 486.0,
+    "after_us": 484.9,
+    "improvement": 0.0022,
+    "check": true,
+    "rel_err": 0.01376146687989234
+   },
+   "16,65536": {
+    "before_us": 298.5,
+    "after_us": 297.4,
+    "improvement": 0.0035,
+    "check": true,
+    "rel_err": 0.005136985926064956
+   }
+  },
+  "files": [
+   "kernels/jit/csrc/moe/route_quant_fused.cuh",
+   "kernels/jit/csrc/moe/route_radix.cuh",
+   "kernels/ops/attention/set_mla_kv_concat_q.py",
+   "kernels/ops/moe/moe_route_quant_fused.py",
+   "srt/models/kimi_k3.py",
+   "srt/layers/attention/cutedsl_mla_backend.py",
+   "srt/layers/moe/topk.py"
+  ],
+  "diff_lines": 524,
+  "incremental_diff_lines": 52,
+  "note": "ACCEPTED: latent_up (7168x3584) and shared_down (7168x6144) -> BF16 TGV kernel (+1.5%)",
+  "dir": "trials/mla_23"
+ },
+ {
+  "case": "mla",
+  "trial": 24,
+  "verdict": "PASS",
+  "reason": "all gates passed",
+  "continuous_round": true,
+  "campaign1_unrealistic_routing": false,
+  "points": {
+   "1,1048576": {
+    "before_us": 261.6,
+    "after_us": 255.4,
+    "improvement": 0.0236,
+    "check": true,
+    "rel_err": 0.005555555061728439
+   },
+   "128,8192": {
+    "before_us": 486.4,
+    "after_us": 475.6,
+    "improvement": 0.022,
+    "check": true,
+    "rel_err": 0.01376146687989234
+   },
+   "16,65536": {
+    "before_us": 298.4,
+    "after_us": 288.3,
+    "improvement": 0.034,
+    "check": true,
+    "rel_err": 0.005136985926064956
+   }
+  },
+  "files": [
+   "kernels/jit/csrc/moe/route_quant_fused.cuh",
+   "kernels/jit/csrc/moe/route_radix.cuh",
+   "kernels/ops/attention/set_mla_kv_concat_q.py",
+   "kernels/ops/moe/moe_route_quant_fused.py",
+   "srt/models/kimi_k3.py",
+   "srt/layers/attention/cutedsl_mla_backend.py",
+   "srt/layers/moe/topk.py"
+  ],
+  "diff_lines": 543,
+  "incremental_diff_lines": 22,
+  "note": "ACCEPTED: shared/routed alt-stream overlap in KimiK3MoE._forward_fused (+2.4%; +2.2% @128x8k, +3.4% @16x64k)",
+  "dir": "trials/mla_24"
+ },
+ {
+  "case": "mla",
+  "trial": 25,
+  "verdict": "PASS",
+  "reason": "all gates passed",
+  "continuous_round": true,
+  "campaign1_unrealistic_routing": false,
+  "points": {
+   "1,1048576": {
+    "before_us": 255.4,
+    "after_us": 253.5,
+    "improvement": 0.0076,
+    "check": true,
+    "rel_err": 0.005555555061728439
+   },
+   "128,8192": {
+    "before_us": 476.6,
+    "after_us": 474.8,
+    "improvement": 0.004,
+    "check": true,
+    "rel_err": 0.01376146687989234
+   },
+   "16,65536": {
+    "before_us": 289.3,
+    "after_us": 288.2,
+    "improvement": 0.0037,
+    "check": true,
+    "rel_err": 0.005136985926064956
+   }
+  },
+  "files": [
+   "kernels/jit/csrc/elementwise/set_mla_kv_concat_q.cuh",
+   "kernels/jit/csrc/moe/route_quant_fused.cuh",
+   "kernels/jit/csrc/moe/route_radix.cuh",
+   "kernels/ops/attention/set_mla_kv_concat_q.py",
+   "kernels/ops/moe/moe_route_quant_fused.py",
+   "srt/models/kimi_k3.py",
+   "srt/layers/attention/trtllm_mla_backend.py",
+   "srt/layers/attention/cutedsl_mla_backend.py",
+   "srt/layers/moe/topk.py"
+  ],
+  "diff_lines": 588,
+  "incremental_diff_lines": 63,
+  "note": "ACCEPTED: is_var_seq=False (FlashInfer persistent TRT-LLM MLA schedule) for the fp8 K3 layout + 16-warp KV-concat CTA at B=1 (+0.8%); verified on a mixed-length batch (rel 0.0046, -7.4% there)",
+  "dir": "trials/mla_25"
+ },
+ {
+  "case": "mla",
+  "trial": 26,
+  "verdict": "FAIL",
+  "reason": "failed: latency_improved",
+  "continuous_round": true,
+  "campaign1_unrealistic_routing": false,
+  "points": {
+   "1,1048576": {
+    "before_us": 253.4,
+    "after_us": 253.4,
+    "improvement": 0.0,
+    "check": true,
+    "rel_err": 0.005555555061728439
+   },
+   "128,8192": {
+    "before_us": 478.7,
+    "after_us": 476.7,
+    "improvement": 0.0042,
+    "check": true,
+    "rel_err": 0.01376146687989234
+   },
+   "16,65536": {
+    "before_us": 288.3,
+    "after_us": 288.2,
+    "improvement": 0.0002,
+    "check": true,
+    "rel_err": 0.005136985926064956
+   }
+  },
+  "files": [
+   "kernels/jit/csrc/elementwise/set_mla_kv_concat_q.cuh",
+   "kernels/jit/csrc/moe/route_quant_fused.cuh",
+   "kernels/jit/csrc/moe/route_radix.cuh",
+   "kernels/ops/attention/set_mla_kv_concat_q.py",
+   "kernels/ops/moe/moe_route_quant_fused.py",
+   "srt/models/kimi_k3.py",
+   "srt/layers/attention/trtllm_mla_backend.py",
+   "srt/layers/attention/cutedsl_mla_backend.py",
+   "srt/layers/moe/topk.py"
+  ],
+  "diff_lines": 588,
+  "incremental_diff_lines": 12,
+  "note": "null: cutedsl_bf16_gemm.py tweak, 0.0%",
+  "dir": "trials/mla_26"
+ },
+ {
+  "case": "mla",
+  "trial": 27,
+  "verdict": "FAIL",
+  "reason": "failed: latency_improved",
+  "continuous_round": true,
+  "campaign1_unrealistic_routing": false,
+  "points": {
+   "1,1048576": {
+    "before_us": 253.5,
+    "after_us": 253.5,
+    "improvement": 0.0,
+    "check": true,
+    "rel_err": 0.005555555061728439
+   },
+   "128,8192": {
+    "before_us": 475.7,
+    "after_us": 475.7,
+    "improvement": -0.0001,
+    "check": true,
+    "rel_err": 0.01376146687989234
+   },
+   "16,65536": {
+    "before_us": 290.2,
+    "after_us": 288.3,
+    "improvement": 0.0067,
+    "check": true,
+    "rel_err": 0.005136985926064956
+   }
+  },
+  "files": [
+   "kernels/jit/csrc/elementwise/set_mla_kv_concat_q.cuh",
+   "kernels/jit/csrc/moe/route_quant_fused.cuh",
+   "kernels/jit/csrc/moe/route_radix.cuh",
+   "kernels/ops/attention/set_mla_kv_concat_q.py",
+   "kernels/ops/moe/moe_route_quant_fused.py",
+   "srt/models/kimi_k3.py",
+   "srt/layers/attention/trtllm_mla_backend.py",
+   "srt/layers/attention/cutedsl_mla_backend.py",
+   "srt/layers/moe/topk.py",
+   "srt/layers/moe/moe_runner/flashinfer_trtllm.py"
+  ],
+  "diff_lines": 602,
+  "incremental_diff_lines": 14,
+  "note": "null: fused finalize+shared JIT kernel regressed and was reverted; flashinfer_trtllm.py tweak 0.0% (MLA plateau)",
+  "dir": "trials/mla_27"
+ }
+]

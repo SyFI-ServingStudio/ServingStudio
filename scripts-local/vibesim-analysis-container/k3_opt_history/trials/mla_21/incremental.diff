@@ -1,0 +1,27 @@
+diff -ruN -x __pycache__ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/trial_20_tree_judged/srt/models/kimi_k3.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/trial_21_tree_judged/srt/models/kimi_k3.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/trial_20_tree_judged/srt/models/kimi_k3.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/trial_21_tree_judged/srt/models/kimi_k3.py	2026-09-24 00:39:51.407072171 -0700
+@@ -195,6 +195,23 @@
+         out = torch.empty(
+             (x.shape[0], weight.shape[0]), dtype=out_dtype, device=x.device
+         )
++    # The merged K3 front keeps FP32 logits so routing remains exact. That
++    # output dtype used to force this small decode GEMM through cuBLAS even
++    # when the SM100 CuTe TGV kernel was available; its FP32-output variant
++    # keeps the same FP32 accumulator and is useful only for the small graph
++    # buckets where its tile count fits one wave.
++    if (
++        out is not None
++        and out.dtype == torch.float32
++        and x.dtype == torch.bfloat16
++        and weight.dtype == torch.bfloat16
++        and x.shape[0] <= 16
++        and tuple(weight.shape) in ((15984, 7168), (6016, 7168))
++    ):
++        from sglang.kernels.ops.gemm.cutedsl_bf16_gemm import cutedsl_bf16_gemm_out
++
++        cutedsl_bf16_gemm_out(x, weight, out)
++        return out
+     if x.dtype == torch.bfloat16 and weight.dtype == torch.bfloat16:
+         from sglang.srt.layers.quantization.unquant import get_bf16_gemm_backend
+ 

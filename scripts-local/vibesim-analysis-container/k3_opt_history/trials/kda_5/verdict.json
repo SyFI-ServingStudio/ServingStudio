@@ -1,0 +1,16 @@
+{
+  "agent_container": "iteropt_k3_kda_run_5",
+  "case_key": "1754b10ddd07",
+  "points": {},
+  "driver_sha": "8a8554bd9333",
+  "changed_files": [
+    "kernels/ops/attention/kda_fused_decode.py",
+    "srt/models/kimi_k3.py"
+  ],
+  "diff_patch": "/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda/trial_5_tree_judged.patch",
+  "diff_lines": 57,
+  "verdict": "FAIL",
+  "reason": "point (128, 8192) failed on agent tree: RuntimeError: Tensor match failed for Tensor<129, 12, 128, 128>[strides=<196608, 16384, 128, 1>, dtype=bfloat16, device=cuda:0] at /sgl-workspace/sglang/python/sglang/kernels/jit/csrc/attention/kda_fused_decode.cuh:980\n- Root cause: Dtype value [bfloat16] not in the allowed options: [float32]",
+  "trial": 5,
+  "agent_exit": 124
+}

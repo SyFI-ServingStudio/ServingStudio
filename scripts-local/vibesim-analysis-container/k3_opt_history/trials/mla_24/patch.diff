@@ -1,0 +1,543 @@
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/pristine_tree/kernels/jit/csrc/moe/route_quant_fused.cuh /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/trial_24_tree_judged/kernels/jit/csrc/moe/route_quant_fused.cuh
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/pristine_tree/kernels/jit/csrc/moe/route_quant_fused.cuh	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/trial_24_tree_judged/kernels/jit/csrc/moe/route_quant_fused.cuh	2026-09-23 19:25:59.719453784 -0700
+@@ -9,9 +9,9 @@
+ // standalone route_radix body (same TU, same flags — no fast-math, which the
+ // routing bit-exactness contract requires and the quant math tolerates: its
+ // only transcendentals are explicit intrinsics and exact bit manipulation),
+-// and QuantTrait::run is the per_token_group_quant math. Specialized like
+-// route_radix itself: 896 experts, top-16, and a 3584-wide bf16 activation row
+-// (112 ue8m0 groups of 32 = 224 lanes, exactly the routing block width).
++// and QuantTrait::run is the per_token_group_quant math. The JIT exposes the
++// original 896-expert/top-16 shape and the production EP8 local 112/top-2
++// shape; both use the same 3584-wide activation quantization.
+ 
+ #include "../gemm/per_token_group_quant.cuh"
+ #include "route_radix.cuh"
+@@ -41,13 +41,32 @@
+ inline constexpr uint32_t kQuantGroupsPerRow_ = LargeRouterRadixTrait::kBlockSize / RouteQuantTrait::kNumLanes;
+ inline constexpr uint32_t kQuantHidden_ = kQuantGroupsPerRow_ * RouteQuantTrait::kGroupSize;  // 3584
+ 
+-template <bool kUsePDL, typename TScore, typename TX>
+-__global__ __launch_bounds__(LargeRouterRadixTrait::kBlockSize)  //
++struct LocalRouterRadixTrait : moe::radix::RadixSelectBase {
++  static constexpr uint32_t kNumExperts = 112;
++  static constexpr uint32_t kTopK = 2;
++  // The quant half needs one two-lane subwarp for each of the 112 groups.
++  // The router uses the first 112 scalar entries and masks the rest.
++  static constexpr uint32_t kBlockSize = 224;
++  static constexpr uint32_t kVecSize = 1;
++  static constexpr uint32_t kNumWarps = kBlockSize / 32;
++
++  struct Smem {
++    uint32_t warp_sum[3][kNumWarps];
++    MatchBin match[kRadixRounds];
++    uint32_t histogram[kRadixSize];
++    int32_t wid[kTopK];
++    uint32_t wkey[kTopK];
++    fp32_t wact[kTopK];
++  };
++};
++
++template <typename RouterTrait, bool kUsePDL, typename TScore, typename TX>
++__global__ __launch_bounds__(RouterTrait::kBlockSize)  //
+     void route_quant_fused_kernel(const __grid_constant__ RouteQuantFusedParams params) {
+   const auto M = static_cast<uint32_t>(params.route.M);
+   if (blockIdx.x < M) {
+-    __shared__ typename LargeRouterRadixTrait::Smem smem;
+-    route_radix_block<kUsePDL, TScore>(params.route, smem);
++    __shared__ typename RouterTrait::Smem smem;
++    route_radix_block<RouterTrait, kUsePDL, TScore>(params.route, smem);
+   } else {
+     // Quant CTAs read the same primary-kernel output (the fused-front GEMM)
+     // as the routing CTAs, so they carry their own PDL wait/trigger.
+@@ -138,7 +157,7 @@
+ 
+ #define SGL_ROUTE_QUANT_LAUNCH(TS, TX)                                    \
+   LaunchKernel(2 * M, LargeRouterRadixTrait::kBlockSize, device.unwrap()) \
+-      .enable_pdl(kUsePDL)(route_quant_fused_kernel<kUsePDL, TS, TX>, params)
++      .enable_pdl(kUsePDL)(route_quant_fused_kernel<LargeRouterRadixTrait, kUsePDL, TS, TX>, params)
+ 
+     if (score_dtype.is_type<fp32_t>()) {
+       if (x_dtype.is_type<fp32_t>()) {
+@@ -157,4 +176,116 @@
+   }
+ };
+ 
++// The local EP8 shape has different routing constants from the full-model
++// radix kernel. Keep a separate wrapper so the common JIT module can dispatch
++// without compiling a runtime-sized router.
++template <bool kUsePDL>
++struct RouteQuantFusedLocalKernel {
++  static void
++  run(const tvm::ffi::TensorView scores,
++      const tvm::ffi::TensorView bias,
++      const tvm::ffi::TensorView out_w,
++      const tvm::ffi::TensorView out_i,
++      const tvm::ffi::TensorView out_packed,
++      const tvm::ffi::TensorView x,
++      const tvm::ffi::TensorView out_q,
++      const tvm::ffi::TensorView out_s,
++      int64_t topk,
++      double routed_scaling_factor,
++      bool renormalize,
++      bool apply_scale) {
++    using namespace host;
++
++    auto M_ = SymbolicSize{"num_tokens"};
++    auto N_ = SymbolicSize{"num_experts"};
++    auto K_ = SymbolicSize{"topk"};
++    auto device = SymbolicDevice{};
++    device.set_options<kDLCUDA>();
++
++    auto score_dtype = SymbolicDType{};
++    TensorMatcher({M_, N_})
++        .with_dtype<bf16_t, fp32_t>(score_dtype)
++        .with_device(device)
++        .with_strides({-1, 1})
++        .verify(scores);
++    TensorMatcher({N_}).with_dtype<fp32_t>().with_device(device).verify(bias);
++    TensorMatcher({M_, K_}).with_dtype<fp32_t>().with_device(device).verify(out_w);
++    TensorMatcher({M_, K_}).with_dtype<int32_t>().with_device(device).verify(out_i);
++    TensorMatcher({M_, K_})
++        .with_dtype<int32_t>()
++        .with_strides({-1, 1})
++        .with_device(device)
++        .verify(out_packed);
++    auto x_dtype = SymbolicDType{};
++    TensorMatcher({M_, -1})
++        .with_dtype<bf16_t, fp32_t>(x_dtype)
++        .with_device(device)
++        .with_strides({-1, 1})
++        .verify(x);
++
++    RuntimeCheck(
++        N_.unwrap() == LocalRouterRadixTrait::kNumExperts &&
++            K_.unwrap() == LocalRouterRadixTrait::kTopK &&
++            topk == LocalRouterRadixTrait::kTopK,
++        "route_quant_fused local wrapper requires N=112, K=2");
++    RuntimeCheck(
++        scores.stride(0) % 4 == 0,
++        "route_quant_fused: scores row stride must be a multiple of 4");
++
++    // The activation row is shared with the full-model specialization, so its
++    // quantization layout and numerical path stay identical.
++    const auto quant_params =
++        x_dtype.is_type<fp32_t>()
++            ? build_quant_context<RouteQuantTraitT<fp32_t>, /*kMasked=*/false>(x, out_q, out_s).params
++            : build_quant_context<RouteQuantTraitT<bf16_t>, /*kMasked=*/false>(x, out_q, out_s).params;
++    RuntimeCheck(
++        quant_params.hidden_size == kQuantHidden_,
++        "route_quant_fused is specialized for a 3584-wide activation row");
++    RuntimeCheck(
++        quant_params.num_tokens == static_cast<uint32_t>(M_.unwrap()),
++        "route_quant_fused: scores and activations must have the same token count");
++
++    const auto M = static_cast<uint32_t>(M_.unwrap());
++    if (M == 0) return;
++
++    const auto params = RouteQuantFusedParams{
++        .route =
++            {scores.data_ptr(),
++             static_cast<const fp32_t*>(bias.data_ptr()),
++             static_cast<fp32_t*>(out_w.data_ptr()),
++             static_cast<int32_t*>(out_i.data_ptr()),
++             static_cast<int32_t*>(out_packed.data_ptr()),
++             static_cast<int>(M),
++             static_cast<long long>(scores.stride(0)),
++             static_cast<long long>(out_w.stride(0)),
++             static_cast<long long>(out_i.stride(0)),
++             static_cast<long long>(out_packed.stride(0)),
++             static_cast<float>(routed_scaling_factor),
++             renormalize ? 1 : 0,
++             apply_scale ? 1 : 0,
++             /*sorted=*/0},
++        .quant = quant_params,
++    };
++
++#define SGL_ROUTE_QUANT_LOCAL_LAUNCH(TS, TX)                                      \
++  LaunchKernel(2 * M, LocalRouterRadixTrait::kBlockSize, device.unwrap())         \
++      .enable_pdl(kUsePDL)(route_quant_fused_kernel<LocalRouterRadixTrait, kUsePDL, TS, TX>, params)
++
++    if (score_dtype.is_type<fp32_t>()) {
++      if (x_dtype.is_type<fp32_t>()) {
++        SGL_ROUTE_QUANT_LOCAL_LAUNCH(fp32_t, fp32_t);
++      } else {
++        SGL_ROUTE_QUANT_LOCAL_LAUNCH(fp32_t, bf16_t);
++      }
++    } else {
++      if (x_dtype.is_type<fp32_t>()) {
++        SGL_ROUTE_QUANT_LOCAL_LAUNCH(bf16_t, fp32_t);
++      } else {
++        SGL_ROUTE_QUANT_LOCAL_LAUNCH(bf16_t, bf16_t);
++      }
++    }
++#undef SGL_ROUTE_QUANT_LOCAL_LAUNCH
++  }
++};
++
+ }  // namespace sglang
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/pristine_tree/kernels/jit/csrc/moe/route_radix.cuh /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/trial_24_tree_judged/kernels/jit/csrc/moe/route_radix.cuh
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/pristine_tree/kernels/jit/csrc/moe/route_radix.cuh	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/trial_24_tree_judged/kernels/jit/csrc/moe/route_radix.cuh	2026-09-23 18:57:48.116294641 -0700
+@@ -117,10 +117,11 @@
+ // Whole-CTA routing body, callable from other kernels (the fused
+ // route+quant launch runs it on its first M CTAs). Routes row `blockIdx.x`;
+ // every thread of the 224-wide CTA must enter (block barriers inside).
+-template <bool kUsePDL, typename TScore>
+-SGL_DEVICE void route_radix_block(const RouteRadixParams& params, typename LargeRouterRadixTrait::Smem& smem) {
++template <typename RouterTrait, bool kUsePDL, typename TScore>
++SGL_DEVICE void route_radix_block(
++    const RouteRadixParams& params, typename RouterTrait::Smem& smem) {
+   using namespace device;
+-  using T = LargeRouterRadixTrait;
++  using T = RouterTrait;
+   constexpr uint32_t kVecSize = T::kVecSize;
+   constexpr uint32_t kRadixLanes = T::kRadixSize / 2;  // 128: 2 bins per thread
+   enum { BAR_RESERVED = 0, BAR_SUM = 1 };
+@@ -135,33 +136,51 @@
+   // ---- Load + key transform: thread tx owns experts [4*tx, 4*tx+4) ----
+   uint32_t keys[kVecSize];
+   float act[kVecSize];  // raw sigmoid (weight source) — never NaN-sanitized
++  bool active[kVecSize];
+   {
+-    const auto scores = static_cast<const TScore*>(params.scores) + bx * params.scores_stride;
+-    AlignedVector<fp32x2_t, kVecSize / 2> bias_vec;
+-    // bf16: 2x bf16x2 (8B row loads); fp32: 2x fp32x2 (16B row loads). The
+-    // radix math below is fp32 either way — only the load width differs.
+-    AlignedVector<packed_t<TScore>, kVecSize / 2> scores_vec;
+-
+     // Bias may be produced by a preceding cast or fill kernel (the caller
+     // does not guarantee a frozen weight), so wait before loading either input.
+     PDLWaitPrimary<kUsePDL>();
+-    bias_vec.load(params.bias, tx);
+-    scores_vec.load(scores, tx);
++    if constexpr (kVecSize == 1) {
++      // Local EP shards have 112 experts. The 224-thread launch is retained
++      // for the quant half, so inactive threads participate in barriers but do
++      // not read past the score or bias rows.
++      const auto expert = tx;
++      if (expert < T::kNumExperts) {
++        const auto scores = static_cast<const TScore*>(params.scores) + bx * params.scores_stride;
++        const float score = static_cast<float>(scores[expert]);
++        const float sx = moe::radix::sigmoid_match(score);
++        act[0] = sx;
++        keys[0] = moe::radix::biased_to_key(
++            moe::radix::nan_floor(sx + static_cast<float>(params.bias[expert])));
++      } else {
++        act[0] = 0.0f;
++        keys[0] = 0u;
++      }
++    } else {
++      const auto scores = static_cast<const TScore*>(params.scores) + bx * params.scores_stride;
++      AlignedVector<fp32x2_t, kVecSize / 2> bias_vec;
++      // bf16: 2x bf16x2 (8B row loads); fp32: 2x fp32x2 (16B row loads). The
++      // radix math below is fp32 either way — only the load width differs.
++      AlignedVector<packed_t<TScore>, kVecSize / 2> scores_vec;
++      bias_vec.load(params.bias, tx);
++      scores_vec.load(scores, tx);
+ 
+ #pragma unroll
+-    for (uint32_t i = 0; i < kVecSize / 2; ++i) {
+-      fp32x2_t xy;
+-      if constexpr (std::is_same_v<TScore, fp32_t>) {
+-        xy = scores_vec[i];
+-      } else {
+-        xy = cast<fp32x2_t>(scores_vec[i]);
++      for (uint32_t i = 0; i < kVecSize / 2; ++i) {
++        fp32x2_t xy;
++        if constexpr (std::is_same_v<TScore, fp32_t>) {
++          xy = scores_vec[i];
++        } else {
++          xy = cast<fp32x2_t>(scores_vec[i]);
++        }
++        const auto [x, y] = xy;
++        const auto sx = moe::radix::sigmoid_match(x), sy = moe::radix::sigmoid_match(y);
++        keys[2 * i + 0] = moe::radix::biased_to_key(moe::radix::nan_floor(sx + bias_vec[i].x));
++        keys[2 * i + 1] = moe::radix::biased_to_key(moe::radix::nan_floor(sy + bias_vec[i].y));
++        act[2 * i + 0] = sx;
++        act[2 * i + 1] = sy;
+       }
+-      const auto [x, y] = xy;
+-      const auto sx = moe::radix::sigmoid_match(x), sy = moe::radix::sigmoid_match(y);
+-      keys[2 * i + 0] = moe::radix::biased_to_key(moe::radix::nan_floor(sx + bias_vec[i].x));
+-      keys[2 * i + 1] = moe::radix::biased_to_key(moe::radix::nan_floor(sy + bias_vec[i].y));
+-      act[2 * i + 0] = sx;
+-      act[2 * i + 1] = sy;
+     }
+   }
+ 
+@@ -170,10 +189,9 @@
+   //   active[i]      <=> key's top 8r bits == threshold's top 8r bits
+   //   total_active    = size of the active set
+   //   topk            = winners still to take from the active set (1..total_active)
+-  bool active[kVecSize];
+ #pragma unroll
+   for (uint32_t i = 0; i < kVecSize; ++i) {
+-    active[i] = true;
++    active[i] = tx * kVecSize + i < T::kNumExperts;
+   }
+ 
+   uint32_t total_active = T::kNumExperts;
+@@ -255,7 +273,8 @@
+   if (take_all_equals) {
+ #pragma unroll
+     for (uint32_t i = 0; i < kVecSize; ++i) {
+-      selected[i] = active[i] || (keys[i] & examined_mask) > threshold;
++      const bool valid = tx * kVecSize + i < T::kNumExperts;
++      selected[i] = valid && (active[i] || (keys[i] & examined_mask) > threshold);
+     }
+   } else {  // deterministic tie-break
+     uint32_t cnt = 0;
+@@ -268,7 +287,8 @@
+     for (uint32_t i = 0; i < kVecSize; ++i) {
+       const bool eq_win = active[i] && rank < topk;
+       if (active[i]) ++rank;
+-      selected[i] = eq_win || (keys[i] & examined_mask) > threshold;
++      const bool valid = tx * kVecSize + i < T::kNumExperts;
++      selected[i] = valid && (eq_win || (keys[i] & examined_mask) > threshold);
+     }
+   }
+ 
+@@ -324,11 +344,11 @@
+   }
+ }
+ 
+-template <bool kUsePDL, typename TScore>
+-__global__ __launch_bounds__(LargeRouterRadixTrait::kBlockSize)  //
++template <typename RouterTrait, bool kUsePDL, typename TScore>
++__global__ __launch_bounds__(RouterTrait::kBlockSize)  //
+     void route_radix_kernel(const __grid_constant__ RouteRadixParams params) {
+-  __shared__ typename LargeRouterRadixTrait::Smem smem;
+-  route_radix_block<kUsePDL, TScore>(params, smem);
++  __shared__ typename RouterTrait::Smem smem;
++  route_radix_block<RouterTrait, kUsePDL, TScore>(params, smem);
+ }
+ 
+ // ---------------------------------------------------------------------------
+@@ -642,10 +662,10 @@
+ 
+     if (score_dtype.is_type<fp32_t>()) {
+       LaunchKernel(M, LargeRouterRadixTrait::kBlockSize, device.unwrap())
+-          .enable_pdl(kUsePDL)(route_radix_kernel<kUsePDL, fp32_t>, params);
++          .enable_pdl(kUsePDL)(route_radix_kernel<LargeRouterRadixTrait, kUsePDL, fp32_t>, params);
+     } else {
+       LaunchKernel(M, LargeRouterRadixTrait::kBlockSize, device.unwrap())
+-          .enable_pdl(kUsePDL)(route_radix_kernel<kUsePDL, bf16_t>, params);
++          .enable_pdl(kUsePDL)(route_radix_kernel<LargeRouterRadixTrait, kUsePDL, bf16_t>, params);
+     }
+   }
+ };
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/pristine_tree/kernels/ops/attention/set_mla_kv_concat_q.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/trial_24_tree_judged/kernels/ops/attention/set_mla_kv_concat_q.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/pristine_tree/kernels/ops/attention/set_mla_kv_concat_q.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/trial_24_tree_judged/kernels/ops/attention/set_mla_kv_concat_q.py	2026-09-24 05:13:29.429002644 -0700
+@@ -129,8 +129,11 @@
+ 
+ 
+ def _pick_num_warps(total_items: int) -> int:
+-    # Same GB300 heuristic as set_mla_kv_buffer: small grids favour more CTAs.
+-    return 4 if total_items <= 768 else 8
++    # The fused fp8 path has only 13 items at B=1 (one KV row plus 12 query
++    # heads). On B200, eight-warps CTAs reduce launch scheduling overhead for
++    # these small grids; the conversion work and memory destinations are
++    # unchanged.
++    return 8
+ 
+ 
+ def set_mla_kv_concat_q(
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/pristine_tree/kernels/ops/moe/moe_route_quant_fused.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/trial_24_tree_judged/kernels/ops/moe/moe_route_quant_fused.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/pristine_tree/kernels/ops/moe/moe_route_quant_fused.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/trial_24_tree_judged/kernels/ops/moe/moe_route_quant_fused.py	2026-09-23 18:59:30.176080096 -0700
+@@ -39,6 +39,8 @@
+ # the win itself, which is launch overhead) only makes sense at small decode
+ # batches. Above the cap the callers run the unfused chain.
+ _MAX_TOKENS = 64
++_LOCAL_NUM_EXPERTS = 112
++_LOCAL_TOPK = 2
+ 
+ 
+ @cache_once
+@@ -48,7 +50,10 @@
+         "moe_route_quant_fused",
+         *args,
+         cuda_files=["moe/route_quant_fused.cuh"],
+-        cuda_wrappers=[("run", f"RouteQuantFusedKernel<{args}>::run")],
++        cuda_wrappers=[
++            ("run", f"RouteQuantFusedKernel<{args}>::run"),
++            ("run_local", f"RouteQuantFusedLocalKernel<{args}>::run"),
++        ],
+         # No fast-math: the routing half must stay bit-identical to
+         # route_radix (see its module comment); the quant half's math is
+         # fast-math-independent (explicit intrinsics + bit manipulation).
+@@ -75,8 +80,18 @@
+ ) -> bool:
+     """route_radix coverage plus the quant half: [M<=64, 3584] bf16 rows with
+     32B-aligned starts (base and stride), same token count as the scores."""
++    route_covered = moe_route_radix.covered(scores, bias, topk) or (
++        scores.dim() == 2
++        and scores.size(1) == _LOCAL_NUM_EXPERTS
++        and int(topk) == _LOCAL_TOPK
++        and scores.dtype in (torch.bfloat16, torch.float32)
++        and bias.dtype == torch.float32
++        and scores.stride(1) == 1
++        and scores.stride(0) % 4 == 0
++        and bias.is_contiguous()
++    )
+     return (
+-        moe_route_radix.covered(scores, bias, topk)
++        route_covered
+         and x.dim() == 2
+         and x.shape[0] == scores.shape[0]
+         and 0 < x.shape[0] <= _MAX_TOKENS
+@@ -108,7 +123,8 @@
+     out_packed = torch.empty((M, topk), dtype=torch.int32, device=device)
+     out_q = torch.empty((M, _HIDDEN), dtype=torch.float8_e4m3fn, device=device)
+     out_s = torch.empty((M, _NUM_GROUPS // 4), dtype=torch.int32, device=device)
+-    _jit_module().run(
++    run = _jit_module().run_local if scores.size(1) == _LOCAL_NUM_EXPERTS else _jit_module().run
++    run(
+         scores,
+         bias,
+         out_w,
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/pristine_tree/srt/layers/attention/cutedsl_mla_backend.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/trial_24_tree_judged/srt/layers/attention/cutedsl_mla_backend.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/pristine_tree/srt/layers/attention/cutedsl_mla_backend.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/trial_24_tree_judged/srt/layers/attention/cutedsl_mla_backend.py	2026-09-24 05:09:41.286563150 -0700
+@@ -62,7 +62,10 @@
+             skip_prefill,
+             kv_indptr_buf,
+             q_indptr_decode_buf,
+-            backend="cute-dsl",
++            # The public backend is retained for DCP support, but ordinary
++            # one-token decode can use the cached TRT-LLM MLA implementation.
++            # DCP takes the explicit CuteDSL path in _run_decode_kernel below.
++            backend="trtllm-gen",
+         )
+ 
+     # ------------------------------------------------------------------
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/pristine_tree/srt/layers/moe/topk.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/trial_24_tree_judged/srt/layers/moe/topk.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/pristine_tree/srt/layers/moe/topk.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/trial_24_tree_judged/srt/layers/moe/topk.py	2026-09-23 19:01:25.420769931 -0700
+@@ -1896,8 +1896,34 @@
+             # router, which subsumes the jit grouped_topk.cuh kernel here.
+             from sglang.kernels.ops.moe.moe_fused_gate import moe_fused_gate as jit_gate
+ 
++            # K3's EP-local 112-expert shape lands in this generic branch
++            # (the large 896-expert route+quant fast path has a separate
++            # dispatch above). If the MoE layer staged the routed activation,
++            # let the shape-specialized handoff fuse routing, TRT-LLM packing,
++            # and MXFP8 quantization; unsupported shapes fall through to the
++            # original Triton router.
++            _gating = (
++                gating_output
++                if gating_output.dtype == torch.bfloat16
++                else gating_output.to(dtype=torch.float32)
++            )
++            from sglang.srt.layers.moe import route_quant_handoff
++
++            fused = route_quant_handoff.try_route_quant_fused(
++                _gating,
++                correction_bias.to(dtype=torch.float32),
++                topk,
++                num_fused_shared_experts=num_fused_shared_experts,
++                renormalize=renormalize,
++                routed_scaling_factor=routed_scaling_factor,
++                apply_routed_scaling_factor_on_output=bool(
++                    apply_routed_scaling_factor_on_output
++                ),
++            )
++            if fused is not None:
++                return fused
+             return jit_gate(
+-                gating_output,
++                _gating,
+                 correction_bias.to(torch.float32),
+                 topk,
+                 scoring_func="sigmoid",
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/pristine_tree/srt/models/kimi_k3.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/trial_24_tree_judged/srt/models/kimi_k3.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/pristine_tree/srt/models/kimi_k3.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/trial_24_tree_judged/srt/models/kimi_k3.py	2026-09-24 05:40:30.721083030 -0700
+@@ -195,6 +195,46 @@
+         out = torch.empty(
+             (x.shape[0], weight.shape[0]), dtype=out_dtype, device=x.device
+         )
++    # The merged K3 front keeps FP32 logits so routing remains exact. That
++    # output dtype used to force this small decode GEMM through cuBLAS even
++    # when the SM100 CuTe TGV kernel was available; its FP32-output variant
++    # keeps the same FP32 accumulator and is useful only for the small graph
++    # buckets where its tile count fits one wave.
++    if (
++        out is not None
++        and out.dtype == torch.float32
++        and x.dtype == torch.bfloat16
++        and weight.dtype == torch.bfloat16
++        and x.shape[0] <= 16
++        and tuple(weight.shape) in ((15984, 7168), (6016, 7168))
++    ):
++        from sglang.kernels.ops.gemm.cutedsl_bf16_gemm import cutedsl_bf16_gemm_out
++
++        cutedsl_bf16_gemm_out(x, weight, out)
++        return out
++    if (
++        out is None
++        and x.dtype == torch.bfloat16
++        and weight.dtype == torch.bfloat16
++        and x.shape[0] <= 16
++        and tuple(weight.shape) == (7168, 3584)
++    ):
++        from sglang.kernels.ops.gemm.cutedsl_bf16_gemm import cutedsl_bf16_gemm
++
++        return cutedsl_bf16_gemm(x, weight)
++    if (
++        out is not None
++        and out.dtype == torch.bfloat16
++        and out.is_contiguous()
++        and x.dtype == torch.bfloat16
++        and weight.dtype == torch.bfloat16
++        and x.shape[0] <= 16
++        and tuple(weight.shape) == (7168, 6144)
++    ):
++        from sglang.kernels.ops.gemm.cutedsl_bf16_gemm import cutedsl_bf16_gemm_out
++
++        cutedsl_bf16_gemm_out(x, weight, out)
++        return out
+     if x.dtype == torch.bfloat16 and weight.dtype == torch.bfloat16:
+         from sglang.srt.layers.quantization.unquant import get_bf16_gemm_backend
+ 
+@@ -1318,8 +1358,16 @@
+                     prefix_sum,
+                 )
+         else:  # single collective over the flat [latent | shared] pair
+-            self._forward_shared(gate_up, shared_output)
+-            self._forward_routed(hidden_states, router_logits, routed_input, latent)
++            if self.alt_stream is not None:
++                current_stream = torch.cuda.current_stream()
++                self.alt_stream.wait_stream(current_stream)
++                with torch.cuda.stream(self.alt_stream):
++                    self._forward_shared(gate_up, shared_output)
++                self._forward_routed(hidden_states, router_logits, routed_input, latent)
++                current_stream.wait_stream(self.alt_stream)
++            else:
++                self._forward_shared(gate_up, shared_output)
++                self._forward_routed(hidden_states, router_logits, routed_input, latent)
+             if self.fuse_ar_norm and k3_ar_fusion.enabled():
+                 fused_norm = True
+                 k3_ar_fusion.all_reduce_norm(
+@@ -1336,7 +1384,17 @@
+         shared_output = buf[latent_numel:].view(num_tokens, hidden_size)
+         if not fused_norm:
+             latent = self._latent_norm(latent)
+-        out, _ = self.routed_expert_up_proj(latent)
++        up_weight = getattr(self.routed_expert_up_proj, "weight", None)
++        if (
++            isinstance(up_weight, torch.Tensor)
++            and up_weight.dtype == torch.bfloat16
++            and up_weight.is_contiguous()
++            and tuple(up_weight.shape) == (7168, 3584)
++            and latent.shape[0] <= 16
++        ):
++            out = _k3_bf16_gemm(latent, up_weight)
++        else:
++            out, _ = self.routed_expert_up_proj(latent)
+ 
+         # prefetch_bc: b (shared_output) was produced by the all-reduce and
+         # c (prefix_sum) even earlier; the AR is a plain launch (full

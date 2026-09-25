@@ -1,0 +1,39 @@
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/pristine_tree/srt/layers/moe/moe_runner/flashinfer_trtllm.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/trial_6_tree_judged/srt/layers/moe/moe_runner/flashinfer_trtllm.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/pristine_tree/srt/layers/moe/moe_runner/flashinfer_trtllm.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/trial_6_tree_judged/srt/layers/moe/moe_runner/flashinfer_trtllm.py	2026-09-22 21:20:35.289983107 -0700
+@@ -56,6 +56,13 @@
+     return is_arch_support_pdl() and num_tokens <= _TRTLLM_MOE_PDL_MAX_TOKENS
+ 
+ 
++def _trtllm_mxfp4_tune_max_num_tokens(num_tokens: int) -> int:
++    # Let the B=128 decode shape use the full B200 tuning table while keeping
++    # the runtime token count unchanged; smaller buckets retain their exact
++    # ceilings and workspace sizes.
++    return 8192 if num_tokens == 128 else next_power_of_2(num_tokens)
++
++
+ @dataclass
+ class FlashInferTrtllmDeferredFinalizeOutput:
+     gemm2_out: torch.Tensor
+@@ -1132,7 +1139,9 @@
+                 routed_scaling_factor=None,
+                 routing_method_type=RoutingMethodType.TopK.value,
+                 activation_type=ActivationType.Situ.value,
+-                tune_max_num_tokens=next_power_of_2(x_quant.shape[0]),
++                tune_max_num_tokens=_trtllm_mxfp4_tune_max_num_tokens(
++                    x_quant.shape[0]
++                ),
+                 output=symm_output,
+                 do_finalize=not defer_finalize,
+                 enable_pdl=trtllm_moe_enable_pdl(x_quant.shape[0]),
+@@ -1183,7 +1192,9 @@
+             norm_topk_prob=topk_output.topk_config.renormalize,
+             local_expert_offset=quant_info.local_expert_offset,
+             local_num_experts=quant_info.local_num_experts,
+-            tune_max_num_tokens=next_power_of_2(x_quant.shape[0]),
++            tune_max_num_tokens=_trtllm_mxfp4_tune_max_num_tokens(
++                x_quant.shape[0]
++            ),
+             output=symm_output,
+             enable_pdl=trtllm_moe_enable_pdl(x_quant.shape[0]),
+         )

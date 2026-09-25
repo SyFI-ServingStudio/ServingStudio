@@ -1,0 +1,397 @@
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda/pristine_tree/kernels/jit/csrc/moe/route_quant_fused.cuh /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda/trial_21_tree_judged/kernels/jit/csrc/moe/route_quant_fused.cuh
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda/pristine_tree/kernels/jit/csrc/moe/route_quant_fused.cuh	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda/trial_21_tree_judged/kernels/jit/csrc/moe/route_quant_fused.cuh	2026-09-24 01:28:17.422460484 -0700
+@@ -41,6 +41,117 @@
+ inline constexpr uint32_t kQuantGroupsPerRow_ = LargeRouterRadixTrait::kBlockSize / RouteQuantTrait::kNumLanes;
+ inline constexpr uint32_t kQuantHidden_ = kQuantGroupsPerRow_ * RouteQuantTrait::kGroupSize;  // 3584
+ 
++// The production single-rank K3 benchmark uses the EP-local 112-expert,
++// top-2 router.  It is small enough that a deterministic shared-memory top-2
++// reduction is cheaper than launching the generic Triton router, while the
++// quant half remains exactly the same QuantTrait path as the large router.
++struct SmallRouteSmem {
++  float biased[128];
++  float activated[128];
++  int32_t ids[128];
++  float selected_activated[2];
++  int32_t selected_ids[2];
++};
++
++inline constexpr uint32_t kSmallNumExperts_ = 112;
++inline constexpr uint32_t kSmallTopK_ = 2;
++
++template <bool kUsePDL, typename TScore>
++SGL_DEVICE void route_small_top2(const RouteRadixParams& params, SmallRouteSmem& smem) {
++  const uint32_t tx = threadIdx.x;
++  const uint32_t row = blockIdx.x;
++  device::PDLWaitPrimary<kUsePDL>();
++
++  if (tx < 128) {
++    if (tx < kSmallNumExperts_) {
++      const auto* scores = static_cast<const TScore*>(params.scores) + row * params.scores_stride;
++      const float raw = [&] {
++        if constexpr (std::is_same_v<TScore, fp32_t>) {
++          return scores[tx];
++        } else {
++          return device::cast<fp32_t>(scores[tx]);
++        }
++      }();
++      const float activated = moe::radix::sigmoid_match(raw);
++      smem.activated[tx] = activated;
++      smem.biased[tx] = moe::radix::nan_floor(activated + params.bias[tx]);
++      smem.ids[tx] = static_cast<int32_t>(tx);
++    } else {
++      smem.activated[tx] = 0.0f;
++      smem.biased[tx] = -1.0e30f;
++      smem.ids[tx] = INT32_MAX;
++    }
++  }
++  __syncthreads();
++
++#pragma unroll
++  for (uint32_t selected = 0; selected < kSmallTopK_; ++selected) {
++#pragma unroll
++    for (uint32_t stride = 64; stride > 0; stride >>= 1) {
++      if (tx < stride) {
++        const float lhs = smem.biased[tx];
++        const float rhs = smem.biased[tx + stride];
++        const int32_t lhs_id = smem.ids[tx];
++        const int32_t rhs_id = smem.ids[tx + stride];
++        if (rhs > lhs || (rhs == lhs && rhs_id < lhs_id)) {
++          smem.biased[tx] = rhs;
++          smem.activated[tx] = smem.activated[tx + stride];
++          smem.ids[tx] = rhs_id;
++        }
++      }
++      __syncthreads();
++    }
++    if (tx == 0) {
++      smem.selected_activated[selected] = smem.activated[0];
++      smem.selected_ids[selected] = smem.ids[0];
++    }
++    __syncthreads();
++    if (tx < 128 && smem.ids[tx] == smem.selected_ids[selected]) {
++      smem.biased[tx] = -1.0e30f;
++      smem.ids[tx] = INT32_MAX;
++    }
++    __syncthreads();
++  }
++
++  if (tx == 0) {
++    const float sum = smem.selected_activated[0] + smem.selected_activated[1];
++    const float norm = (sum > 0.0f) ? sum : 1.0f;
++#pragma unroll
++    for (uint32_t k = 0; k < kSmallTopK_; ++k) {
++      float weight = smem.selected_activated[k];
++      if (params.renormalize) weight /= norm;
++      if (params.apply_scale) weight *= params.routed_scaling_factor;
++      const int64_t out_w = static_cast<int64_t>(row) * params.out_w_stride + k;
++      const int64_t out_i = static_cast<int64_t>(row) * params.out_i_stride + k;
++      params.out_w[out_w] = weight;
++      params.out_i[out_i] = smem.selected_ids[k];
++      if (params.out_packed != nullptr) {
++        const auto bits = static_cast<uint32_t>(__bfloat16_as_ushort(__float2bfloat16_rn(weight)));
++        params.out_packed[static_cast<int64_t>(row) * params.out_packed_stride + k] =
++            static_cast<int32_t>((static_cast<uint32_t>(smem.selected_ids[k]) << 16) | bits);
++      }
++    }
++  }
++  device::PDLTriggerSecondary<kUsePDL>();
++}
++
++template <bool kUsePDL, typename TScore, typename TX>
++__global__ __launch_bounds__(256) void route_quant_fused_small_kernel(
++    const __grid_constant__ RouteQuantFusedParams params) {
++  const auto M = static_cast<uint32_t>(params.route.M);
++  if (blockIdx.x < M) {
++    __shared__ SmallRouteSmem smem;
++    route_small_top2<kUsePDL, TScore>(params.route, smem);
++  } else {
++    device::PDLWaitPrimary<kUsePDL>();
++    const uint32_t token_idx = blockIdx.x - M;
++    const uint32_t group_idx = threadIdx.x / RouteQuantTraitT<TX>::kNumLanes;
++    const uint32_t lane_id = threadIdx.x % RouteQuantTraitT<TX>::kNumLanes;
++    RouteQuantTraitT<TX>::run(params.quant, /*expert_idx=*/0, token_idx, group_idx, lane_id);
++    device::PDLTriggerSecondary<kUsePDL>();
++  }
++}
++
+ template <bool kUsePDL, typename TScore, typename TX>
+ __global__ __launch_bounds__(LargeRouterRadixTrait::kBlockSize)  //
+     void route_quant_fused_kernel(const __grid_constant__ RouteQuantFusedParams params) {
+@@ -95,9 +206,10 @@
+     TensorMatcher({M_, K_}).with_dtype<int32_t>().with_device(device).verify(out_i);
+     TensorMatcher({M_, K_}).with_dtype<int32_t>().with_strides({-1, 1}).with_device(device).verify(out_packed);
+ 
+-    RuntimeCheck(
+-        N_.unwrap() == kNumExperts_ && K_.unwrap() == kTopK_ && topk == kTopK_,
+-        "route_quant_fused is specialized for N=896, K=16");
++    const bool large_route = N_.unwrap() == kNumExperts_ && K_.unwrap() == kTopK_ && topk == kTopK_;
++    const bool small_route =
++        N_.unwrap() == kSmallNumExperts_ && K_.unwrap() == kSmallTopK_ && topk == kSmallTopK_;
++    RuntimeCheck(large_route || small_route, "route_quant_fused unsupported routing shape");
+     RuntimeCheck(scores.stride(0) % 4 == 0, "route_quant_fused: scores row stride must be a multiple of 4");
+ 
+     // Quant half: shape/stride/alignment checks + byte-stride munging shared
+@@ -136,24 +248,45 @@
+         .quant = quant_params,
+     };
+ 
+-#define SGL_ROUTE_QUANT_LAUNCH(TS, TX)                                    \
+-  LaunchKernel(2 * M, LargeRouterRadixTrait::kBlockSize, device.unwrap()) \
++#define SGL_ROUTE_QUANT_LAUNCH(TS, TX)                                      \
++  LaunchKernel(2 * M, LargeRouterRadixTrait::kBlockSize, device.unwrap())   \
+       .enable_pdl(kUsePDL)(route_quant_fused_kernel<kUsePDL, TS, TX>, params)
+ 
+-    if (score_dtype.is_type<fp32_t>()) {
+-      if (x_dtype.is_type<fp32_t>()) {
+-        SGL_ROUTE_QUANT_LAUNCH(fp32_t, fp32_t);
++#define SGL_SMALL_ROUTE_QUANT_LAUNCH(TS, TX)                                \
++  LaunchKernel(2 * M, 256, device.unwrap())                                 \
++      .enable_pdl(kUsePDL)(route_quant_fused_small_kernel<kUsePDL, TS, TX>, params)
++
++    if (large_route) {
++      if (score_dtype.is_type<fp32_t>()) {
++        if (x_dtype.is_type<fp32_t>()) {
++          SGL_ROUTE_QUANT_LAUNCH(fp32_t, fp32_t);
++        } else {
++          SGL_ROUTE_QUANT_LAUNCH(fp32_t, bf16_t);
++        }
+       } else {
+-        SGL_ROUTE_QUANT_LAUNCH(fp32_t, bf16_t);
++        if (x_dtype.is_type<fp32_t>()) {
++          SGL_ROUTE_QUANT_LAUNCH(bf16_t, fp32_t);
++        } else {
++          SGL_ROUTE_QUANT_LAUNCH(bf16_t, bf16_t);
++        }
+       }
+     } else {
+-      if (x_dtype.is_type<fp32_t>()) {
+-        SGL_ROUTE_QUANT_LAUNCH(bf16_t, fp32_t);
++      if (score_dtype.is_type<fp32_t>()) {
++        if (x_dtype.is_type<fp32_t>()) {
++          SGL_SMALL_ROUTE_QUANT_LAUNCH(fp32_t, fp32_t);
++        } else {
++          SGL_SMALL_ROUTE_QUANT_LAUNCH(fp32_t, bf16_t);
++        }
+       } else {
+-        SGL_ROUTE_QUANT_LAUNCH(bf16_t, bf16_t);
++        if (x_dtype.is_type<fp32_t>()) {
++          SGL_SMALL_ROUTE_QUANT_LAUNCH(bf16_t, fp32_t);
++        } else {
++          SGL_SMALL_ROUTE_QUANT_LAUNCH(bf16_t, bf16_t);
++        }
+       }
+     }
+ #undef SGL_ROUTE_QUANT_LAUNCH
++#undef SGL_SMALL_ROUTE_QUANT_LAUNCH
+   }
+ };
+ 
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda/pristine_tree/kernels/ops/attention/fla/fused_recurrent.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda/trial_21_tree_judged/kernels/ops/attention/fla/fused_recurrent.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda/pristine_tree/kernels/ops/attention/fla/fused_recurrent.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda/trial_21_tree_judged/kernels/ops/attention/fla/fused_recurrent.py	2026-09-23 06:51:33.279699466 -0700
+@@ -628,6 +628,8 @@
+     # part (~9.6 TB/s) where this triton kernel tops out at ~5 TB/s holding a
+     # [BV, K] register tile per warp. ULP-level output differences only
+     # (reduction order); small batches keep triton (launch-bound anyway).
++    # kda_packed_decode.cuh implements both the standard softplus gate and
++    # KDA's safe lower-bound gate; pass the bound through to that kernel.
+     if use_qk_l2norm_in_kernel:
+         from sglang.kernels.ops.attention import kda_packed_decode as kda_decode_cuda
+ 
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda/pristine_tree/kernels/ops/moe/moe_route_quant_fused.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda/trial_21_tree_judged/kernels/ops/moe/moe_route_quant_fused.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda/pristine_tree/kernels/ops/moe/moe_route_quant_fused.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda/trial_21_tree_judged/kernels/ops/moe/moe_route_quant_fused.py	2026-09-24 01:25:58.999970815 -0700
+@@ -1,4 +1,4 @@
+-"""Fused K3 MoE-front prep: radix routing + trtllm id pack + mxfp8 quant.
++"""Fused K3 MoE-front prep: routing + trtllm id pack + mxfp8 quant.
+ 
+ One launch replaces the three tiny kernels between the K3 fused-front GEMM and
+ the trtllm-gen routed-MoE op at decode batch sizes (route_radix -> triton
+@@ -9,10 +9,12 @@
+ standalone kernels' device code, so ids/weights, packed ids, and quantized
+ activations are bit-identical to the unfused chain.
+ 
+-Specialized like route_radix itself: 896 experts, top-16, bf16/fp32 scores,
+-and a 3584-wide bf16 activation row quantized to fp8 with row-major packed
+-UE8M0 group-32 scales (the trtllm-gen SiTU MoE input format). Wired into
+-serving through sglang.srt.layers.moe.route_quant_handoff.
++The original radix specialization handles 896 experts/top-16.  The K3
++single-rank decode shape also has a 112-expert/top-2 specialization; its small
++router uses the same fp32 score/weight contract and shares this quantization
++half.  Both produce the 3584-wide row-major packed UE8M0 input expected by
++the trtllm-gen SiTU MoE path. Wired into serving through
++sglang.srt.layers.moe.route_quant_handoff.
+ """
+ 
+ from __future__ import annotations
+@@ -39,6 +41,8 @@
+ # the win itself, which is launch overhead) only makes sense at small decode
+ # batches. Above the cap the callers run the unfused chain.
+ _MAX_TOKENS = 64
++_SMALL_NUM_EXPERTS = 112
++_SMALL_TOPK = 2
+ 
+ 
+ @cache_once
+@@ -73,10 +77,19 @@
+ def covered(
+     scores: torch.Tensor, bias: torch.Tensor, topk: int, x: torch.Tensor
+ ) -> bool:
+-    """route_radix coverage plus the quant half: [M<=64, 3584] bf16 rows with
+-    32B-aligned starts (base and stride), same token count as the scores."""
++    """Route/quant coverage for the large and local K3 router shapes."""
++    route_covered = moe_route_radix.covered(scores, bias, topk) or (
++        scores.dim() == 2
++        and scores.size(1) == _SMALL_NUM_EXPERTS
++        and int(topk) == _SMALL_TOPK
++        and scores.dtype in (torch.bfloat16, torch.float32)
++        and bias.dtype == torch.float32
++        and scores.stride(1) == 1
++        and scores.stride(0) % 4 == 0
++        and bias.is_contiguous()
++    )
+     return (
+-        moe_route_radix.covered(scores, bias, topk)
++        route_covered
+         and x.dim() == 2
+         and x.shape[0] == scores.shape[0]
+         and 0 < x.shape[0] <= _MAX_TOKENS
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda/pristine_tree/srt/layers/attention/linear/kda_backend.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda/trial_21_tree_judged/srt/layers/attention/linear/kda_backend.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda/pristine_tree/srt/layers/attention/linear/kda_backend.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda/trial_21_tree_judged/srt/layers/attention/linear/kda_backend.py	2026-09-23 06:11:15.556367933 -0700
+@@ -735,11 +735,9 @@
+             conv_state_indices=cache_indices,
+         )
+ 
+-        # The packed kernel assumes one token per request.
+-        if (
+-            self.kernel_dispatcher.supports_packed_decode
+-            and getattr(layer, "lower_bound", None) is None
+-        ):
++        # The packed kernel assumes one token per request. Its Triton KDA
++        # implementation also handles the KDA safe gate (lower_bound).
++        if self.kernel_dispatcher.supports_packed_decode:
+             assert qkv.shape[0] == cache_indices.shape[0], (
+                 "KDA packed decode requires one token per sequence (T=1): "
+                 f"got {qkv.shape[0]} tokens for {cache_indices.shape[0]} requests."
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda/pristine_tree/srt/layers/moe/topk.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda/trial_21_tree_judged/srt/layers/moe/topk.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda/pristine_tree/srt/layers/moe/topk.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda/trial_21_tree_judged/srt/layers/moe/topk.py	2026-09-24 01:25:36.600833320 -0700
+@@ -1803,6 +1803,36 @@
+         return topk_weights, topk_ids
+     else:
+         num_experts = gating_output.shape[1]
++        # K3 may stage the routed activation before entering TopK.  Try the
++        # fused route+pack+quant handoff before the generic small-router branch
++        # as well as the large K3 radix branch: the production single-rank
++        # shape is 112 local experts and top-2, not 896/top-16.
++        if (
++            _is_cuda
++            and num_expert_group == 1
++            and (topk_group is None or topk_group == 1)
++            and num_fused_shared_experts == 0
++        ):
++            from sglang.srt.layers.moe import route_quant_handoff
++
++            _gating = (
++                gating_output
++                if gating_output.dtype == torch.bfloat16
++                else gating_output.to(dtype=torch.float32)
++            )
++            fused = route_quant_handoff.try_route_quant_fused(
++                _gating,
++                correction_bias.to(dtype=torch.float32),
++                topk,
++                num_fused_shared_experts=num_fused_shared_experts,
++                renormalize=renormalize,
++                routed_scaling_factor=routed_scaling_factor,
++                apply_routed_scaling_factor_on_output=bool(
++                    apply_routed_scaling_factor_on_output
++                ),
++            )
++            if fused is not None:
++                return fused
+         # The JIT triton router (single fused kernel: scoring + bias + topk +
+         # renorm) handles the ungrouped case with arbitrary num_experts/topk.
+         # Original user: Kimi K2 (384 experts). Also dispatch shapes the other
+@@ -1853,25 +1883,6 @@
+                 if gating_output.dtype == torch.bfloat16
+                 else gating_output.to(dtype=torch.float32)
+             )
+-            # K3 staged fusion: when the model layer staged the routed
+-            # activations (route_quant_handoff), the radix route, the trtllm id
+-            # pack and the mxfp8 quant run as one launch. Bit-identical
+-            # (weights, ids); a miss falls through to the unfused router.
+-            from sglang.srt.layers.moe import route_quant_handoff
+-
+-            fused = route_quant_handoff.try_route_quant_fused(
+-                _gating,
+-                correction_bias.to(dtype=torch.float32),
+-                topk,
+-                num_fused_shared_experts=num_fused_shared_experts,
+-                renormalize=renormalize,
+-                routed_scaling_factor=routed_scaling_factor,
+-                apply_routed_scaling_factor_on_output=bool(
+-                    apply_routed_scaling_factor_on_output
+-                ),
+-            )
+-            if fused is not None:
+-                return fused
+             return jit_gate(
+                 _gating,
+                 correction_bias.to(dtype=torch.float32),
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda/pristine_tree/srt/models/kimi_k3.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda/trial_21_tree_judged/srt/models/kimi_k3.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda/pristine_tree/srt/models/kimi_k3.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda/trial_21_tree_judged/srt/models/kimi_k3.py	2026-09-23 07:07:11.894971186 -0700
+@@ -196,6 +196,20 @@
+             (x.shape[0], weight.shape[0]), dtype=out_dtype, device=x.device
+         )
+     if x.dtype == torch.bfloat16 and weight.dtype == torch.bfloat16:
++        if (
++            out_dtype is None
++            and weight.shape == (7168, 6144)
++            and x.shape[0] <= 128
++            and x.is_contiguous()
++        ):
++            from sglang.kernels.ops.gemm.cutedsl_bf16_gemm import (
++                cutedsl_bf16_gemm,
++                cutedsl_bf16_gemm_out,
++            )
++
++            if out is None:
++                return cutedsl_bf16_gemm(x, weight)
++            return cutedsl_bf16_gemm_out(x, weight, out)
+         from sglang.srt.layers.quantization.unquant import get_bf16_gemm_backend
+ 
+         if get_bf16_gemm_backend().is_cutedsl():
+@@ -1318,8 +1332,27 @@
+                     prefix_sum,
+                 )
+         else:  # single collective over the flat [latent | shared] pair
+-            self._forward_shared(gate_up, shared_output)
++            # With one rank there is no collective to overlap, so issue the
++            # independent shared-down GEMM on the existing side stream while
++            # the routed MXFP4 path uses the current stream. Keep the
++            # multi-rank and AR-fusion schedules unchanged.
++            overlap_shared = (
++                self.alt_stream is not None
++                and self.tp_size == 1
++                and not k3_ar_fusion.enabled()
++            )
++            shared_event = None
++            if overlap_shared:
++                current_stream = torch.cuda.current_stream()
++                self.alt_stream.wait_stream(current_stream)
++                with torch.cuda.stream(self.alt_stream):
++                    self._forward_shared(gate_up, shared_output)
++                    shared_event = self.alt_stream.record_event()
++            else:
++                self._forward_shared(gate_up, shared_output)
+             self._forward_routed(hidden_states, router_logits, routed_input, latent)
++            if shared_event is not None:
++                current_stream.wait_event(shared_event)
+             if self.fuse_ar_norm and k3_ar_fusion.enabled():
+                 fused_norm = True
+                 k3_ar_fusion.all_reduce_norm(

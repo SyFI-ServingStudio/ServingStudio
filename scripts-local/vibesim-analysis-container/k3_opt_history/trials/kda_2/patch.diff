@@ -1,0 +1,13 @@
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda/pristine_tree/srt/models/kimi_k3.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda/trial_2_tree_judged/srt/models/kimi_k3.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda/pristine_tree/srt/models/kimi_k3.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda/trial_2_tree_judged/srt/models/kimi_k3.py	2026-09-22 12:03:38.824272077 -0700
+@@ -1336,6 +1336,9 @@
+         shared_output = buf[latent_numel:].view(num_tokens, hidden_size)
+         if not fused_norm:
+             latent = self._latent_norm(latent)
++        # PLANTED CONTROL: pure slowdown, numerics untouched (5 x 64MiB memsets)
++        for _ in range(5):
++            torch.zeros(32 * 1024 * 1024, dtype=torch.bfloat16, device=latent.device)
+         out, _ = self.routed_expert_up_proj(latent)
+ 
+         # prefetch_bc: b (shared_output) was produced by the all-reduce and

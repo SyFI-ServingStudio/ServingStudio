@@ -1,0 +1,229 @@
+#!/usr/bin/env python3
+"""Build the Kimi-K3 optimization-history knowledge base (warm start for new workload cases).
+
+Scans iter_opt_eval_k3_<case>/ (trial verdicts, judged patches, rounds.jsonl, the agents'
+per-iteration hypothesis/analysis/result files) and writes k3_opt_history/:
+
+  INDEX.md                      one row per judged trial/round: case, verdict, per-point deltas,
+                                technique one-liner, files, links
+  history.json                  the same, machine-readable
+  TECHNIQUES.md                 curated levers + dead ends (hand-written, copied from
+                                opt_history_techniques.md)
+  trials/<case>_<k>/verdict.json
+  trials/<case>_<k>/patch.diff          judged diff vs the PRISTINE tree (cumulative in the
+                                        continuous loop)
+  trials/<case>_<k>/incremental.diff    continuous rounds: diff vs the tree the round started
+                                        from (= what THIS round changed)
+  trials/<case>_<k>/agent_iterations.md every iteration's hypothesis + analysis + result
+                                        (ideas tried inside the trial, incl. ones the agent
+                                        itself rejected)
+
+The directory is mounted read-only into the agent container (issue json "mounts") and the task
+template tells the agent to consult it before forming hypotheses.
+Usage: build_opt_history.py [--out k3_opt_history] [--cases kda,mla,...]
+"""
+import argparse, json, os, pathlib, re, shutil, subprocess, time
+
+HERE = pathlib.Path(__file__).resolve().parent
+SRC_EXT = (".py", ".cu", ".cuh", ".h", ".hpp", ".cc", ".cpp", ".inc", ".jinja")
+
+# Hand-curated one-liners (what the trial changed / why it was rejected). Keyed by (case, k).
+# Trials 1-3 were pipeline controls (null / planted slowdown / planted numerics), 4-7 ran on
+# the campaign-1 workload with collapsed MoE routing (effect sizes unreliable, see TECHNIQUES).
+NOTES = {
+    ("kda", 1): "control: pristine tree (null)", ("kda", 2): "control: planted slowdown",
+    ("kda", 3): "control: planted numerics", ("mla", 1): "control: pristine tree (null)",
+    ("mla", 2): "control: planted slowdown", ("mla", 3): "control: planted numerics",
+    ("kda", 4): "campaign 1: shared experts overlapped on the alt stream (+1.5%, bit-exact)",
+    ("kda", 5): "campaign 1: forced the fused KDA decode kernel onto the bf16 state -> crashed at B=128",
+    ("kda", 6): "campaign 1: best campaign-1 KDA result (-2.9% @128x8k)",
+    ("kda", 7): "campaign 1: bf16 port of the fused KDA decode JIT kernel (.cuh); works, +1..3%, rel 0.017",
+    ("kda", 8): "shared-expert down GEMM -> CuteDSL bf16 GEMM + side-stream overlap (-3.1%/-4.7%/-5.9%, bit-exact; 5% gate FAIL)",
+    ("kda", 9): "589-line bf16 port of the fused KDA CUDA kernel; correct but no gain (-0.3%)",
+    ("kda", 10): "packed KDA decode fast path kept for K3's lower-bounded gate + overlap (-4.6%, bit-exact; gate FAIL by 0.4pt)",
+    ("kda", 11): "fast path + Triton recurrent-kernel launch tuning (num_warps) + overlap (-4.4%, bit-exact)",
+    ("kda", 20): "infra: judge OOM (167 GB co-tenant on the shared GPU); not a result",
+    ("kda", 21): "route+quant specialization broke numerics at B=32/1 (rel 0.42) -> correctness FAIL",
+    ("kda", 22): "ACCEPTED: bf16-state port of the fused KDA decode JIT kernel (kda_fused_decode.cuh + .py): +1.3% @128, +2.5% @32, +3.1% @1",
+    ("kda", 23): "null: five ideas rejected by the agent itself; +0.3% below the 0.5% floor",
+    ("kda", 24): "null: tree returned to the seed",
+    ("kda", 25): "null: +0.3% below the 0.56% needed (KDA plateau)",
+    ("mla", 4): "campaign 1: cute-dsl -> trtllm-gen MLA decode + shared-expert overlap (-11.3% @1x1M, -2.1% @128x8k)",
+    ("mla", 5): "campaign 1: cute-dsl -> trtllm-gen MLA decode (-14.5% @1x1M)",
+    ("mla", 6): "campaign 1: see agent_iterations.md",
+    ("mla", 7): "campaign 1 (re-run with the correct MLA oracle): see agent_iterations.md",
+    ("mla", 8): "ACCEPTED: non-DCP decode routed cute-dsl -> TRT-LLM MLA generation kernel (15 lines, cutedsl_mla_backend.py): -12.1% @1x1M, bit-exact",
+    ("mla", 20): "ACCEPTED: route_quant_fused JIT specialized for the 112-expert/top-2 shape (+0.75%; harness-specific, production is 896/top-16)",
+    ("mla", 21): "ACCEPTED: fp32-output front GEMMs (15984x7168 / 6016x7168, m<=16) cuBLAS -> CuTe TGV (+1.5% @1x1M, +3.2% @128x8k)",
+    ("mla", 22): "null: cutedsl_bf16_gemm tweak, 0.0%",
+    ("mla", 23): "ACCEPTED: latent_up (7168x3584) and shared_down (7168x6144) -> BF16 TGV kernel (+1.5%)",
+    ("mla", 24): "ACCEPTED: shared/routed alt-stream overlap in KimiK3MoE._forward_fused (+2.4%; +2.2% @128x8k, +3.4% @16x64k)",
+    ("mla", 25): "ACCEPTED: is_var_seq=False (FlashInfer persistent TRT-LLM MLA schedule) for the fp8 K3 layout + 16-warp KV-concat CTA at B=1 (+0.8%); verified on a mixed-length batch (rel 0.0046, -7.4% there)",
+    ("mla", 26): "null: cutedsl_bf16_gemm.py tweak, 0.0%",
+    ("mla", 27): "null: fused finalize+shared JIT kernel regressed and was reverted; flashinfer_trtllm.py tweak 0.0% (MLA plateau)",
+}
+CAMPAIGN1 = {("kda", k) for k in (4, 5, 6, 7)} | {("mla", k) for k in (4, 5, 6, 7)}
+
+
+def sh(argv, **kw):
+    return subprocess.run(argv, capture_output=True, text=True, **kw).stdout
+
+
+def trial_k(path):
+    m = re.match(r"trial_(\d+)_verdict\.json$", path.name)
+    return int(m.group(1)) if m else None
+
+
+def src_only(diff_text):
+    """Keep only hunks of source files (drop pycache/binary noise)."""
+    out, keep = [], False
+    for line in diff_text.splitlines():
+        if line.startswith("diff ") or line.startswith("Only in "):
+            keep = line.endswith(SRC_EXT) or any(line.rstrip().endswith(e) for e in SRC_EXT)
+            if line.startswith("Only in ") and "__pycache__" in line:
+                keep = False
+        if keep:
+            out.append(line)
+    return "\n".join(out) + ("\n" if out else "")
+
+
+def agent_iterations(opt_run):
+    parts = []
+    log_md = opt_run / "log.md"
+    if log_md.exists():
+        parts.append("## agent log.md\n\n" + log_md.read_text(errors="replace").strip() + "\n")
+    for it in sorted(opt_run.glob("iter_*")):
+        sec = [f"## {it.name}"]
+        for name in ("hypothesis.md", "analysis.md"):
+            f = it / name
+            if f.exists():
+                txt = f.read_text(errors="replace").strip()
+                if len(txt) > 6000:
+                    txt = txt[:6000] + "\n[... truncated]"
+                sec.append(f"### {name}\n\n{txt}\n")
+        rj = it / "result.json"
+        if rj.exists():
+            txt = rj.read_text(errors="replace").strip()
+            sec.append("### result.json\n\n```\n" + (txt[:2500] + ("\n[... truncated]" if len(txt) > 2500 else "")) + "\n```\n")
+        dp = it / "diff.patch"
+        if dp.exists():
+            try:
+                n = sum(1 for _ in open(dp, errors="replace"))
+            except OSError:
+                n = -1
+            sec.append(f"(diff.patch: {n} lines, files: "
+                       + ", ".join(sorted(set(re.findall(r"^\+\+\+ .*?(python/sglang/\S+|\S+\.(?:py|cuh?|h))", dp.read_text(errors='replace'), re.M))))[:400] + ")\n")
+        if len(sec) > 1:
+            parts.append("\n".join(sec))
+    return "\n".join(parts)
+
+
+def build_case(case, out, hist):
+    d = HERE / f"iter_opt_eval_k3_{case}"
+    if not d.is_dir():
+        return
+    rounds = {}
+    rj = d / "rounds.jsonl"
+    if rj.exists():
+        for line in rj.read_text().splitlines():
+            if line.strip():
+                r = json.loads(line)
+                rounds[r["round"]] = r
+    verdicts = sorted([(trial_k(p), p) for p in d.glob("trial_*_verdict.json") if trial_k(p) is not None])
+    # continuous rounds: the tree a round started from = judged tree of the previous PASS round,
+    # else the seed (kda: stacked_tree_judged; mla: pristine).
+    prev_pass_tree = None
+    seed_tree = d / "stacked_tree_judged" if (d / "stacked_tree_judged").is_dir() else d / "pristine_tree"
+    for k, vp in verdicts:
+        v = json.loads(vp.read_text())
+        tdir = out / "trials" / f"{case}_{k}"
+        tdir.mkdir(parents=True, exist_ok=True)
+        shutil.copy(vp, tdir / "verdict.json")
+        patch = d / f"trial_{k}_tree_judged.patch"
+        if patch.exists():
+            shutil.copy(patch, tdir / "patch.diff")
+        continuous = bool(v.get("baseline_tree")) or k in rounds
+        incr_lines = None
+        if continuous and (d / f"trial_{k}_tree_judged").is_dir():
+            base = prev_pass_tree or seed_tree
+            if base.is_dir():
+                diff = sh(["diff", "-ruN", "-x", "__pycache__", str(base), str(d / f"trial_{k}_tree_judged")])
+                diff = src_only(diff)
+                (tdir / "incremental.diff").write_text(diff)
+                incr_lines = diff.count("\n")
+        opt_run = d / f"trial_{k}_opt_run"
+        if opt_run.is_dir():
+            txt = agent_iterations(opt_run)
+            if txt.strip():
+                (tdir / "agent_iterations.md").write_text(f"# {case.upper()} trial {k}: agent iterations\n\n" + txt)
+        pts = {}
+        for pk, p in (v.get("points") or {}).items():
+            pts[pk] = {"before_us": round(p["before_us"], 1), "after_us": round(p["after_us"], 1),
+                       "improvement": round(p["improvement"], 4),
+                       "check": p["correctness"].get("pass"), "rel_err": p["correctness"].get("max_rel_err")}
+        rec = {"case": case, "trial": k, "verdict": v.get("verdict"), "reason": v.get("reason"),
+               "continuous_round": continuous, "campaign1_unrealistic_routing": (case, k) in CAMPAIGN1,
+               "points": pts, "files": v.get("changed_files") or [], "diff_lines": v.get("diff_lines"),
+               "incremental_diff_lines": incr_lines, "note": NOTES.get((case, k), ""),
+               "dir": f"trials/{case}_{k}"}
+        hist.append(rec)
+        if continuous and v.get("verdict") == "PASS" and (d / f"trial_{k}_tree_judged").is_dir():
+            prev_pass_tree = d / f"trial_{k}_tree_judged"
+    # extra judged trees (stacked, seed rechecks, mixed point) -> plain copies of verdicts
+    for extra in ("stacked_verdict.json", "best_tree_seed1_verdict.json", "best_tree_seed2_verdict.json",
+                  "best_tree_mixed_verdict.json"):
+        if (d / extra).exists():
+            (out / "trials" / f"{case}_extra").mkdir(parents=True, exist_ok=True)
+            shutil.copy(d / extra, out / "trials" / f"{case}_extra" / extra)
+
+
+def write_index(out, hist):
+    lines = ["# Kimi-K3 optimization history (warm start index)", "",
+             f"*generated {time.strftime('%F %T')} by build_opt_history.py; read TECHNIQUES.md first*", "",
+             "Each row is one judged trial/round. `Δ` = latency change per point (positive = faster), "
+             "`chk` = output+state match vs the pristine goldens. Continuous rounds start from the previous "
+             "accepted tree; their `incremental.diff` is what that round changed. Campaign-1 rows (c1) ran "
+             "on a workload with collapsed MoE routing -- directions are valid, effect sizes are not.", "",
+             "| case | trial | verdict | points (before→after µs, Δ, chk) | files | note | dir |",
+             "|---|---|---|---|---|---|---|"]
+    for r in hist:
+        pts = "; ".join(f"{k}: {p['before_us']}→{p['after_us']} ({p['improvement']*100:+.1f}%, {'ok' if p['check'] else 'FAIL'})"
+                        for k, p in r["points"].items())
+        files = ", ".join(pathlib.PurePosixPath(f).name for f in r["files"])[:160]
+        tag = " (c1)" if r["campaign1_unrealistic_routing"] else ""
+        lines.append(f"| {r['case']} | {r['trial']}{tag} | {r['verdict']} | {pts} | {files} | {r['note']} | `{r['dir']}` |")
+    lines += ["", "## How to use", "",
+              "1. `TECHNIQUES.md`: accepted levers (already in your tree if you were seeded with a best tree) and dead ends with the reason each failed.",
+              "2. `grep -ril <kernel or file name> trials/*/agent_iterations.md` to see every hypothesis ever tried around that code, with the measured result.",
+              "3. `trials/<case>_<k>/incremental.diff` is the minimal patch of an accepted round -- the fastest way to transfer a lever to a new workload point.",
+              "4. Workloads differ (decode B=128 vs B=512 vs chunked prefill): a dead end at one point can be a win at another and vice versa. Re-measure; never assume.",
+              ""]
+    (out / "INDEX.md").write_text("\n".join(lines))
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--out", default=str(HERE / "k3_opt_history"))
+    ap.add_argument("--cases", default="kda,mla,kda_b512,mla_b512,kda_prefill,mla_prefill")
+    a = ap.parse_args()
+    out = pathlib.Path(a.out)
+    if out.exists():
+        shutil.rmtree(out)
+    (out / "trials").mkdir(parents=True)
+    hist = []
+    for case in a.cases.split(","):
+        build_case(case.strip(), out, hist)
+    hist.sort(key=lambda r: (r["case"], r["trial"]))
+    (out / "history.json").write_text(json.dumps(hist, indent=1))
+    tech = HERE / "opt_history_techniques.md"
+    if tech.exists():
+        shutil.copy(tech, out / "TECHNIQUES.md")
+    write_index(out, hist)
+    n_pass = sum(1 for r in hist if r["verdict"] == "PASS")
+    print(f"wrote {out}: {len(hist)} trials ({n_pass} PASS), "
+          f"{sum(1 for p in out.rglob('agent_iterations.md'))} agent_iterations.md, "
+          f"{sum(1 for p in out.rglob('incremental.diff'))} incremental diffs")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,104 @@
+{
+  "agent_container": "iteropt_k3_mla_run_8",
+  "case_key": "fd09204b0499",
+  "points": {
+    "1,1048576": {
+      "before_us": 304.639995098114,
+      "before_sigma_us": 0.02024344329250359,
+      "after_us": 267.67998933792114,
+      "after_lat": [
+        267.8399980068207,
+        267.64801144599915,
+        267.7119970321655,
+        267.67998933792114,
+        267.64801144599915
+      ],
+      "improvement": 0.1213,
+      "noise_frac_3sigma": 0.0002,
+      "correctness": {
+        "max_abs_err": 0.0,
+        "max_rel_err": 0.0,
+        "mean_rel_err": 0.0,
+        "nan": false,
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "latency_mode": "graph",
+      "primary": true
+    },
+    "128,8192": {
+      "before_us": 493.02399158477783,
+      "before_sigma_us": 0.7904993187472725,
+      "after_us": 484.9280118942261,
+      "after_lat": [
+        484.9280118942261,
+        484.9280118942261,
+        484.8639965057373,
+        484.9280118942261,
+        484.95998978614807
+      ],
+      "improvement": 0.0164,
+      "noise_frac_3sigma": 0.0048,
+      "correctness": {
+        "max_abs_err": 0.1875,
+        "max_rel_err": 0.01376146687989234,
+        "mean_rel_err": 0.0009116546716541052,
+        "nan": false,
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "latency_mode": "graph",
+      "primary": false
+    },
+    "16,65536": {
+      "before_us": 302.5279939174652,
+      "before_sigma_us": 0.39108235088827115,
+      "after_us": 300.54399371147156,
+      "after_lat": [
+        300.57600140571594,
+        301.56800150871277,
+        300.5119860172272,
+        300.54399371147156,
+        300.5119860172272
+      ],
+      "improvement": 0.0066,
+      "noise_frac_3sigma": 0.0039,
+      "correctness": {
+        "max_abs_err": 0.0703125,
+        "max_rel_err": 0.005136985926064956,
+        "mean_rel_err": 0.00035468171699903905,
+        "nan": false,
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "latency_mode": "graph",
+      "primary": false
+    }
+  },
+  "driver_sha": "7030da61d198",
+  "changed_files": [
+    "srt/layers/attention/cutedsl_mla_backend.py"
+  ],
+  "diff_patch": "/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/trial_8_tree_judged.patch",
+  "diff_lines": 15,
+  "gates": {
+    "correctness": true,
+    "latency_improved": true,
+    "no_secondary_regression": true
+  },
+  "required_improvement": 0.05,
+  "before_us": 304.639995098114,
+  "latency_us": 267.67998933792114,
+  "recovered_frac": 0.1213,
+  "correctness": {
+    "pass": true
+  },
+  "golden_dir": "/raid/yilegu/eval_goldens/golden_k3_fd09204b0499",
+  "verdict": "PASS",
+  "reason": "all gates passed",
+  "trial": 8,
+  "agent_exit": 0
+}

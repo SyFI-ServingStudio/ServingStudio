@@ -36,6 +36,21 @@ Once analysis points you at a node, map it to the **source** under `$CHECKOUT/py
 that produces it, then confirm with the profiler's per-kernel table (below) that the kernels
 you expect are the ones actually launched.
 
+## Prior optimization history (warm start) — `$OPT_HISTORY` (read-only)
+This layer has already been optimized on other workload points by earlier agents.
+- `$OPT_HISTORY/TECHNIQUES.md` — the accepted levers (most are already applied in the tree you
+  start from) and the dead ends, each with the reason it failed. **Read this first.**
+- `$OPT_HISTORY/INDEX.md` — every judged trial with per-point before→after numbers and a
+  one-line note; `$OPT_HISTORY/history.json` is the same, machine-readable.
+- `$OPT_HISTORY/trials/<case>_<k>/incremental.diff` — the minimal patch of an accepted round
+  (the fastest way to transfer a lever); `agent_iterations.md` — every hypothesis that trial
+  tried, with its measured result. `grep -ril <kernel or file> $OPT_HISTORY/trials/*/agent_iterations.md`
+  before touching a kernel shows what was already tried around it.
+The workload here differs from those runs. Check whether each inherited lever still holds on
+these points (e.g. small-m GEMM kernels must not engage at large m; decode-only paths do not run
+in prefill) and treat dead ends as hints, not verdicts — re-measure. In each `hypothesis.md` cite
+the prior trial(s) you built on or ruled out.
+
 ## Measurement tool — `/tmp/kimi_single_layer_decode.py`
 Builds exactly ONE decoder layer of this model in the production per-GPU shape with seeded
 weights/state, drives real decode steps through the framework's own attention backends and

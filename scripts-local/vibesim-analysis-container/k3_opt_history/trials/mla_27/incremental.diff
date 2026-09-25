@@ -1,0 +1,14 @@
+diff -ruN -x __pycache__ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/trial_25_tree_judged/srt/layers/moe/moe_runner/flashinfer_trtllm.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/trial_27_tree_judged/srt/layers/moe/moe_runner/flashinfer_trtllm.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/trial_25_tree_judged/srt/layers/moe/moe_runner/flashinfer_trtllm.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/trial_27_tree_judged/srt/layers/moe/moe_runner/flashinfer_trtllm.py	2026-09-24 09:38:21.754328956 -0700
+@@ -1132,7 +1132,9 @@
+                 routed_scaling_factor=None,
+                 routing_method_type=RoutingMethodType.TopK.value,
+                 activation_type=ActivationType.Situ.value,
+-                tune_max_num_tokens=next_power_of_2(x_quant.shape[0]),
++                tune_max_num_tokens=(
++                    8 if x_quant.shape[0] == 1 else next_power_of_2(x_quant.shape[0])
++                ),
+                 output=symm_output,
+                 do_finalize=not defer_finalize,
+                 enable_pdl=trtllm_moe_enable_pdl(x_quant.shape[0]),

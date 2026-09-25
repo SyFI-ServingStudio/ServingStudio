@@ -1,0 +1,45 @@
+diff -ruN -x __pycache__ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/trial_21_tree_judged/kernels/ops/gemm/cutedsl_bf16_gemm.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/trial_22_tree_judged/kernels/ops/gemm/cutedsl_bf16_gemm.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/trial_21_tree_judged/kernels/ops/gemm/cutedsl_bf16_gemm.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/trial_22_tree_judged/kernels/ops/gemm/cutedsl_bf16_gemm.py	2026-09-24 02:19:27.816872652 -0700
+@@ -1324,6 +1324,11 @@
+ 
+ def _pick_tactic(m: int, n: int, k: int) -> int:
+     """Pick the first ladder tactic whose grid fits one wave of the SMs."""
++    # The Kimi-K3 B=1 merged front is a one-row FP32-output GEMM. Two-CTA
++    # tactic 18 has the same accumulation and output contract but benchmarks
++    # faster than the one-CTA wave selected by the generic ladder.
++    if (m, n, k) == (1, 15984, 7168):
++        return 18
+     best, best_ctas = None, None
+     for tactic, cta_m, cta_n, num_mma_ctas in _TGV_TACTIC_LADDER:
+         ctas = _grid_ctas(m, n, cta_m, cta_n, num_mma_ctas)
+diff -ruN -x __pycache__ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/trial_21_tree_judged/srt/layers/attention/cutedsl_mla_backend.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/trial_22_tree_judged/srt/layers/attention/cutedsl_mla_backend.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/trial_21_tree_judged/srt/layers/attention/cutedsl_mla_backend.py	2026-09-24 00:09:42.939641994 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/trial_22_tree_judged/srt/layers/attention/cutedsl_mla_backend.py	2026-09-24 02:05:14.606062900 -0700
+@@ -63,7 +63,7 @@
+             kv_indptr_buf,
+             q_indptr_decode_buf,
+             # The public backend is retained for DCP support, but ordinary
+-            # one-token decode can use the cached TRT-LLM MLA implementation.
++            # one-token decode uses the cached TRT-LLM MLA implementation.
+             # DCP takes the explicit CuteDSL path in _run_decode_kernel below.
+             backend="trtllm-gen",
+         )
+diff -ruN -x __pycache__ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/trial_21_tree_judged/srt/models/deepseek_v2.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/trial_22_tree_judged/srt/models/deepseek_v2.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/trial_21_tree_judged/srt/models/deepseek_v2.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla/trial_22_tree_judged/srt/models/deepseek_v2.py	2026-09-24 01:55:31.105592953 -0700
+@@ -1947,7 +1947,13 @@
+         self.fused_a_gemm_backend = "auto"
+ 
+         self.has_q_b_proj = hasattr(self, "q_b_proj")
+-        q_b_proj_verified_shapes = {(2048, 2048), (4096, 2048)}
++        q_b_proj_verified_shapes = {
++            (2048, 2048),
++            (4096, 2048),
++            # Kimi-K3 TP8 MLA decode: q_lora_rank=1536,
++            # local_heads * (nope + rope) = 12 * 192 = 2304.
++            (2304, 1536),
++        }
+         q_b_weight = (
+             getattr(self.q_b_proj, "weight", None) if self.has_q_b_proj else None
+         )
