@@ -178,9 +178,11 @@ irrelevant at 512×8k, and the small-m GEMM levers stop engaging), exactly the h
 | MLA-b512 2 | FAIL (null, 0.00%) | MoE tactic buckets, PDL toggle, low-priority-stream overlap (−1 µs), bf16 front GEMM (rejected on correctness) | clean measurement (pristine 991.7, σ 0.4) |
 | MLA-b512 3 | FAIL (null, −0.17%) | bf16-activation MoE ×2 (no kernel); route+quant cap 64→512 (exact, −1.5 µs, kept); variable-schedule attention (null); tuning ceiling 512→1024 (null); TGV for the m=512 front GEMM (+8% slower) and for shared-down (+2% slower), both reverted | confirms the TGV lever is small-m only |
 | MLA-b512 4 | FAIL (null, 0.00%) | six ideas incl. a PDL policy change (regressed, reverted) and a variable-sequence attention scheduler (exact, neutral) | MLA at B=512 plateaued on the inherited tree |
+| KDA-b512 **Claude Opus 5.5** 1 | **PASS** 675.2 → 600.4 µs at 512 (−11.1%); 482.7 → 472.4 at 256 (−2.1%); 380.2 → 378.2 at 128 | (a) one-shot FlashInfer autotune of the MXFP4 MoE tactic when rows/expert > 8 (`flashinfer_trtllm.py`) — the production warmup, ~−9 pts; (b) 8-byte vectorized bf16 state loads/stores + `__launch_bounds__` in the fused KDA decode kernel (92.6 → 83.0 µs kernel) — genuine; (c) bfa side-stream overlap limit 128 → 512 — genuine, small; rejected: splitting the merged front across streams (SM contention) | all exact; ~2.3 pts are real gains, the rest is the harness gap |
+| MLA-b512 **Claude Opus 5.5** 1 | **PASS** 976.3 → 904.6 at 512 (−7.3%); 638.3 → 617.8 at 256 (−3.2%); mixed 271.8 → 270.7 | (a) tuned MoE tactic instead of the fallback (same harness gap, ~−6.4 pts); (b) fp8 KV-concat kernel: hardware satfinite convert + exact no-saturate fixup, 17.8 → 8.0 µs — genuine; rejected: merged-front split (slower) | exact (rel ≤ 0.013) |
 
-**Result:** at B=512 the inherited trees are the result — KDA −6.5%, MLA −1.4% — and seven clean warm-started
-rounds (KDA 1–3, MLA 2–4) found nothing further: every remaining large-batch idea is either inactive, neutral, numerics-changing,
+**Result (Codex):** at B=512 the inherited trees were the result — KDA −6.5%, MLA −1.4% — and seven clean warm-started
+Codex rounds (KDA 1–3, MLA 2–4) found nothing further: every remaining large-batch idea is either inactive, neutral, numerics-changing,
 or a regression. Both layers are MoE-bound on the closed TRT-LLM MXFP4 cubin at every batch size we can run.
 Prefill rounds start after B12b.
 
