@@ -262,7 +262,7 @@ consistent); the b512 and prefill cases run with `--bf16-gemm-init` from here on
 
 **Claude MLA-b512 round 3 (04:42–05:23): PASS** 887.3→877.8 @512 (+1.1%), 619.8→609.2 @256, mixed 269.5→261.5 (+3.0%): output-gate GEMM overlapped into the MLA decode kernel tail + pending residual add fused into the attn-res TMA kernel; exact. Claude MLA-b512 campaign done: 976.3→877.8 µs (3/3 PASS).
 
-**Claude KDA-b512 round 3 (04:42–05:36): FAIL correctness** — 601.4→582.9 @512 (+3.1%) but rel 0.029/0.022/0.021 (8/1/1 rows over tol): attn-res TMA fused residual add (fp32 add + RNE) changed rounding; other parts (r2 kernel port via the KB, routed-before-shared capture order) exact. Operator-stacked tree without the fusion queued (GPU 1, 7 reps). Claude KDA-b512 campaign: 1/3 PASS (r1 −11.1%).
+**Claude KDA-b512 round 3 (04:42–05:36): FAIL correctness** — 601.4→582.9 @512 (+3.1%) but rel 0.029/0.022/0.021 (8/1/1 rows over tol): attn-res TMA fused residual add (fp32 add + RNE) changed rounding; other parts (r2 kernel port via the KB, routed-before-shared capture order) exact. Operator-stacked tree without the fusion: same rel 0.029/0.022/0.021 (+2.4%) → the drift is the fused-decode kernel's reduction reorder (r2 port), FAIL; nothing salvaged. Claude KDA-b512 campaign: 1/3 PASS (r1 −11.1%).
 
 **Claude MLA-prefill round 1 (04:52–05:45, GPU 6): PASS** 12128.5→11573.4 (+4.6%) / 8573.0→8226.0 (+4.1%) / 8057.8→7848.0 (+2.6%), bit-exact: Triton `mla_kv_pack_quantize_fp8` (one pass K/V pack + fp8 quant for chunk and prefix, Q cast once) + residual add fused into the attn-res TMA kernel (418→361 µs). First accepted prefill optimization. Round 2 started 05:45.
 
