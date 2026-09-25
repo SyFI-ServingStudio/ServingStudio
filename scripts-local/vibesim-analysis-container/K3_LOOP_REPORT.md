@@ -207,6 +207,55 @@ choice, not a uniform-length assumption. The "harness overfit" flag on round 25 
 to "agent's stated rationale was harness-specific, but the change is correct on mixed lengths" and the
 MLA best tree stays at 253.5 µs.
 
+## Campaign 4 — new input dimensions with warm start (2026-09-24 17:00–)
+
+User direction: extend the loop to (a) large decode batches (B = 256/512, the DP-attention regime) and
+(b) chunked prefill (popular chunk sizes), warm-starting from the accepted decode trees and giving the
+agents the optimization history to retrieve.
+
+**Warm start.** `k3_opt_history/` (built by `build_opt_history.py`): curated `TECHNIQUES.md` (accepted
+levers + dead ends with reasons), `INDEX.md`/`history.json` over all 33 judged trials, and per trial the
+judged patch, the round's incremental diff and every hypothesis/analysis the agent wrote. Mounted read-only
+at `/workspace/opt_history` in every agent container; the task prompt asks for it to be read first and cited.
+
+**Large-batch decode cases** (`issue_k3_{kda,mla}_b512.json`; KDA primary 512×8k, secondary 256×8k, 128×8k;
+MLA primary 512×8k, secondary 256×8k, 16×64k mixed). New VibeSim presets `*_b512`; the MLA oracle initially
+predicted 16 ms for the attention leaf at B=512 because the MLA worklet fed the group's total KV as one
+request's context (Codex B12a fixed it, `kimi-k3-arch` 83847486: 1025/661/251 µs predicted vs 992/661/294
+measured). Oracles on 8803 (KDA) / 8804 (MLA).
+
+Transfer check (decode best trees judged on the new points against the pristine tree, GPU 7):
+
+| case | point | pristine µs | best tree µs | Δ | rel err |
+|---|---|---|---|---|---|
+| MLA | 512×8k | 991.8 | 978.4 | −1.4% | 0.012 |
+| MLA | 256×8k | 661.0 | 638.5 | −3.4% | 0.013 |
+| MLA | 16×64k mixed | 294.4 | 272.7 | −7.3% | 0.005 |
+| KDA | 512×8k | 724.5 | 677.4 | −6.5% | 0.017 |
+| KDA | 256×8k | 506.4 | 482.8 | −4.7% | 0.015 |
+| KDA | 128×8k | 403.0 | 378.4 | −6.1% | 0.013 |
+
+KDA-b512 rounds 1–3 (45-min agents, warm-started): all null. ~13 ideas tried (TRT-LLM MoE tuner ceiling at
+2× rows, bf16-activation MXFP4 path — no SM100 kernel at B≥256, route+quant JIT specialisations that never
+engaged for the 112/top-2 path, KDA TMA stage counts, in-kernel TRT-LLM routing — slower and re-routed 2 of
+512 tokens so the strict decode CHECK rejected it). Round 1 measured +1.2% at B=512 against a 1.5%
+requirement (3σ inflated by concurrent VibeSim JIT fills on the shared GPU); rounds 2–3 were 0.0/+0.1%.
+VibeSim ranks the routed MXFP4 MoE first at every batch (R0 961 µs vs R5 53 µs at B=512, 57% of the step):
+the KDA layer is at the closed-cubin wall at B=512 as it was at B=128. MLA-b512 rounds started 20:13.
+
+**Chunked prefill.** Driver point tag `B,L,pf[<prefix>]` (ForwardMode.EXTEND; KDA runs `chunk_kda` with the
+carried-in conv/recurrent state, MLA runs the production `trtllm_mla` MHA_CHUNKED_KV path: fp8 ragged
+attention + chunked prefix-KV merge; eager timing since sglang does not graph-capture prefill). Cases
+`issue_k3_{kda,mla}_prefill.json`: 1×16384 first chunk (B200 default `chunked_prefill_size`), 1×16384 as
+chunk 4 of a 64k prompt (prefix 49,152), 4×4096 mixed batch. Pristine baselines: KDA 22.1 / 22.5 / 22.1 ms,
+MLA 20.6 / 29.5 / 17.8 ms (GEMM-dominated; ~6 ms of the MLA prefix point is the fp8 prefix attention).
+Prefill correctness is judged per token (≤0.5% rows over tolerance, p99 row error ≤ tol, mean drift ≤1%,
+state exact) because the MoE/GEMM autotuners pick among near-equal tactics at m = thousands across
+processes, re-routing ~0.1% of tokens (replays within one process are identical). Prefill rounds wait for
+VibeSim prefill support (Codex B12: kinds `kda_chunk_prefill`, `causal_conv1d_prefill`,
+`mla_prefill_attention`, `mla_prefix_gather`, `mla_merge_state`; worklet prefill branches; presets), then
+`run_k3_prefill_when_free.sh`.
+
 ## Artifacts
 
 `iter_opt_eval_k3_{kda,mla}/trial_<k>_{verdict.json,agent.log,opt_run/,tree_judged.patch}`,
