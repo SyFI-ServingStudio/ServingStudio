@@ -3,7 +3,8 @@
 # (8801/8802/8803 keep serving; the running KDA-b512 trial talks to 8803).
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
-while pgrep -f "[c]odex exec" >/dev/null; do sleep 30; done   # let the B12a codex process exit fully
+# (no codex wait: "codex exec" also matches the optimizer-loop trial agents inside their containers;
+#  the worktree B12a run had already exited when this was launched)
 echo "==== $(date +%F_%T) rebake with $(git -C /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/main-k3-rust log --oneline -1)"
 "$HERE/build_context_k3.sh" > "$HERE/k3_mla_b512_rebake.log" 2>&1 \
   && sed 's#COPY context/#COPY context_k3/#' "$HERE/Dockerfile" | docker build -q -t vibesim-analysis:k3 -f - "$HERE" >> "$HERE/k3_mla_b512_rebake.log" 2>&1 \
