@@ -37,6 +37,25 @@ Figure: `K3_PIPELINE_FIGURE.html` (self-contained SVG; open in a browser).
 └────────────────────────────────────────────────────────────────────────────────┘
 ```
 
+**The two containers the agent loop runs between (the harness container is the third):**
+
+- **VibeSim oracle** — image `vibesim-analysis:k3` (built by `build_context_k3.sh` from the VibeSim `kimi-k3`
+  branch: repo assets, the branch `profile.db`, the prebuilt `analyze` binary, and baked predictions). One
+  container per case, each serving a fixed before-state prediction read-only over HTTP, no GPU:
+  `vibesim_oracle_k3_kda` (172.17.0.1:8801), `vibesim_oracle_k3_mla` (8802), `vibesim_oracle_k3_kda_b512` (8803),
+  `vibesim_oracle_k3_mla_b512` (8804); `vibesim_oracle_k3_{kda,mla}_prefill` (8805/8806) once B12b lands.
+  Verbs under `/api/v1/`: `workspace-info` (how to read the outputs), `simulate` (fetch the prediction),
+  `analyze?level=operator|run_summary|iteration`, `optimality?scope=iter` (R0/R5/R6/R7 ladder + `necessary_share`
+  per node), `kernels` (per-leaf drill-down incl. `has_cached_alternative`). The agent's edits never reach it.
+- **Agent** — image `rga-local/sglang-k3:v0520-codex` (`lmsysorg/sglang:v0.5.20` + the Codex CLI), one container
+  per trial named `iteropt_k3_<case>_run_<k>`, on one GPU (`CUDA_VISIBLE_DEVICES=0`), 45-min budget. Mounts: the
+  trial's copy of `python/sglang` at `/sgl-workspace/sglang/python/sglang` (seeded from the current best tree),
+  the driver at `/tmp/kimi_single_layer_decode.py`, the read-only history at `/workspace/opt_history`, the
+  FlashInfer JIT cache. Runs `codex exec -m gpt-5.6-luna -c model_reasoning_effort=max` on the rendered task:
+  profile with the driver → `simulate`/`optimality` on the oracle → edit the tree → smoke (`LAYER_SMOKE_OK`) →
+  replay against its own golden → repeat; writes `/workspace/opt_run/iter_NN/{profile.json,analysis.md,
+  hypothesis.md,diff.patch,result.json}`. Only the source diff of its tree is handed to the judge.
+
 **Workload (sglang cookbook B200 recipe, one rank):** attention TP8 → 12 heads, EP8 → 112 local MXFP4
 experts, fp8-e4m3 KV cache, bf16 KDA state, `cutedsl_mla` decode. One decode token per request.
 
