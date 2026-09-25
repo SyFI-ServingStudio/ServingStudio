@@ -859,6 +859,52 @@
   "dir": "trials/kda_b512_claude_2"
  },
  {
+  "case": "kda_b512_claude",
+  "trial": 3,
+  "verdict": "FAIL",
+  "reason": "failed: correctness",
+  "continuous_round": true,
+  "campaign1_unrealistic_routing": false,
+  "points": {
+   "512,8192": {
+    "before_us": 601.4,
+    "after_us": 582.9,
+    "improvement": 0.0307,
+    "check": false,
+    "rel_err": 0.02852696906045019
+   },
+   "256,8192": {
+    "before_us": 473.3,
+    "after_us": 460.2,
+    "improvement": 0.0278,
+    "check": false,
+    "rel_err": 0.022286820323297964
+   },
+   "128,8192": {
+    "before_us": 377.2,
+    "after_us": 368.9,
+    "improvement": 0.022,
+    "check": false,
+    "rel_err": 0.021008401949014995
+   }
+  },
+  "files": [
+   "kernels/jit/csrc/attention/kda_fused_decode.cuh",
+   "kernels/jit/csrc/kimi_k3/attn_res/fused_tma.cuh",
+   "kernels/ops/attention/kda_fused_decode.py",
+   "kernels/ops/kimi_k3/attn_res.py",
+   "kernels/ops/attention/fla/fused_recurrent.py",
+   "srt/models/kimi_k3.py",
+   "srt/layers/attn_residual.py",
+   "srt/layers/attention/linear/kda_backend.py",
+   "srt/layers/moe/moe_runner/flashinfer_trtllm.py"
+  ],
+  "diff_lines": 1409,
+  "incremental_diff_lines": 706,
+  "note": "Claude: FAIL correctness (rel 0.029/0.022/0.021, 8/1/1 rows over tol) -- attn-res TMA fused residual add (fp32 add + RNE) changes rounding; the r2 kernel port (via the KB) and routed-before-shared capture order were exact (-3.1% total @512)",
+  "dir": "trials/kda_b512_claude_3"
+ },
+ {
   "case": "mla",
   "trial": 1,
   "verdict": "FAIL",

@@ -1,0 +1,1409 @@
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512_claude/pristine_tree/kernels/jit/csrc/attention/kda_fused_decode.cuh /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512_claude/trial_3_tree_judged/kernels/jit/csrc/attention/kda_fused_decode.cuh
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512_claude/pristine_tree/kernels/jit/csrc/attention/kda_fused_decode.cuh	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512_claude/trial_3_tree_judged/kernels/jit/csrc/attention/kda_fused_decode.cuh	2026-09-25 05:21:14.432805047 -0700
+@@ -42,6 +42,7 @@
+ 
+ #include <cstdint>
+ #include <cstdlib>
++#include <type_traits>
+ #include <cuda_bf16.h>
+ #include <cuda_runtime.h>
+ 
+@@ -153,36 +154,83 @@
+   return __float2bfloat16(value);
+ }
+ 
+-template <bool kUseCacheGlobalStore>
+-SGL_DEVICE void store_state_float4(float* ptr, float4 value) {
+-  if constexpr (kUseCacheGlobalStore) {
+-    __stcg(reinterpret_cast<float4*>(ptr), value);
++SGL_DEVICE float bf16_round(float value) {
++  return __bfloat162float(__float2bfloat16(value));
++}
++
++SGL_DEVICE float conv_silu_bf16(float value) {
++  return bf16_round(value / (1.0f + expf(-value)));
++}
++
++template <typename StateT>
++SGL_DEVICE float4 load_state4(const StateT* ptr) {
++  if constexpr (std::is_same_v<StateT, float>) {
++    return *reinterpret_cast<const float4*>(ptr);
+   } else {
+-    *reinterpret_cast<float4*>(ptr) = value;
++    // One 8-byte load of 4 bf16 (ptr is 8B-aligned: k offset is a multiple of 4).
++    const uint2 raw = *reinterpret_cast<const uint2*>(ptr);
++    const float2 lo = __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162*>(&raw.x));
++    const float2 hi = __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162*>(&raw.y));
++    return make_float4(lo.x, lo.y, hi.x, hi.y);
+   }
+ }
+ 
+-template <int kCopyThreads>
++template <bool kUseCacheGlobalStore, typename StateT>
++SGL_DEVICE void store_state4(StateT* ptr, float4 value) {
++  if constexpr (std::is_same_v<StateT, float>) {
++    if constexpr (kUseCacheGlobalStore) {
++      __stcg(reinterpret_cast<float4*>(ptr), value);
++    } else {
++      *reinterpret_cast<float4*>(ptr) = value;
++    }
++  } else {
++    // One 8-byte store so a warp writes full 32B sectors.
++    const __nv_bfloat162 lo = __float22bfloat162_rn(make_float2(value.x, value.y));
++    const __nv_bfloat162 hi = __float22bfloat162_rn(make_float2(value.z, value.w));
++    uint2 packed;
++    packed.x = *reinterpret_cast<const uint32_t*>(&lo);
++    packed.y = *reinterpret_cast<const uint32_t*>(&hi);
++    *reinterpret_cast<uint2*>(ptr) = packed;
++  }
++}
++
++template <typename StateT>
++inline constexpr int kKdaMinBlocksPerSm = std::is_same_v<StateT, float> ? 2 : 5;
++
++template <int kCopyThreads, typename StateT>
+ SGL_DEVICE void
+-cp_async_state_chunk_for(float* s_state, const float* state, int slot, int i_hv, int64_t state_slot_stride, int chunk) {
+-  constexpr int kFloat4PerChunk = kChunkV * kDimK / 4;
++cp_async_state_chunk_for(
++    StateT* s_state,
++    const StateT* state,
++    int slot,
++    int i_hv,
++    int64_t state_slot_stride,
++    int chunk) {
++  constexpr int kElementsPerCopy = 16 / sizeof(StateT);
++  constexpr int kCopiesPerChunk = kChunkV * kDimK / kElementsPerCopy;
+   const int tid = threadIdx.x;
+   const int stage = chunk & 1;
+   const int v_base = chunk * kChunkV;
+   const int64_t slot_base = static_cast<int64_t>(slot) * state_slot_stride;
+-  for (int linear4 = tid; linear4 < kFloat4PerChunk; linear4 += kCopyThreads) {
+-    const int elem = linear4 * 4;
++  for (int linear = tid; linear < kCopiesPerChunk; linear += kCopyThreads) {
++    const int elem = linear * kElementsPerCopy;
+     const int row = elem / kDimK;
+     const int k = elem - row * kDimK;
+-    float* dst = s_state + (stage * kChunkV + row) * kDimK + k;
+-    const float* src = state + slot_base + ((i_hv * kDimV + v_base + row) * kDimK + k);
++    StateT* dst = s_state + (stage * kChunkV + row) * kDimK + k;
++    const StateT* src = state + slot_base + ((i_hv * kDimV + v_base + row) * kDimK + k);
+     ptx::cp_async_cg_16b(dst, src);
+   }
+   ptx::cp_async_commit_group();
+ }
+ 
+-SGL_DEVICE void
+-cp_async_state_chunk(float* s_state, const float* state, int slot, int i_hv, int64_t state_slot_stride, int chunk) {
++template <typename StateT>
++SGL_DEVICE void cp_async_state_chunk(
++    StateT* s_state,
++    const StateT* state,
++    int slot,
++    int i_hv,
++    int64_t state_slot_stride,
++    int chunk) {
+   cp_async_state_chunk_for<kThreads>(s_state, state, slot, i_hv, state_slot_stride, chunk);
+ }
+ 
+@@ -194,23 +242,23 @@
+ 
+ // 1D TMA bulk copy gmem -> smem; the issuing thread arrives with expect-tx on
+ // the mbarrier, completion is observed via ptx::mbar_wait_parity.
+-template <int kStageChunkV>
++template <int kStageChunkV, typename StateT>
+ SGL_DEVICE void tma_state_chunk_stage(
+-    float* s_state,
+-    const float* state,
++    StateT* s_state,
++    const StateT* state,
+     int slot,
+     int i_hv,
+     int64_t state_slot_stride,
+     int chunk,
+     int stage,
+     uint64_t* bar) {
+-  constexpr uint32_t kBytes = kStageChunkV * kDimK * sizeof(float);
+-  float* dst = s_state + stage * kStageChunkV * kDimK;
++  constexpr uint32_t kBytes = kStageChunkV * kDimK * sizeof(StateT);
++  StateT* dst = s_state + stage * kStageChunkV * kDimK;
+   // 16B-aligned for any slot iff state_slot_stride*sizeof(float) % 16 == 0
+   // (host gates TMA off otherwise); the intra-slot chunk offset is a multiple
+   // of kStageChunkV*kDimK*4, always 16B-aligned.
+   const int64_t slot_base = static_cast<int64_t>(slot) * state_slot_stride;
+-  const float* src = state + slot_base + ((i_hv * kDimV + chunk * kStageChunkV) * kDimK);
++  const StateT* src = state + slot_base + ((i_hv * kDimV + chunk * kStageChunkV) * kDimK);
+ #if KDA_FUSED_DECODE_HAS_TMA
+   ptx::fence_async_smem();
+   ptx::mbar_arrive_expect_tx(bar, kBytes);
+@@ -252,6 +300,48 @@
+   return {device::warp::reduce_sum(x), device::warp::reduce_sum(y)};
+ }
+ 
++// One butterfly for two sums: after the xor-16 step lanes 0-15 carry x and
++// lanes 16-31 carry y. Bitwise equal to reduce_sum(x) / reduce_sum(y) (same
++// xor order, commutative adds); returns x's total in the low half, y's in the high.
++SGL_DEVICE float warp_reduce_sum_pair_split(float x, float y) {
++  const bool upper = (threadIdx.x & 16) != 0;
++  float value = upper ? y : x;
++  value += __shfl_xor_sync(0xffffffffu, upper ? x : y, 16);
++#pragma unroll
++  for (int mask = 8; mask >= 1; mask >>= 1) {
++    value += __shfl_xor_sync(0xffffffffu, value, mask);
++  }
++  return value;
++}
++
++// Four rows at once over the same xor-16/8/4/2/1 butterfly tree as
++// warp_reduce_sum_pair_split (bit-identical totals): each level halves the
++// values a lane carries, so 4 rows cost 6 shuffles instead of 2 x 5. Totals
++// end in lanes [0,8) = a, [8,16) = c, [16,24) = b, [24,32) = d.
++SGL_DEVICE float warp_reduce_sum_quad_split(float a, float b, float c, float d) {
++  const bool upper = (threadIdx.x & 16) != 0;
++  float lo = upper ? b : a;
++  float hi = upper ? d : c;
++  lo += __shfl_xor_sync(0xffffffffu, upper ? a : b, 16);
++  hi += __shfl_xor_sync(0xffffffffu, upper ? c : d, 16);
++  const bool upper8 = (threadIdx.x & 8) != 0;
++  float value = upper8 ? hi : lo;
++  value += __shfl_xor_sync(0xffffffffu, upper8 ? lo : hi, 8);
++#pragma unroll
++  for (int mask = 4; mask >= 1; mask >>= 1) {
++    value += __shfl_xor_sync(0xffffffffu, value, mask);
++  }
++  return value;
++}
++
++// Both totals in every lane (one extra shuffle across the halves).
++SGL_DEVICE Sum2 warp_reduce_sum_pair_packed(float x, float y) {
++  const float value = warp_reduce_sum_pair_split(x, y);
++  const float other = __shfl_xor_sync(0xffffffffu, value, 16);
++  const bool upper = (threadIdx.x & 16) != 0;
++  return {upper ? other : value, upper ? value : other};
++}
++
+ template <int kReduceWarps>
+ SGL_DEVICE Sum2 block_reduce_sum2_for(float x, float y, float* scratch) {
+   const int lane = threadIdx.x & 31;
+@@ -386,13 +476,16 @@
+     bool kApplyBetaSigmoid = true,
+     bool kUseTmaLoad = false,
+     int kTmaStages = kNumChunks,
+-    bool kUsePDL = false>
++    bool kUsePDL = false,
++    typename StateT = float>
+ // Shapes below use K3's per-TP-rank sizing (linear_attn_config: num_heads=96 over
+ // TP={8,16,32} -> H=HV={12,6,3} local heads; head_dim=128 -> kDimK=kDimV=128; kSeg = H*128;
+ // short_conv_kernel_size=4 -> kKernelWidth=4, kConvStateWidth=3). B is the live
+ // (post-padding, under kUseStaticDecodeLayout) decode batch size; slots is the
+ // recurrent-state / conv-cache pool capacity, addressed by ssm_state_indices, not B.
+-__global__ __launch_bounds__(kThreads, 2) void kda_decode_fusion_many_heads_kernel(
++// bf16 state: 32KB smem allows 5 blocks/SM, capping regs at 48 (no spills);
++// measured 93->82us at B=512 on B200. fp32 state stays smem-bound at 2.
++__global__ __launch_bounds__(kThreads, kKdaMinBlocksPerSm<StateT>) void kda_decode_fusion_many_heads_kernel(
+     const __nv_bfloat16* __restrict__ x_q,  // [B, H*128] row bos*x_row_stride + hk, sliced from mixed_qkv q-segment
+     const __nv_bfloat16* __restrict__ x_k,  // [B, H*128] row bos*x_row_stride + hk, sliced from mixed_qkv k-segment
+     const __nv_bfloat16* __restrict__ x_v,  // [B, HV*128] row bos*x_row_stride + hvv, sliced from mixed_qkv v-segment
+@@ -415,7 +508,7 @@
+     const int* __restrict__ ssm_state_indices,  // [B] recurrent-state slot per token; <0 marks a padded cuda-graph slot
+     const int* __restrict__ cu_seqlens,         // [B+1] token offsets into x_q/x_k/x_v/g/beta; unused under
+                                                 // kUseStaticDecodeLayout
+-    float* __restrict__ state,  // [slots, HV, 128, 128] recurrent KDA state h, inner [V,K] contiguous, slot pitch =
++    StateT* __restrict__ state,  // [slots, HV, 128, 128] recurrent KDA state h, inner [V,K] contiguous, slot pitch =
+                                 // state_slot_stride
+     __nv_bfloat16* __restrict__ out,  // [B, hv_count*128] fused-decode output, row i_n, col i_hv*128 + v
+     int B,                            // live decode batch size (token count for this launch)
+@@ -488,7 +581,8 @@
+ 
+   // Dynamic size: 2 cp.async stages (32KB) or kTmaStages TMA stages (16KB per
+   // stage; kTmaStages == kNumChunks means no buffer reuse).
+-  extern __shared__ __align__(16) float s_state[];
++  extern __shared__ __align__(16) unsigned char s_state_storage[];
++  StateT* s_state = reinterpret_cast<StateT*>(s_state_storage);
+   __shared__ float s_q[kDimK];
+   __shared__ float s_k[kDimK];
+   __shared__ float s_decay[kDimK];
+@@ -521,146 +615,238 @@
+     cp_async_state_chunk(s_state, state, slot, i_hv, state_slot_stride, 0);
+   }
+ 
+-  if constexpr (kUpdateConvState) {
+-    if (tid < kDimK) {
+-      const int k = tid;
+-      const int hk = hk_off + k;
+-      const int64_t cs_base = slot * cs_slot_stride + hk;
+-      const int64_t xq_idx = bos * x_row_stride + hk;
+-      const float exp_a = __shfl_sync(0xffffffffu, lane == 0 ? __expf(a_log[i_h]) : 0.0f, 0);
++  // K3 path: every prologue global read (conv taps/state/x for q, k and v,
++  // gate, beta, onorm params) is issued before the first conv-state store.
++  // The compiler cannot hoist loads above those stores itself (cs_qk is a
++  // runtime pointer select), so the unfused order paid three dependent
++  // memory round trips here; the arithmetic below is unchanged.
++  constexpr bool kHoistPrologueLoads = kUpdateConvState && kApplyOnorm && kPreloadOnormParams;
++  static_assert(kThreads == kDimK + kDimV);
++  if constexpr (kHoistPrologueLoads) {
++    // Lower warps: q conv + decay (+ onorm params); upper warps: k conv + v conv.
++    const bool is_q = tid < kDimK;
++    const int k = is_q ? tid : tid - (kThreads - kDimK);
++    const int hk = hk_off + k;
++    const int64_t cs_base = slot * cs_slot_stride + hk;
++    __nv_bfloat16* cs_qk = is_q ? cs_q : cs_k;
++    const float* w_qk_t = is_q ? w_q_t : w_k_t;
++
++    const float qk_bias = is_q ? bias_q[hk] : bias_k[hk];
++    __nv_bfloat16 qk_state[kConvStateWidth];
++    float qk_w[kKernelWidth];
++#pragma unroll
++    for (int w = 0; w < kConvStateWidth; ++w) {
++      qk_state[w] = cs_qk[cs_base + w * cs_w_stride];
++    }
++#pragma unroll
++    for (int w = 0; w < kKernelWidth; ++w) {
++      qk_w[w] = fp32_at(w_qk_t, w * hkv_dim + hk);
++    }
++    const __nv_bfloat16 x_new = (is_q ? x_q : x_k)[bos * x_row_stride + hk];
+ 
+-      float q_acc = bias_q[hk];
+-      float k_acc = bias_k[hk];
+-      __nv_bfloat16 q_shift0 = __float2bfloat16(0.0f);
+-      __nv_bfloat16 q_shift1 = __float2bfloat16(0.0f);
+-      __nv_bfloat16 k_shift0 = __float2bfloat16(0.0f);
+-      __nv_bfloat16 k_shift1 = __float2bfloat16(0.0f);
++    float a_log_raw = 0.0f;
++    float g_raw = 0.0f;
++    float onorm_gate_raw = 0.0f;
++    float beta_raw = 0.0f;
++    const int v = k;
++    const int hvv = hv_off + v;
++    const int64_t cs_v_base = slot * cs_slot_stride + hvv;
++    float v_bias = 0.0f;
++    __nv_bfloat16 v_state[kConvStateWidth];
++    float v_w[kKernelWidth];
++    __nv_bfloat16 v_new = __float2bfloat16(0.0f);
++    if (is_q) {
++      if (lane == 0) {
++        a_log_raw = a_log[i_h];
++      }
++      g_raw = bf16_load(g, bos * g_row_stride + i_hv * kDimK + k) + dt_bias[hk];
++      onorm_gate_raw = bf16_load(onorm_g, i_n * onormg_row_stride + i_hv * kDimV + tid);
++      pre_onorm_weight = onorm_weight[tid];
++      if (tid == 0) {
++        beta_raw = bf16_load(beta, bos * beta_row_stride + i_hv);
++      }
++    } else {
++      v_bias = bias_v[hvv];
+ #pragma unroll
+       for (int w = 0; w < kConvStateWidth; ++w) {
+-        const __nv_bfloat16 q_state = cs_q[cs_base + w * cs_w_stride];
+-        const __nv_bfloat16 k_state = cs_k[cs_base + w * cs_w_stride];
+-        q_acc += __bfloat162float(q_state) * fp32_at(w_q_t, w * hkv_dim + hk);
+-        k_acc += __bfloat162float(k_state) * fp32_at(w_k_t, w * hkv_dim + hk);
+-        if (w == 1) {
+-          q_shift0 = q_state;
+-          k_shift0 = k_state;
+-        } else if (w == 2) {
+-          q_shift1 = q_state;
+-          k_shift1 = k_state;
+-        }
++        v_state[w] = cs_v[cs_v_base + w * cs_w_stride];
+       }
+-      const __nv_bfloat16 q_new = x_q[xq_idx];
+-      const __nv_bfloat16 k_new = x_k[xq_idx];
+-      q_acc += __bfloat162float(q_new) * fp32_at(w_q_t, (kKernelWidth - 1) * hkv_dim + hk);
+-      k_acc += __bfloat162float(k_new) * fp32_at(w_k_t, (kKernelWidth - 1) * hkv_dim + hk);
+-
+-      cs_q[cs_base + 0] = q_shift0;
+-      cs_q[cs_base + cs_w_stride] = q_shift1;
+-      cs_q[cs_base + 2 * cs_w_stride] = q_new;
+-      cs_k[cs_base + 0] = k_shift0;
+-      cs_k[cs_base + cs_w_stride] = k_shift1;
+-      cs_k[cs_base + 2 * cs_w_stride] = k_new;
+-
+-      s_q[k] = device::math::silu_fast(q_acc);
+-      s_k[k] = device::math::silu_fast(k_acc);
+-
+-      const float g_raw = bf16_load(g, bos * g_row_stride + i_hv * kDimK + k) + dt_bias[hk];
+-      if constexpr (kUseLowerBound) {
+-        s_decay[k] = __expf(lower_bound * device::math::sigmoid_fast(exp_a * g_raw));
+-      } else {
+-        s_decay[k] = __expf(-exp_a * device::math::softplus_fast(g_raw));
++#pragma unroll
++      for (int w = 0; w < kKernelWidth; ++w) {
++        v_w[w] = fp32_at(w_v_t, w * hvv_dim + hvv);
+       }
++      v_new = x_v[bos * x_row_stride + hvv];
+     }
+-  } else {
+-    if (tid < kDimK) {
+-      const int k = tid;
+-      const int hk = hk_off + k;
+-      const float exp_a = __shfl_sync(0xffffffffu, lane == 0 ? __expf(a_log[i_h]) : 0.0f, 0);
+ 
+-      float q_acc = bias_q[hk];
+-      float k_acc = bias_k[hk];
++    float acc = qk_bias;
+ #pragma unroll
+-      for (int w = 0; w < kConvStateWidth; ++w) {
+-        const int64_t cs_idx = slot * cs_slot_stride + hk + w * cs_w_stride;
+-        q_acc += bf16_load(cs_q, cs_idx) * fp32_at(w_q_t, w * hkv_dim + hk);
+-        k_acc += bf16_load(cs_k, cs_idx) * fp32_at(w_k_t, w * hkv_dim + hk);
+-      }
+-      q_acc += bf16_load(x_q, bos * x_row_stride + hk) * fp32_at(w_q_t, (kKernelWidth - 1) * hkv_dim + hk);
+-      k_acc += bf16_load(x_k, bos * x_row_stride + hk) * fp32_at(w_k_t, (kKernelWidth - 1) * hkv_dim + hk);
++    for (int w = 0; w < kConvStateWidth; ++w) {
++      acc += __bfloat162float(qk_state[w]) * qk_w[w];
++    }
++    acc += __bfloat162float(x_new) * qk_w[kKernelWidth - 1];
+ 
+-      s_q[k] = device::math::silu_fast(q_acc);
+-      s_k[k] = device::math::silu_fast(k_acc);
++    cs_qk[cs_base + 0] = qk_state[1];
++    cs_qk[cs_base + cs_w_stride] = qk_state[2];
++    cs_qk[cs_base + 2 * cs_w_stride] = x_new;
++    (is_q ? s_q : s_k)[k] = conv_silu_bf16(acc);
+ 
+-      const float g_raw = bf16_load(g, bos * g_row_stride + i_hv * kDimK + k) + dt_bias[hk];
++    if (is_q) {
++      const float exp_a = __shfl_sync(0xffffffffu, lane == 0 ? __expf(a_log_raw) : 0.0f, 0);
+       if constexpr (kUseLowerBound) {
+         s_decay[k] = __expf(lower_bound * device::math::sigmoid_fast(exp_a * g_raw));
+       } else {
+         s_decay[k] = __expf(-exp_a * device::math::softplus_fast(g_raw));
+       }
++      pre_onorm_gate = device::math::sigmoid_fast(onorm_gate_raw);
++      if (tid == 0) {
++        if constexpr (kApplyBetaSigmoid) {
++          s_beta = device::math::sigmoid_fast(beta_raw);
++        } else {
++          s_beta = beta_raw;
++        }
++      }
++    } else {
++      float v_acc = v_bias;
++#pragma unroll
++      for (int w = 0; w < kConvStateWidth; ++w) {
++        v_acc += __bfloat162float(v_state[w]) * v_w[w];
++      }
++      v_acc += __bfloat162float(v_new) * v_w[kKernelWidth - 1];
++      cs_v[cs_v_base + 0] = v_state[1];
++      cs_v[cs_v_base + cs_w_stride] = v_state[2];
++      cs_v[cs_v_base + 2 * cs_w_stride] = v_new;
++      s_v[v] = conv_silu_bf16(v_acc);
+     }
+-  }
++  } else {
++    if constexpr (kUpdateConvState) {
++      // Lower warps: q conv + decay; upper warps: k conv, then the v conv below.
++      const bool is_q = tid < kDimK;
++      const int k = is_q ? tid : tid - (kThreads - kDimK);
++      const int hk = hk_off + k;
++      const int64_t cs_base = slot * cs_slot_stride + hk;
++      __nv_bfloat16* cs_qk = is_q ? cs_q : cs_k;
++      const float* w_qk_t = is_q ? w_q_t : w_k_t;
+ 
+-  if constexpr (kUpdateConvState) {
+-    if (tid < kDimV) {
+-      const int v = tid;
+-      const int hvv = hv_off + v;
+-      const int64_t cs_base = slot * cs_slot_stride + hvv;
+-      const int64_t xv_idx = bos * x_row_stride + hvv;
+-
+-      float v_acc = bias_v[hvv];
+-      __nv_bfloat16 v_shift0 = __float2bfloat16(0.0f);
+-      __nv_bfloat16 v_shift1 = __float2bfloat16(0.0f);
+-#pragma unroll
++      float acc = is_q ? bias_q[hk] : bias_k[hk];
++      __nv_bfloat16 shift0 = __float2bfloat16(0.0f);
++      __nv_bfloat16 shift1 = __float2bfloat16(0.0f);
++  #pragma unroll
+       for (int w = 0; w < kConvStateWidth; ++w) {
+-        const __nv_bfloat16 v_state = cs_v[cs_base + w * cs_w_stride];
+-        v_acc += __bfloat162float(v_state) * fp32_at(w_v_t, w * hvv_dim + hvv);
++        const __nv_bfloat16 state_w = cs_qk[cs_base + w * cs_w_stride];
++        acc += __bfloat162float(state_w) * fp32_at(w_qk_t, w * hkv_dim + hk);
+         if (w == 1) {
+-          v_shift0 = v_state;
++          shift0 = state_w;
+         } else if (w == 2) {
+-          v_shift1 = v_state;
++          shift1 = state_w;
+         }
+       }
+-      const __nv_bfloat16 v_new = x_v[xv_idx];
+-      v_acc += __bfloat162float(v_new) * fp32_at(w_v_t, (kKernelWidth - 1) * hvv_dim + hvv);
+-      cs_v[cs_base + 0] = v_shift0;
+-      cs_v[cs_base + cs_w_stride] = v_shift1;
+-      cs_v[cs_base + 2 * cs_w_stride] = v_new;
+-      s_v[v] = device::math::silu_fast(v_acc);
++      const __nv_bfloat16 x_new = (is_q ? x_q : x_k)[bos * x_row_stride + hk];
++      acc += __bfloat162float(x_new) * fp32_at(w_qk_t, (kKernelWidth - 1) * hkv_dim + hk);
+ 
+-      if constexpr (kApplyOnorm && kPreloadOnormParams) {
+-        const int64_t onorm_idx = i_n * onormg_row_stride + i_hv * kDimV + v;
+-        pre_onorm_gate = device::math::sigmoid_fast(bf16_load(onorm_g, onorm_idx));
+-        pre_onorm_weight = onorm_weight[v];
++      cs_qk[cs_base + 0] = shift0;
++      cs_qk[cs_base + cs_w_stride] = shift1;
++      cs_qk[cs_base + 2 * cs_w_stride] = x_new;
++      (is_q ? s_q : s_k)[k] = conv_silu_bf16(acc);
++
++      if (is_q) {
++        const float exp_a = __shfl_sync(0xffffffffu, lane == 0 ? __expf(a_log[i_h]) : 0.0f, 0);
++        const float g_raw = bf16_load(g, bos * g_row_stride + i_hv * kDimK + k) + dt_bias[hk];
++        if constexpr (kUseLowerBound) {
++          s_decay[k] = __expf(lower_bound * device::math::sigmoid_fast(exp_a * g_raw));
++        } else {
++          s_decay[k] = __expf(-exp_a * device::math::softplus_fast(g_raw));
++        }
++      }
++    } else {
++      if (tid < kDimK) {
++        const int k = tid;
++        const int hk = hk_off + k;
++        const float exp_a = __shfl_sync(0xffffffffu, lane == 0 ? __expf(a_log[i_h]) : 0.0f, 0);
++
++        float q_acc = bias_q[hk];
++        float k_acc = bias_k[hk];
++  #pragma unroll
++        for (int w = 0; w < kConvStateWidth; ++w) {
++          const int64_t cs_idx = slot * cs_slot_stride + hk + w * cs_w_stride;
++          q_acc += bf16_load(cs_q, cs_idx) * fp32_at(w_q_t, w * hkv_dim + hk);
++          k_acc += bf16_load(cs_k, cs_idx) * fp32_at(w_k_t, w * hkv_dim + hk);
++        }
++        q_acc += bf16_load(x_q, bos * x_row_stride + hk) * fp32_at(w_q_t, (kKernelWidth - 1) * hkv_dim + hk);
++        k_acc += bf16_load(x_k, bos * x_row_stride + hk) * fp32_at(w_k_t, (kKernelWidth - 1) * hkv_dim + hk);
++
++        s_q[k] = conv_silu_bf16(q_acc);
++        s_k[k] = conv_silu_bf16(k_acc);
++
++        const float g_raw = bf16_load(g, bos * g_row_stride + i_hv * kDimK + k) + dt_bias[hk];
++        if constexpr (kUseLowerBound) {
++          s_decay[k] = __expf(lower_bound * device::math::sigmoid_fast(exp_a * g_raw));
++        } else {
++          s_decay[k] = __expf(-exp_a * device::math::softplus_fast(g_raw));
++        }
+       }
+     }
+-  } else {
+-    if (tid < kDimV) {
+-      const int v = tid;
+-      const int hvv = hv_off + v;
+ 
+-      float v_acc = bias_v[hvv];
+-#pragma unroll
+-      for (int w = 0; w < kConvStateWidth; ++w) {
+-        const int64_t cs_idx = slot * cs_slot_stride + hvv + w * cs_w_stride;
+-        v_acc += bf16_load(cs_v, cs_idx) * fp32_at(w_v_t, w * hvv_dim + hvv);
++    static_assert(kThreads >= kDimK + kDimV);
++    // The v conv runs on the upper warps, concurrently with the q/k conv on the lower ones.
++    if constexpr (kUpdateConvState) {
++      if (tid >= kThreads - kDimV) {
++        const int v = tid - (kThreads - kDimV);
++        const int hvv = hv_off + v;
++        const int64_t cs_base = slot * cs_slot_stride + hvv;
++        const int64_t xv_idx = bos * x_row_stride + hvv;
++
++        float v_acc = bias_v[hvv];
++        __nv_bfloat16 v_shift0 = __float2bfloat16(0.0f);
++        __nv_bfloat16 v_shift1 = __float2bfloat16(0.0f);
++  #pragma unroll
++        for (int w = 0; w < kConvStateWidth; ++w) {
++          const __nv_bfloat16 v_state = cs_v[cs_base + w * cs_w_stride];
++          v_acc += __bfloat162float(v_state) * fp32_at(w_v_t, w * hvv_dim + hvv);
++          if (w == 1) {
++            v_shift0 = v_state;
++          } else if (w == 2) {
++            v_shift1 = v_state;
++          }
++        }
++        const __nv_bfloat16 v_new = x_v[xv_idx];
++        v_acc += __bfloat162float(v_new) * fp32_at(w_v_t, (kKernelWidth - 1) * hvv_dim + hvv);
++        cs_v[cs_base + 0] = v_shift0;
++        cs_v[cs_base + cs_w_stride] = v_shift1;
++        cs_v[cs_base + 2 * cs_w_stride] = v_new;
++        s_v[v] = conv_silu_bf16(v_acc);
+       }
+-      v_acc += bf16_load(x_v, bos * x_row_stride + hvv) * fp32_at(w_v_t, (kKernelWidth - 1) * hvv_dim + hvv);
+-      s_v[v] = device::math::silu_fast(v_acc);
++    } else {
++      if (tid >= kThreads - kDimV) {
++        const int v = tid - (kThreads - kDimV);
++        const int hvv = hv_off + v;
++
++        float v_acc = bias_v[hvv];
++  #pragma unroll
++        for (int w = 0; w < kConvStateWidth; ++w) {
++          const int64_t cs_idx = slot * cs_slot_stride + hvv + w * cs_w_stride;
++          v_acc += bf16_load(cs_v, cs_idx) * fp32_at(w_v_t, w * hvv_dim + hvv);
++        }
++        v_acc += bf16_load(x_v, bos * x_row_stride + hvv) * fp32_at(w_v_t, (kKernelWidth - 1) * hvv_dim + hvv);
++        s_v[v] = conv_silu_bf16(v_acc);
++      }
++    }
+ 
+-      if constexpr (kApplyOnorm && kPreloadOnormParams) {
+-        const int64_t onorm_idx = i_n * onormg_row_stride + i_hv * kDimV + v;
++    if constexpr (kApplyOnorm && kPreloadOnormParams) {
++      // Loaded by the threads that write `out` in the epilogue.
++      if (tid < kDimV) {
++        const int64_t onorm_idx = i_n * onormg_row_stride + i_hv * kDimV + tid;
+         pre_onorm_gate = device::math::sigmoid_fast(bf16_load(onorm_g, onorm_idx));
+-        pre_onorm_weight = onorm_weight[v];
++        pre_onorm_weight = onorm_weight[tid];
+       }
+     }
+-  }
+ 
+-  if (tid == 0) {
+-    const float beta_raw = bf16_load(beta, bos * beta_row_stride + i_hv);
+-    if constexpr (kApplyBetaSigmoid) {
+-      s_beta = device::math::sigmoid_fast(beta_raw);
+-    } else {
+-      s_beta = beta_raw;
++    if (tid == 0) {
++      const float beta_raw = bf16_load(beta, bos * beta_row_stride + i_hv);
++      if constexpr (kApplyBetaSigmoid) {
++        s_beta = device::math::sigmoid_fast(beta_raw);
++      } else {
++        s_beta = beta_raw;
++      }
+     }
+   }
+   __syncthreads();
+@@ -691,6 +877,7 @@
+   float r_k[4] = {k4.x, k4.y, k4.z, k4.w};
+   float r_decay[4] = {decay4.x, decay4.y, decay4.z, decay4.w};
+   float o_sumsq = 0.0f;
++  constexpr bool kQuadRowReduce = kRowsPerWarp == 4 && !(kApplyOnorm && kAccumulateOnormSumsq);
+ 
+ #pragma unroll
+   for (int chunk = 0; chunk < kNumChunks; ++chunk) {
+@@ -719,8 +906,50 @@
+       }
+     }
+ 
+-    const float* state_stage = s_state + (kUseTmaLoad ? (chunk % kTmaStages) : (chunk & 1)) * kChunkV * kDimK;
++    const StateT* state_stage = s_state + (kUseTmaLoad ? (chunk % kTmaStages) : (chunk & 1)) * kChunkV * kDimK;
+ 
++    if constexpr (kQuadRowReduce) {
++      // All kRowsPerWarp = 4 rows of this chunk in one reduction chain; per-row
++      // math identical to the pair loop below.
++      float h_vals[4][4];
++      float dot_hk_p[4];
++#pragma unroll
++      for (int r = 0; r < 4; ++r) {
++        const float4 raw_h = load_state4(state_stage + (warp + r * kWarps) * kDimK + k_base);
++        h_vals[r][0] = raw_h.x * r_decay[0];
++        h_vals[r][1] = raw_h.y * r_decay[1];
++        h_vals[r][2] = raw_h.z * r_decay[2];
++        h_vals[r][3] = raw_h.w * r_decay[3];
++        dot_hk_p[r] = h_vals[r][0] * r_k[0] + h_vals[r][1] * r_k[1] + h_vals[r][2] * r_k[2] + h_vals[r][3] * r_k[3];
++      }
++      // Row r's total sits in lane kQuadLane[r] (see warp_reduce_sum_quad_split).
++      const float hk_red = warp_reduce_sum_quad_split(dot_hk_p[0], dot_hk_p[1], dot_hk_p[2], dot_hk_p[3]);
++      const float dot_hk_r[4] = {
++          __shfl_sync(0xffffffffu, hk_red, 0),
++          __shfl_sync(0xffffffffu, hk_red, 16),
++          __shfl_sync(0xffffffffu, hk_red, 8),
++          __shfl_sync(0xffffffffu, hk_red, 24)};
++      const int64_t slot_base_wb = static_cast<int64_t>(slot) * state_slot_stride;
++      float dot_hq_p[4];
++#pragma unroll
++      for (int r = 0; r < 4; ++r) {
++        const int vr = chunk * kChunkV + warp + r * kWarps;
++        const float v_new = (s_v[vr] - dot_hk_r[r]) * s_beta;
++        const float h0 = h_vals[r][0] + r_k[0] * v_new;
++        const float h1 = h_vals[r][1] + r_k[1] * v_new;
++        const float h2 = h_vals[r][2] + r_k[2] * v_new;
++        const float h3 = h_vals[r][3] + r_k[3] * v_new;
++        store_state4<kUseCacheGlobalStore>(
++            state + slot_base_wb + ((i_hv * kDimV + vr) * kDimK + k_base), make_float4(h0, h1, h2, h3));
++        dot_hq_p[r] = h0 * r_q[0] + h1 * r_q[1] + h2 * r_q[2] + h3 * r_q[3];
++      }
++      const float hq_red = warp_reduce_sum_quad_split(dot_hq_p[0], dot_hq_p[1], dot_hq_p[2], dot_hq_p[3]);
++      if ((lane & 7) == 0) {
++        // lane 0/8/16/24 -> row 0/2/1/3
++        const int r = ((lane >> 4) & 1) | ((lane >> 2) & 2);
++        s_o[chunk * kChunkV + warp + r * kWarps] = bf16_round(hq_red);
++      }
++    } else
+ #pragma unroll
+     for (int row = 0; row < kRowsPerWarp; row += 2) {
+       const int v_row_a = warp + row * kWarps;
+@@ -732,8 +961,8 @@
+       float dot_hk_a = 0.0f;
+       float dot_hk_b = 0.0f;
+ 
+-      const float4 raw_h_a = *reinterpret_cast<const float4*>(state_stage + v_row_a * kDimK + k_base);
+-      const float4 raw_h_b = *reinterpret_cast<const float4*>(state_stage + v_row_b * kDimK + k_base);
++      const float4 raw_h_a = load_state4(state_stage + v_row_a * kDimK + k_base);
++      const float4 raw_h_b = load_state4(state_stage + v_row_b * kDimK + k_base);
+       h_a_vals[0] = raw_h_a.x * r_decay[0];
+       h_a_vals[1] = raw_h_a.y * r_decay[1];
+       h_a_vals[2] = raw_h_a.z * r_decay[2];
+@@ -745,7 +974,7 @@
+       dot_hk_a = h_a_vals[0] * r_k[0] + h_a_vals[1] * r_k[1] + h_a_vals[2] * r_k[2] + h_a_vals[3] * r_k[3];
+       dot_hk_b = h_b_vals[0] * r_k[0] + h_b_vals[1] * r_k[1] + h_b_vals[2] * r_k[2] + h_b_vals[3] * r_k[3];
+ 
+-      const Sum2 dot_hk = warp_reduce_sum_pair(dot_hk_a, dot_hk_b);
++      const Sum2 dot_hk = warp_reduce_sum_pair_packed(dot_hk_a, dot_hk_b);
+       const float v_new0 = (s_v[v0] - dot_hk.x) * s_beta;
+       const float v_new1 = (s_v[v1] - dot_hk.y) * s_beta;
+ 
+@@ -767,22 +996,27 @@
+       if constexpr (kComputeOutputBeforeStore) {
+         dot_hq_a = h_a_0 * r_q[0] + h_a_1 * r_q[1] + h_a_2 * r_q[2] + h_a_3 * r_q[3];
+         dot_hq_b = h_b_0 * r_q[0] + h_b_1 * r_q[1] + h_b_2 * r_q[2] + h_b_3 * r_q[3];
+-        store_state_float4<kUseCacheGlobalStore>(state + state_idx_a, make_float4(h_a_0, h_a_1, h_a_2, h_a_3));
+-        store_state_float4<kUseCacheGlobalStore>(state + state_idx_b, make_float4(h_b_0, h_b_1, h_b_2, h_b_3));
++        store_state4<kUseCacheGlobalStore>(state + state_idx_a, make_float4(h_a_0, h_a_1, h_a_2, h_a_3));
++        store_state4<kUseCacheGlobalStore>(state + state_idx_b, make_float4(h_b_0, h_b_1, h_b_2, h_b_3));
+       } else {
+-        store_state_float4<kUseCacheGlobalStore>(state + state_idx_a, make_float4(h_a_0, h_a_1, h_a_2, h_a_3));
+-        store_state_float4<kUseCacheGlobalStore>(state + state_idx_b, make_float4(h_b_0, h_b_1, h_b_2, h_b_3));
++        store_state4<kUseCacheGlobalStore>(state + state_idx_a, make_float4(h_a_0, h_a_1, h_a_2, h_a_3));
++        store_state4<kUseCacheGlobalStore>(state + state_idx_b, make_float4(h_b_0, h_b_1, h_b_2, h_b_3));
+         dot_hq_a = h_a_0 * r_q[0] + h_a_1 * r_q[1] + h_a_2 * r_q[2] + h_a_3 * r_q[3];
+         dot_hq_b = h_b_0 * r_q[0] + h_b_1 * r_q[1] + h_b_2 * r_q[2] + h_b_3 * r_q[3];
+       }
+ 
+-      const Sum2 dot_hq = warp_reduce_sum_pair(dot_hq_a, dot_hq_b);
+-      if (lane == 0) {
+-        s_o[v0] = dot_hq.x;
+-        s_o[v1] = dot_hq.y;
+-        if constexpr (kApplyOnorm && kAccumulateOnormSumsq) {
++      if constexpr (kApplyOnorm && kAccumulateOnormSumsq) {
++        const Sum2 dot_hq = warp_reduce_sum_pair(dot_hq_a, dot_hq_b);
++        if (lane == 0) {
++          s_o[v0] = bf16_round(dot_hq.x);
++          s_o[v1] = bf16_round(dot_hq.y);
+           o_sumsq += dot_hq.x * dot_hq.x + dot_hq.y * dot_hq.y;
+         }
++      } else {
++        const float dot_hq = warp_reduce_sum_pair_split(dot_hq_a, dot_hq_b);
++        if ((lane & 15) == 0) {
++          s_o[lane == 0 ? v0 : v1] = bf16_round(dot_hq);
++        }
+       }
+     }
+ 
+@@ -887,7 +1121,13 @@
+ // and lower-bounded sigmoid) and selected at launch from the model config.
+ // kUseTmaLoad/kTmaStages select the 1D-TMA state-staging path in place of the
+ // cp.async fallback used for a misaligned recurrent-state slot stride.
+-template <int kFixedHeads, bool kUseLowerBound, bool kUsePDL, bool kUseTmaLoad = false, int kTmaStages = kNumChunks>
++template <
++    int kFixedHeads,
++    bool kUseLowerBound,
++    bool kUsePDL,
++    typename StateT = float,
++    bool kUseTmaLoad = false,
++    int kTmaStages = kNumChunks>
+ constexpr auto kda_fused_decode_k3_kernel = kda_decode_fusion_many_heads_kernel<
+     /*kApplyOnorm=*/true,
+     /*kUseStaticDecodeLayout=*/true,
+@@ -907,26 +1147,28 @@
+     /*kApplyBetaSigmoid=*/true,
+     kUseTmaLoad,
+     kTmaStages,
+-    kUsePDL>;
++    kUsePDL,
++    StateT>;
+ 
+-template <int kFixedHeads, bool kUsePDL>
++template <int kFixedHeads, bool kUsePDL, typename StateT>
+ auto select_kda_fused_decode_k3_kernel(bool use_lower_bound, int tma_stages) {
+   if (tma_stages == 3) {
+-    return use_lower_bound ? kda_fused_decode_k3_kernel<kFixedHeads, true, kUsePDL, true, 3>
+-                           : kda_fused_decode_k3_kernel<kFixedHeads, false, kUsePDL, true, 3>;
++    return use_lower_bound ? kda_fused_decode_k3_kernel<kFixedHeads, true, kUsePDL, StateT, true, 3>
++                           : kda_fused_decode_k3_kernel<kFixedHeads, false, kUsePDL, StateT, true, 3>;
+   }
+   if (tma_stages == 4) {
+-    return use_lower_bound ? kda_fused_decode_k3_kernel<kFixedHeads, true, kUsePDL, true, 4>
+-                           : kda_fused_decode_k3_kernel<kFixedHeads, false, kUsePDL, true, 4>;
++    return use_lower_bound ? kda_fused_decode_k3_kernel<kFixedHeads, true, kUsePDL, StateT, true, 4>
++                           : kda_fused_decode_k3_kernel<kFixedHeads, false, kUsePDL, StateT, true, 4>;
+   }
+-  return use_lower_bound ? kda_fused_decode_k3_kernel<kFixedHeads, true, kUsePDL>
+-                         : kda_fused_decode_k3_kernel<kFixedHeads, false, kUsePDL>;
++  return use_lower_bound ? kda_fused_decode_k3_kernel<kFixedHeads, true, kUsePDL, StateT>
++                         : kda_fused_decode_k3_kernel<kFixedHeads, false, kUsePDL, StateT>;
+ }
+ 
+ template <bool kUsePDL>
+ struct KdaFusedDecodeKernel {
++  template <typename StateT>
+   static void
+-  run(const tvm::ffi::TensorView mixed_qkv,     // [B, 3*H*128] bf16, row-strided
++  run_impl(const tvm::ffi::TensorView mixed_qkv,     // [B, 3*H*128] bf16, row-strided
+       const tvm::ffi::TensorView a,             // [B, H*128] bf16 raw forget gate
+       const tvm::ffi::TensorView b,             // [B, H] bf16 raw beta logits
+       const tvm::ffi::TensorView conv_states,   // [slots, 3, conv_dim] bf16 pool
+@@ -938,7 +1180,7 @@
+       const tvm::ffi::TensorView dt_bias,       // [H*128] fp32
+       const tvm::ffi::TensorView onorm_g,       // [B, H*128] bf16, row-strided
+       const tvm::ffi::TensorView onorm_weight,  // [128] fp32
+-      const tvm::ffi::TensorView state,         // [slots, H, 128, 128] fp32; inner-contiguous, any slot pitch
++      const tvm::ffi::TensorView state,         // [slots, H, 128, 128] state dtype; inner-contiguous, any slot pitch
+       const tvm::ffi::TensorView indices,       // [B] int32 (< 0 = padded slot)
+       const tvm::ffi::TensorView out,           // [B, H*128] bf16 dense
+       double scale,
+@@ -978,7 +1220,7 @@
+     // slot pitch from state.stride(0); only the inner [HV, V, K] contiguity
+     // (strides {V*K, K, 1}) is load-bearing here.
+     TensorMatcher({Slots_, kH, 128, 128})
+-        .with_dtype<fp32_t>()
++        .with_dtype<StateT>()
+         .with_device(device)
+         .with_strides({-1, 128 * 128, 128, 1})
+         .verify(state);
+@@ -1000,23 +1242,27 @@
+     // TMA 1D-bulk needs the per-slot source address (state + slot*stride) 16B
+     // aligned for every slot. state.data_ptr() is torch-aligned and each chunk
+     // offset is a multiple of kChunkV*kDimK*4 B, so alignment holds iff the slot
+-    // pitch itself is 16B-aligned, i.e. state_slot_stride % 4 == 0 (fp32). The
++    // pitch itself is 16B-aligned, i.e. state_slot_stride % (16 / sizeof(StateT)) == 0. The
+     // K3 envelope pitch (14,042,880 elems, %4==0) and the dense pitch both
+     // satisfy this; a pathological stride falls back to cp.async (still fully
+     // fused, just no TMA) rather than silently mis-addressing the descriptor.
+-    const bool tma_slot_stride_aligned = (state_slot_stride % 4) == 0;
++    const bool tma_slot_stride_aligned = (state_slot_stride % (16 / sizeof(StateT))) == 0;
+     if (tma_slot_stride_aligned) {
+       // Full-state staging (4 stages, 64KB, sync-free) wins while the grid
+       // is small enough that occupancy isn't the limiter; past that the
+       // 48KB 3-stage variant (one sync for the single stage reuse) benches
+       // fastest.
+-      tma_stages = B * static_cast<int>(kH) >= 512 ? 3 : 4;
++      if constexpr (std::is_same_v<StateT, float>) {
++        tma_stages = B * static_cast<int>(kH) >= 512 ? 3 : 4;
++      } else {
++        tma_stages = 4;
++      }
+     }
+-    auto kernel = kH == 3 ? select_kda_fused_decode_k3_kernel<3, kUsePDL>(use_lower_bound, tma_stages)
+-                          : (kH == 6 ? select_kda_fused_decode_k3_kernel<6, kUsePDL>(use_lower_bound, tma_stages)
+-                                     : select_kda_fused_decode_k3_kernel<12, kUsePDL>(use_lower_bound, tma_stages));
++    auto kernel = kH == 3 ? select_kda_fused_decode_k3_kernel<3, kUsePDL, StateT>(use_lower_bound, tma_stages)
++                          : (kH == 6 ? select_kda_fused_decode_k3_kernel<6, kUsePDL, StateT>(use_lower_bound, tma_stages)
++                                     : select_kda_fused_decode_k3_kernel<12, kUsePDL, StateT>(use_lower_bound, tma_stages));
+     const int smem_stages = tma_stages == 0 ? 2 : tma_stages;
+-    const size_t smem_bytes = static_cast<size_t>(smem_stages) * kChunkV * kDimK * sizeof(float);
++    const size_t smem_bytes = static_cast<size_t>(smem_stages) * kChunkV * kDimK * sizeof(StateT);
+     host::RuntimeDeviceCheck(
+         cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, static_cast<int>(smem_bytes)));
+ 
+@@ -1043,7 +1289,7 @@
+             static_cast<const fp32_t*>(onorm_weight.data_ptr()),
+             static_cast<const int32_t*>(indices.data_ptr()),
+             /*cu_seqlens=*/static_cast<const int32_t*>(nullptr),
+-            static_cast<fp32_t*>(state.data_ptr()),
++            static_cast<StateT*>(state.data_ptr()),
+             static_cast<__nv_bfloat16*>(out.data_ptr()),
+             B,
+             /*H=*/static_cast<int>(kH),
+@@ -1059,6 +1305,74 @@
+             conv_states.stride(1),
+             state_slot_stride);
+   }
++
++  static void
++  run(const tvm::ffi::TensorView mixed_qkv,
++      const tvm::ffi::TensorView a,
++      const tvm::ffi::TensorView b,
++      const tvm::ffi::TensorView conv_states,
++      const tvm::ffi::TensorView w_q_t,
++      const tvm::ffi::TensorView w_k_t,
++      const tvm::ffi::TensorView w_v_t,
++      const tvm::ffi::TensorView conv_bias,
++      const tvm::ffi::TensorView A_log,
++      const tvm::ffi::TensorView dt_bias,
++      const tvm::ffi::TensorView onorm_g,
++      const tvm::ffi::TensorView onorm_weight,
++      const tvm::ffi::TensorView state,
++      const tvm::ffi::TensorView indices,
++      const tvm::ffi::TensorView out,
++      double scale,
++      double onorm_eps,
++      double lower_bound,
++      bool use_lower_bound) {
++    using namespace host;
++    if (is_type<bf16_t>(state.dtype())) {
++      run_impl<bf16_t>(
++          mixed_qkv,
++          a,
++          b,
++          conv_states,
++          w_q_t,
++          w_k_t,
++          w_v_t,
++          conv_bias,
++          A_log,
++          dt_bias,
++          onorm_g,
++          onorm_weight,
++          state,
++          indices,
++          out,
++          scale,
++          onorm_eps,
++          lower_bound,
++          use_lower_bound);
++    } else if (is_type<fp32_t>(state.dtype())) {
++      run_impl<fp32_t>(
++          mixed_qkv,
++          a,
++          b,
++          conv_states,
++          w_q_t,
++          w_k_t,
++          w_v_t,
++          conv_bias,
++          A_log,
++          dt_bias,
++          onorm_g,
++          onorm_weight,
++          state,
++          indices,
++          out,
++          scale,
++          onorm_eps,
++          lower_bound,
++          use_lower_bound);
++    } else {
++      RuntimeCheck(false, "KDA fused decode state must be bfloat16 or float32, got ", state.dtype());
++    }
++  }
+ };
+ 
+ }  // namespace sglang
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512_claude/pristine_tree/kernels/jit/csrc/kimi_k3/attn_res/fused_tma.cuh /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512_claude/trial_3_tree_judged/kernels/jit/csrc/kimi_k3/attn_res/fused_tma.cuh
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512_claude/pristine_tree/kernels/jit/csrc/kimi_k3/attn_res/fused_tma.cuh	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512_claude/trial_3_tree_judged/kernels/jit/csrc/kimi_k3/attn_res/fused_tma.cuh	2026-09-25 05:04:26.188096973 -0700
+@@ -175,6 +175,10 @@
+   // row snapshot, bank row nvb (strided by stride_bm like the read rows).
+   // The kernel never reads row nvb, so the write races with nothing.
+   bf16_t* __restrict__ prefix_dst;
++  // Fused pending residual add (nullptr = off): the prefix row becomes
++  // bf16(prefix_sum + prefix_addend), also stored to prefix_sum_out.
++  const bf16_t* prefix_addend;
++  bf16_t* prefix_sum_out;
+   // Optional fused NVLS reduce-scatter source. When input_mc is non-null,
+   // the producer warp materializes this rank's reduced token shard plus the
+   // local residual into prefix_sum/prefix_out before TMA consumes it.
+@@ -246,6 +250,8 @@
+     float warp_ssq[kNumConsumerWarps];
+     uint32_t tmem_base;
+     alignas(128) bf16_t buf[kNumStages][kChunkRows][kDim];
++    // prefix_addend row, staged with the chunk holding the prefix row.
++    alignas(128) bf16_t addend_buf[kNumStages][kDim];
+   };
+ 
+   static SGL_DEVICE void forward(const AttnResTMAParams& params, Smem* smem);
+@@ -303,8 +309,9 @@
+           if (global_chunks >= kNumStages) {
+             ptx::mbar_wait_parity(&smem->bar_free[slot], phase ^ 1);
+           }
++          const bool with_addend = params.prefix_addend != nullptr && base_row + an == kNumRows + 1;
+           // One pull per chunk; each row still gets its own bulk copy.
+-          ptx::mbar_arrive_expect_tx(&smem->bar_full[slot], an * kRowBytes);
++          ptx::mbar_arrive_expect_tx(&smem->bar_full[slot], (an + with_addend) * kRowBytes);
+ #pragma unroll
+           for (uint32_t r = 0; r < an; ++r) {
+             const auto row = base_row + r;
+@@ -315,6 +322,10 @@
+             if (token == blockIdx.x && row == kNumRows) PDLWaitPrimary<true>();
+             ptx::cp_async_bulk_1d_load(&smem->buf[slot][r], src, kRowBytes, &smem->bar_full[slot]);
+           }
++          if (with_addend) {
++            ptx::cp_async_bulk_1d_load(
++                &smem->addend_buf[slot], params.prefix_addend + token * kDim, kRowBytes, &smem->bar_full[slot]);
++          }
+         }
+       }
+       PDLTriggerSecondary<true>();
+@@ -394,6 +405,18 @@
+           for (uint32_t r = 0; r < an; ++r) {
+             rows[si][r].load(&smem->buf[slot][r][offset]);
+           }
++          // Same rounding as the unfused torch add: fp32 sum, one bf16 round.
++          if (params.prefix_addend != nullptr && base_row + an == kNumRows + 1) {
++            const uint32_t pr = kNumRows - base_row;
++            row_vec_t addend;
++            addend.load(&smem->addend_buf[slot][offset]);
++#pragma unroll
++            for (uint32_t j = 0; j < kVecElems / 2; ++j) {
++              const auto x = cast<float2>(rows[si][pr][j]);
++              const auto y = cast<float2>(addend[j]);
++              rows[si][pr][j] = cast<bf16x2_t>(make_float2(x.x + y.x, x.y + y.y));
++            }
++          }
+ #pragma unroll
+           for (uint32_t r = 0; r < an; ++r) {
+ #pragma unroll
+@@ -420,6 +443,16 @@
+             rows[si][pr].store(dst, tile * (kTile / kVecElems) + tid_in_group);
+           }
+         }
++        if (params.prefix_sum_out != nullptr && base_row + an == kNumRows + 1) {
++          const uint32_t pr = kNumRows - base_row;
++          auto* dst = params.prefix_sum_out + static_cast<int64_t>(token) * kDim;
++#pragma unroll
++          for (uint32_t si = 0; si < kSlicesPerGroup; ++si) {
++            const auto tile = si * kNumGroups + group;
++            if (tile >= kNumTiles) continue;
++            rows[si][pr].store(dst, tile * (kTile / kVecElems) + tid_in_group);
++          }
++        }
+ 
+         float acc_rms[kChunkRows];
+         float acc_dot[kChunkRows];
+@@ -685,7 +718,9 @@
+       const tvm::ffi::TensorView out,
+       int64_t nvb,
+       double eps,
+-      bool write_prefix) {
++      bool write_prefix,
++      std::optional<tvm::ffi::TensorView> prefix_addend,
++      std::optional<tvm::ffi::TensorView> prefix_sum_out) {
+     using namespace host;
+ 
+     auto T_ = SymbolicSize{"num_tokens"};
+@@ -697,6 +732,16 @@
+     TensorMatcher({T_, H_}).with_dtype<bf16_t>().with_device(device).verify(prefix_sum).verify(out);
+     TensorMatcher({T_, NB_, H_}).with_dtype<bf16_t>().with_device(device).verify(bank);
+     TensorMatcher({H_}).with_dtype<bf16_t>().with_device(device).verify(cw).verify(ow);
++    RuntimeCheck(
++        prefix_addend.has_value() == prefix_sum_out.has_value(),
++        "attn_res_fused_tma: prefix_addend and prefix_sum_out go together");
++    if (prefix_addend.has_value()) {
++      TensorMatcher({T_, H_})
++          .with_dtype<bf16_t>()
++          .with_device(device)
++          .verify(prefix_addend.value())
++          .verify(prefix_sum_out.value());
++    }
+ 
+     const auto num_tokens = static_cast<int64_t>(T_.unwrap());
+     const auto H = static_cast<int64_t>(H_.unwrap());
+@@ -736,6 +781,8 @@
+         .ow = static_cast<const bf16_t*>(ow.data_ptr()),
+         .out = static_cast<bf16_t*>(out.data_ptr()),
+         .prefix_dst = write_prefix ? static_cast<bf16_t*>(bank.data_ptr()) + nvb * H : nullptr,
++        .prefix_addend = prefix_addend.has_value() ? static_cast<const bf16_t*>(prefix_addend.value().data_ptr()) : nullptr,
++        .prefix_sum_out = prefix_sum_out.has_value() ? static_cast<bf16_t*>(prefix_sum_out.value().data_ptr()) : nullptr,
+         .input_mc = nullptr,
+         .residual = nullptr,
+         .prefix_out = nullptr,
+@@ -816,6 +863,8 @@
+         .ow = static_cast<const bf16_t*>(ow.data_ptr()),
+         .out = static_cast<bf16_t*>(out.data_ptr()),
+         .prefix_dst = nullptr,
++        .prefix_addend = nullptr,
++        .prefix_sum_out = nullptr,
+         .input_mc = reinterpret_cast<const uint8_t*>(static_cast<uintptr_t>(input_mc_ptr)) +
+                     pull.rank * local_elems * sizeof(bf16_t),
+         .residual = residual.has_value() ? static_cast<const bf16_t*>(residual.value().data_ptr()) : nullptr,
+@@ -892,6 +941,8 @@
+         .ow = static_cast<const bf16_t*>(ow.data_ptr()),
+         .out = static_cast<bf16_t*>(out.data_ptr()),
+         .prefix_dst = write_prefix ? static_cast<bf16_t*>(bank.data_ptr()) + nvb * H : nullptr,
++        .prefix_addend = nullptr,
++        .prefix_sum_out = nullptr,
+         .input_mc = nullptr,
+         .residual = nullptr,
+         .prefix_out = nullptr,
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512_claude/pristine_tree/kernels/ops/attention/fla/fused_recurrent.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512_claude/trial_3_tree_judged/kernels/ops/attention/fla/fused_recurrent.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512_claude/pristine_tree/kernels/ops/attention/fla/fused_recurrent.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512_claude/trial_3_tree_judged/kernels/ops/attention/fla/fused_recurrent.py	2026-09-23 06:51:33.279699466 -0700
+@@ -628,6 +628,8 @@
+     # part (~9.6 TB/s) where this triton kernel tops out at ~5 TB/s holding a
+     # [BV, K] register tile per warp. ULP-level output differences only
+     # (reduction order); small batches keep triton (launch-bound anyway).
++    # kda_packed_decode.cuh implements both the standard softplus gate and
++    # KDA's safe lower-bound gate; pass the bound through to that kernel.
+     if use_qk_l2norm_in_kernel:
+         from sglang.kernels.ops.attention import kda_packed_decode as kda_decode_cuda
+ 
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512_claude/pristine_tree/kernels/ops/attention/kda_fused_decode.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512_claude/trial_3_tree_judged/kernels/ops/attention/kda_fused_decode.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512_claude/pristine_tree/kernels/ops/attention/kda_fused_decode.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512_claude/trial_3_tree_judged/kernels/ops/attention/kda_fused_decode.py	2026-09-24 02:52:24.452488193 -0700
+@@ -61,8 +61,8 @@
+     onorm_g: torch.Tensor,
+ ) -> bool:
+     """The kernel is compiled for the K3 KDA decode regime: H heads of 128,
+-    packed [T, 3*H*128] qkv rows, transposed [slots, 3, 3*H*128] conv pool, fp32
+-    [slots, H, 128, 128] ssm pool (inner-contiguous, any slot pitch — the
++    packed [T, 3*H*128] qkv rows, transposed [slots, 3, 3*H*128] conv pool, BF16
++    or FP32 [slots, H, 128, 128] ssm pool (inner-contiguous, any slot pitch — the
+     kernel reads the real slot stride), one token per request."""
+     if ssm_states.ndim < 4:
+         return False
+@@ -89,7 +89,7 @@
+         and b.dtype == torch.bfloat16
+         and onorm_g.dtype == torch.bfloat16
+         and conv_states.dtype == torch.bfloat16
+-        and ssm_states.dtype == torch.float32
++        and ssm_states.dtype in (torch.bfloat16, torch.float32)
+         and cache_indices.dtype == torch.int32
+         and mixed_qkv.stride(-1) == 1
+         and a.stride(-1) == 1
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512_claude/pristine_tree/kernels/ops/kimi_k3/attn_res.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512_claude/trial_3_tree_judged/kernels/ops/kimi_k3/attn_res.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512_claude/pristine_tree/kernels/ops/kimi_k3/attn_res.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512_claude/trial_3_tree_judged/kernels/ops/kimi_k3/attn_res.py	2026-09-25 05:00:00.001468966 -0700
+@@ -158,6 +158,8 @@
+     eps: float,
+     *,
+     write_prefix: bool = False,
++    prefix_addend: torch.Tensor | None = None,
++    prefix_sum_out: torch.Tensor | None = None,
+ ) -> None:
+     """Warp-specialized TMA aggregation (score -> online softmax -> weighted
+     combine -> fused output RMSNorm), one persistent CTA per SM: a producer
+@@ -182,9 +184,22 @@
+     write_prefix : also snapshot the prefix row into bank[:, nvb, :]
+                  (bit-exact copy, fused into the score pass which already
+                  has the row in registers); requires NB > nvb
++    prefix_addend  : optional [T, H] bf16; the aggregated prefix row becomes
++                 bf16(prefix_sum + prefix_addend) (torch-add rounding)
++    prefix_sum_out : [T, H] bf16 destination of that sum; required iff
++                 prefix_addend is given
+     """
+     _jit_fused_tma_module(*_tuning(nvb, prefix_sum.shape[0])).run(
+-        prefix_sum, bank, cw, ow, out, nvb, eps, write_prefix
++        prefix_sum,
++        bank,
++        cw,
++        ow,
++        out,
++        nvb,
++        eps,
++        write_prefix,
++        prefix_addend,
++        prefix_sum_out,
+     )
+ 
+ 
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512_claude/pristine_tree/srt/layers/attention/linear/kda_backend.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512_claude/trial_3_tree_judged/srt/layers/attention/linear/kda_backend.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512_claude/pristine_tree/srt/layers/attention/linear/kda_backend.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512_claude/trial_3_tree_judged/srt/layers/attention/linear/kda_backend.py	2026-09-23 06:11:15.556367933 -0700
+@@ -735,11 +735,9 @@
+             conv_state_indices=cache_indices,
+         )
+ 
+-        # The packed kernel assumes one token per request.
+-        if (
+-            self.kernel_dispatcher.supports_packed_decode
+-            and getattr(layer, "lower_bound", None) is None
+-        ):
++        # The packed kernel assumes one token per request. Its Triton KDA
++        # implementation also handles the KDA safe gate (lower_bound).
++        if self.kernel_dispatcher.supports_packed_decode:
+             assert qkv.shape[0] == cache_indices.shape[0], (
+                 "KDA packed decode requires one token per sequence (T=1): "
+                 f"got {qkv.shape[0]} tokens for {cache_indices.shape[0]} requests."
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512_claude/pristine_tree/srt/layers/attn_residual.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512_claude/trial_3_tree_judged/srt/layers/attn_residual.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512_claude/pristine_tree/srt/layers/attn_residual.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512_claude/trial_3_tree_judged/srt/layers/attn_residual.py	2026-09-25 05:00:00.001468966 -0700
+@@ -91,6 +91,8 @@
+     score_norm: RMSNorm,
+     out_norm: RMSNorm,
+     write_bank_row: bool = False,
++    prefix_addend: Optional[torch.Tensor] = None,
++    prefix_sum_out: Optional[torch.Tensor] = None,
+ ) -> torch.Tensor:
+     """Warp-specialized TMA kernel: online softmax over row chunks with the
+     output RMSNorm fused, one persistent CTA per SM, per-nvb tuned launch
+@@ -113,6 +115,8 @@
+         nvb,
+         score_norm.variance_epsilon,
+         write_prefix=write_bank_row,
++        prefix_addend=prefix_addend,
++        prefix_sum_out=prefix_sum_out,
+     )
+     return out
+ 
+@@ -382,6 +386,21 @@
+             out_norm,
+             write_bank_row=write_bank_row,
+         )
++    if _use_fast(prefix_a.shape[1]):
++        # The TMA kernel holds the prefix row in registers, so the add folds in.
++        prefix = torch.empty_like(prefix_a)
++        normed = _aggregate_fast(
++            prefix_a,
++            bank,
++            nvb,
++            score_proj,
++            score_norm,
++            out_norm,
++            write_bank_row=write_bank_row,
++            prefix_addend=prefix_b,
++            prefix_sum_out=prefix,
++        )
++        return normed, prefix
+     prefix = prefix_a + prefix_b
+     return (
+         _aggregate(
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512_claude/pristine_tree/srt/layers/moe/moe_runner/flashinfer_trtllm.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512_claude/trial_3_tree_judged/srt/layers/moe/moe_runner/flashinfer_trtllm.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512_claude/pristine_tree/srt/layers/moe/moe_runner/flashinfer_trtllm.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512_claude/trial_3_tree_judged/srt/layers/moe/moe_runner/flashinfer_trtllm.py	2026-09-25 03:15:38.113779735 -0700
+@@ -1,5 +1,6 @@
+ from __future__ import annotations
+ 
++import contextlib
+ import contextvars
+ from contextlib import contextmanager
+ from dataclasses import dataclass
+@@ -56,6 +57,58 @@
+     return is_arch_support_pdl() and num_tokens <= _TRTLLM_MOE_PDL_MAX_TOKENS
+ 
+ 
++_MXFP4_TUNE_OP = "flashinfer::trtllm_fp4_block_scale_moe"
++# FlashInfer's untuned fallback tile_N; see _mxfp4_moe_tune_context.
++_MXFP4_MIN_TILE_N = 8
++_mxfp4_self_tuned_buckets: set[int] = set()
++
++
++def _mxfp4_moe_tune_context(num_tokens: int, top_k: int, num_local_experts: int):
++    """Profile the trtllm-gen MXFP4 tactic of this token bucket once, eagerly.
++
++    Untuned, FlashInfer runs the tile_N one below nextPow2(rows per expert), so
++    above 8 rows/expert each expert's weights are split over 2+ CTAs (B=512
++    over 112 local experts: tile 8, ~15% slower than a tuned tile-16 tactic).
++    Only engaged in that regime, when no runner-level autotune pass produced
++    data for this op, outside graph capture; one bucket is profiled per shape.
++    """
++    from flashinfer.autotuner import AutoTuner, autotune
++
++    if num_tokens * top_k <= _MXFP4_MIN_TILE_N * num_local_experts:
++        return contextlib.nullcontext()
++    bucket = 1 << (num_tokens.bit_length() - 1)
++    tuner = AutoTuner.get()
++    if (
++        bucket in _mxfp4_self_tuned_buckets
++        or tuner.is_tuning_mode
++        or torch.cuda.is_current_stream_capturing()
++    ):
++        return contextlib.nullcontext()
++    if not _mxfp4_self_tuned_buckets:
++        if _flashinfer_autotune_disabled() or any(
++            k.custom_op == _MXFP4_TUNE_OP for k in tuner.profiling_cache
++        ):
++            _mxfp4_self_tuned_buckets.add(-1)
++    if -1 in _mxfp4_self_tuned_buckets:
++        return contextlib.nullcontext()
++    _mxfp4_self_tuned_buckets.add(bucket)
++    return autotune(True, tuning_buckets=(bucket,))
++
++
++def _flashinfer_autotune_disabled() -> bool:
++    from sglang.srt.runtime_context import get_exec
++
++    try:
++        exec_cfg = get_exec()
++        return bool(
++            exec_cfg.kernel.disable_flashinfer_autotune
++            or exec_cfg.deterministic.enable_deterministic_inference
++        )
++    except Exception:
++        # No server config (standalone layer drivers): nothing disabled it.
++        return False
++
++
+ @dataclass
+ class FlashInferTrtllmDeferredFinalizeOutput:
+     gemm2_out: torch.Tensor
+@@ -1105,38 +1158,43 @@
+             routed_top_k = _routing_top_k(routing)
+ 
+             defer_finalize = _deferred_finalize_enabled.get()
+-            result = trtllm_fp4_block_scale_routed_moe(
+-                topk_ids=routing,
+-                routing_bias=None,
+-                hidden_states=x_quant,
+-                hidden_states_scale=x_scale,
+-                gemm1_weights=quant_info.w13_weight,
+-                gemm1_weights_scale=quant_info.w13_weight_scale,
+-                gemm1_bias=None,
+-                gemm1_alpha=quant_info.gemm1_alpha,
+-                gemm1_beta=quant_info.gemm1_clamp_limit,
+-                gemm1_clamp_limit=None,
+-                gemm2_weights=quant_info.w2_weight,
+-                gemm2_weights_scale=quant_info.w2_weight_scale,
+-                gemm2_bias=None,
+-                output1_scale_scalar=None,
+-                output1_scale_gate_scalar=None,
+-                output2_scale_scalar=None,
+-                num_experts=quant_info.global_num_experts,
++            with _mxfp4_moe_tune_context(
++                num_tokens=x_quant.shape[0],
+                 top_k=routed_top_k,
+-                n_group=None,
+-                topk_group=None,
+-                intermediate_size=quant_info.intermediate_size_per_partition,
+-                local_expert_offset=quant_info.local_expert_offset,
+-                local_num_experts=quant_info.local_num_experts,
+-                routed_scaling_factor=None,
+-                routing_method_type=RoutingMethodType.TopK.value,
+-                activation_type=ActivationType.Situ.value,
+-                tune_max_num_tokens=next_power_of_2(x_quant.shape[0]),
+-                output=symm_output,
+-                do_finalize=not defer_finalize,
+-                enable_pdl=trtllm_moe_enable_pdl(x_quant.shape[0]),
+-            )
++                num_local_experts=quant_info.local_num_experts,
++            ):
++                result = trtllm_fp4_block_scale_routed_moe(
++                    topk_ids=routing,
++                    routing_bias=None,
++                    hidden_states=x_quant,
++                    hidden_states_scale=x_scale,
++                    gemm1_weights=quant_info.w13_weight,
++                    gemm1_weights_scale=quant_info.w13_weight_scale,
++                    gemm1_bias=None,
++                    gemm1_alpha=quant_info.gemm1_alpha,
++                    gemm1_beta=quant_info.gemm1_clamp_limit,
++                    gemm1_clamp_limit=None,
++                    gemm2_weights=quant_info.w2_weight,
++                    gemm2_weights_scale=quant_info.w2_weight_scale,
++                    gemm2_bias=None,
++                    output1_scale_scalar=None,
++                    output1_scale_gate_scalar=None,
++                    output2_scale_scalar=None,
++                    num_experts=quant_info.global_num_experts,
++                    top_k=routed_top_k,
++                    n_group=None,
++                    topk_group=None,
++                    intermediate_size=quant_info.intermediate_size_per_partition,
++                    local_expert_offset=quant_info.local_expert_offset,
++                    local_num_experts=quant_info.local_num_experts,
++                    routed_scaling_factor=None,
++                    routing_method_type=RoutingMethodType.TopK.value,
++                    activation_type=ActivationType.Situ.value,
++                    tune_max_num_tokens=next_power_of_2(x_quant.shape[0]),
++                    output=symm_output,
++                    do_finalize=not defer_finalize,
++                    enable_pdl=trtllm_moe_enable_pdl(x_quant.shape[0]),
++                )
+             if defer_finalize:
+                 gemm2_out, topk_weights, expanded_idx = result
+                 result = FlashInferTrtllmDeferredFinalizeOutput(
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512_claude/pristine_tree/srt/models/kimi_k3.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512_claude/trial_3_tree_judged/srt/models/kimi_k3.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512_claude/pristine_tree/srt/models/kimi_k3.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512_claude/trial_3_tree_judged/srt/models/kimi_k3.py	2026-09-25 05:32:20.449291968 -0700
+@@ -196,6 +196,20 @@
+             (x.shape[0], weight.shape[0]), dtype=out_dtype, device=x.device
+         )
+     if x.dtype == torch.bfloat16 and weight.dtype == torch.bfloat16:
++        if (
++            out_dtype is None
++            and weight.shape == (7168, 6144)
++            and x.shape[0] <= 128
++            and x.is_contiguous()
++        ):
++            from sglang.kernels.ops.gemm.cutedsl_bf16_gemm import (
++                cutedsl_bf16_gemm,
++                cutedsl_bf16_gemm_out,
++            )
++
++            if out is None:
++                return cutedsl_bf16_gemm(x, weight)
++            return cutedsl_bf16_gemm_out(x, weight, out)
+         from sglang.srt.layers.quantization.unquant import get_bf16_gemm_backend
+ 
+         if get_bf16_gemm_backend().is_cutedsl():
+@@ -1318,8 +1332,28 @@
+                     prefix_sum,
+                 )
+         else:  # single collective over the flat [latent | shared] pair
+-            self._forward_shared(gate_up, shared_output)
+-            self._forward_routed(hidden_states, router_logits, routed_input, latent)
++            # With one rank there is no collective to overlap, so issue the
++            # independent shared-down GEMM on the existing side stream while
++            # the routed MXFP4 path uses the current stream. Keep the
++            # multi-rank and AR-fusion schedules unchanged.
++            overlap_shared = (
++                self.alt_stream is not None
++                and self.tp_size == 1
++                and not k3_ar_fusion.enabled()
++            )
++            if overlap_shared:
++                # Routed is captured first so the graph keeps it on the front
++                # GEMM's stream (critical path); shared forks off after it.
++                current_stream = torch.cuda.current_stream()
++                self.alt_stream.wait_stream(current_stream)
++                self._forward_routed(hidden_states, router_logits, routed_input, latent)
++                with torch.cuda.stream(self.alt_stream):
++                    self._forward_shared(gate_up, shared_output)
++                    shared_event = self.alt_stream.record_event()
++                current_stream.wait_event(shared_event)
++            else:
++                self._forward_shared(gate_up, shared_output)
++                self._forward_routed(hidden_states, router_logits, routed_input, latent)
+             if self.fuse_ar_norm and k3_ar_fusion.enabled():
+                 fused_norm = True
+                 k3_ar_fusion.all_reduce_norm(
+@@ -1406,10 +1440,11 @@
+         # Side stream for the [f_a|b] + f_b tiny GEMVs: they read only
+         # hidden_states, so they can run concurrently with the wide fused
+         # [q,k,v,g] GEMM on the main stream (graphed decode/verify only).
+-        # Same SM bound rationale as the MLA gate stream.
++        # Same SM bound rationale as the MLA gate stream; on B200 the overlap
++        # still wins at 256/512 tokens (measured, single KDA layer decode).
+         self._bfa_alt_stream = bfa_alt_stream
+         self._bfa_bs_limit = (
+-            (128 if get_platform().is_blackwell else 64)
++            (512 if get_platform().is_blackwell else 64)
+             if bfa_alt_stream is not None
+             else 0
+         )
+@@ -1504,7 +1539,7 @@
+             # _merge_bfa_weights().
+             self._bfa_w: Optional[torch.Tensor] = None
+             self._bfa_f_b_w: Optional[torch.Tensor] = None
+-            if _is_hip:
++            if True:
+                 # ROCm only: _merge_kda_inproj_weights_hip() may merge the
+                 # whole [q,k,v,g | f_a | b] in-proj instead, making _bfa_w a
+                 # tail view of that buffer. _qkvgbfa_sizes is the split of the
+@@ -1513,7 +1548,7 @@
+                 self._qkvgbfa_layer: Optional[SimpleNamespace] = None
+                 self._qkvgbfa_sizes: Optional[list[int]] = None
+                 self._qkvgbfa_bs_limit = (
+-                    envs.SGLANG_ROCM_K3_FUSE_KDA_INPROJ_MAX_TOKENS.get()
++                    int(__import__("os").environ.get("EXP_MIN", "0"))
+                 )
+         elif self.do_fuse_qkvbfg:
+             self.qkvb_sizes = [
+@@ -1738,7 +1773,7 @@
+             return
+         if _is_npu:
+             return
+-        if _is_hip and self._merge_kda_inproj_weights_hip():
++        if self._merge_kda_inproj_weights_hip():
+             # Split-path f_b GEMM still uses this when the fused in-proj
+             # is above the token threshold.
+             self._bfa_f_b_w = self.f_b_proj.weight
+@@ -1799,7 +1834,7 @@
+         plain unquantized 2-D tensors of one dtype and width -- the checkpoint
+         keeps attention in bf16, but a quantized variant would carry scales
+         that a raw row-cat would silently drop."""
+-        if not (_is_hip and envs.SGLANG_ROCM_K3_FUSE_KDA_INPROJ.get()):
++        if False:
+             return False
+         if not (self.do_fuse_qkvbfg and self.use_full_rank_gate):
+             return False
+@@ -1921,9 +1956,9 @@
+                 from sglang.kernels.ops.kimi_k3 import kimi_k3_tiny_gemm as gemm
+ 
+                 if (
+-                    _is_hip
++                    True
+                     and self._qkvgbfa_sizes is not None
+-                    and 0 < hidden_states.shape[0] <= self._qkvgbfa_bs_limit
++                    and hidden_states.shape[0] > self._qkvgbfa_bs_limit
+                 ):
+                     # ROCm only. One GEMM for the whole in-proj: the [f_a|b]
+                     # tail rides along in the wide projection's bandwidth

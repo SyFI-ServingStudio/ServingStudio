@@ -1,0 +1,706 @@
+diff -ruN -x __pycache__ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512_claude/trial_1_tree_judged/kernels/jit/csrc/attention/kda_fused_decode.cuh /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512_claude/trial_3_tree_judged/kernels/jit/csrc/attention/kda_fused_decode.cuh
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512_claude/trial_1_tree_judged/kernels/jit/csrc/attention/kda_fused_decode.cuh	2026-09-25 03:45:25.497584101 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512_claude/trial_3_tree_judged/kernels/jit/csrc/attention/kda_fused_decode.cuh	2026-09-25 05:21:14.432805047 -0700
+@@ -314,6 +314,26 @@
+   return value;
+ }
+ 
++// Four rows at once over the same xor-16/8/4/2/1 butterfly tree as
++// warp_reduce_sum_pair_split (bit-identical totals): each level halves the
++// values a lane carries, so 4 rows cost 6 shuffles instead of 2 x 5. Totals
++// end in lanes [0,8) = a, [8,16) = c, [16,24) = b, [24,32) = d.
++SGL_DEVICE float warp_reduce_sum_quad_split(float a, float b, float c, float d) {
++  const bool upper = (threadIdx.x & 16) != 0;
++  float lo = upper ? b : a;
++  float hi = upper ? d : c;
++  lo += __shfl_xor_sync(0xffffffffu, upper ? a : b, 16);
++  hi += __shfl_xor_sync(0xffffffffu, upper ? c : d, 16);
++  const bool upper8 = (threadIdx.x & 8) != 0;
++  float value = upper8 ? hi : lo;
++  value += __shfl_xor_sync(0xffffffffu, upper8 ? lo : hi, 8);
++#pragma unroll
++  for (int mask = 4; mask >= 1; mask >>= 1) {
++    value += __shfl_xor_sync(0xffffffffu, value, mask);
++  }
++  return value;
++}
++
+ // Both totals in every lane (one extra shuffle across the halves).
+ SGL_DEVICE Sum2 warp_reduce_sum_pair_packed(float x, float y) {
+   const float value = warp_reduce_sum_pair_split(x, y);
+@@ -595,8 +615,15 @@
+     cp_async_state_chunk(s_state, state, slot, i_hv, state_slot_stride, 0);
+   }
+ 
+-  if constexpr (kUpdateConvState) {
+-    // Lower warps: q conv + decay; upper warps: k conv, then the v conv below.
++  // K3 path: every prologue global read (conv taps/state/x for q, k and v,
++  // gate, beta, onorm params) is issued before the first conv-state store.
++  // The compiler cannot hoist loads above those stores itself (cs_qk is a
++  // runtime pointer select), so the unfused order paid three dependent
++  // memory round trips here; the arithmetic below is unchanged.
++  constexpr bool kHoistPrologueLoads = kUpdateConvState && kApplyOnorm && kPreloadOnormParams;
++  static_assert(kThreads == kDimK + kDimV);
++  if constexpr (kHoistPrologueLoads) {
++    // Lower warps: q conv + decay (+ onorm params); upper warps: k conv + v conv.
+     const bool is_q = tid < kDimK;
+     const int k = is_q ? tid : tid - (kThreads - kDimK);
+     const int hk = hk_off + k;
+@@ -604,125 +631,222 @@
+     __nv_bfloat16* cs_qk = is_q ? cs_q : cs_k;
+     const float* w_qk_t = is_q ? w_q_t : w_k_t;
+ 
+-    float acc = is_q ? bias_q[hk] : bias_k[hk];
+-    __nv_bfloat16 shift0 = __float2bfloat16(0.0f);
+-    __nv_bfloat16 shift1 = __float2bfloat16(0.0f);
++    const float qk_bias = is_q ? bias_q[hk] : bias_k[hk];
++    __nv_bfloat16 qk_state[kConvStateWidth];
++    float qk_w[kKernelWidth];
+ #pragma unroll
+     for (int w = 0; w < kConvStateWidth; ++w) {
+-      const __nv_bfloat16 state_w = cs_qk[cs_base + w * cs_w_stride];
+-      acc += __bfloat162float(state_w) * fp32_at(w_qk_t, w * hkv_dim + hk);
+-      if (w == 1) {
+-        shift0 = state_w;
+-      } else if (w == 2) {
+-        shift1 = state_w;
+-      }
++      qk_state[w] = cs_qk[cs_base + w * cs_w_stride];
++    }
++#pragma unroll
++    for (int w = 0; w < kKernelWidth; ++w) {
++      qk_w[w] = fp32_at(w_qk_t, w * hkv_dim + hk);
+     }
+     const __nv_bfloat16 x_new = (is_q ? x_q : x_k)[bos * x_row_stride + hk];
+-    acc += __bfloat162float(x_new) * fp32_at(w_qk_t, (kKernelWidth - 1) * hkv_dim + hk);
+ 
+-    cs_qk[cs_base + 0] = shift0;
+-    cs_qk[cs_base + cs_w_stride] = shift1;
++    float a_log_raw = 0.0f;
++    float g_raw = 0.0f;
++    float onorm_gate_raw = 0.0f;
++    float beta_raw = 0.0f;
++    const int v = k;
++    const int hvv = hv_off + v;
++    const int64_t cs_v_base = slot * cs_slot_stride + hvv;
++    float v_bias = 0.0f;
++    __nv_bfloat16 v_state[kConvStateWidth];
++    float v_w[kKernelWidth];
++    __nv_bfloat16 v_new = __float2bfloat16(0.0f);
++    if (is_q) {
++      if (lane == 0) {
++        a_log_raw = a_log[i_h];
++      }
++      g_raw = bf16_load(g, bos * g_row_stride + i_hv * kDimK + k) + dt_bias[hk];
++      onorm_gate_raw = bf16_load(onorm_g, i_n * onormg_row_stride + i_hv * kDimV + tid);
++      pre_onorm_weight = onorm_weight[tid];
++      if (tid == 0) {
++        beta_raw = bf16_load(beta, bos * beta_row_stride + i_hv);
++      }
++    } else {
++      v_bias = bias_v[hvv];
++#pragma unroll
++      for (int w = 0; w < kConvStateWidth; ++w) {
++        v_state[w] = cs_v[cs_v_base + w * cs_w_stride];
++      }
++#pragma unroll
++      for (int w = 0; w < kKernelWidth; ++w) {
++        v_w[w] = fp32_at(w_v_t, w * hvv_dim + hvv);
++      }
++      v_new = x_v[bos * x_row_stride + hvv];
++    }
++
++    float acc = qk_bias;
++#pragma unroll
++    for (int w = 0; w < kConvStateWidth; ++w) {
++      acc += __bfloat162float(qk_state[w]) * qk_w[w];
++    }
++    acc += __bfloat162float(x_new) * qk_w[kKernelWidth - 1];
++
++    cs_qk[cs_base + 0] = qk_state[1];
++    cs_qk[cs_base + cs_w_stride] = qk_state[2];
+     cs_qk[cs_base + 2 * cs_w_stride] = x_new;
+     (is_q ? s_q : s_k)[k] = conv_silu_bf16(acc);
+ 
+     if (is_q) {
+-      const float exp_a = __shfl_sync(0xffffffffu, lane == 0 ? __expf(a_log[i_h]) : 0.0f, 0);
+-      const float g_raw = bf16_load(g, bos * g_row_stride + i_hv * kDimK + k) + dt_bias[hk];
++      const float exp_a = __shfl_sync(0xffffffffu, lane == 0 ? __expf(a_log_raw) : 0.0f, 0);
+       if constexpr (kUseLowerBound) {
+         s_decay[k] = __expf(lower_bound * device::math::sigmoid_fast(exp_a * g_raw));
+       } else {
+         s_decay[k] = __expf(-exp_a * device::math::softplus_fast(g_raw));
+       }
++      pre_onorm_gate = device::math::sigmoid_fast(onorm_gate_raw);
++      if (tid == 0) {
++        if constexpr (kApplyBetaSigmoid) {
++          s_beta = device::math::sigmoid_fast(beta_raw);
++        } else {
++          s_beta = beta_raw;
++        }
++      }
++    } else {
++      float v_acc = v_bias;
++#pragma unroll
++      for (int w = 0; w < kConvStateWidth; ++w) {
++        v_acc += __bfloat162float(v_state[w]) * v_w[w];
++      }
++      v_acc += __bfloat162float(v_new) * v_w[kKernelWidth - 1];
++      cs_v[cs_v_base + 0] = v_state[1];
++      cs_v[cs_v_base + cs_w_stride] = v_state[2];
++      cs_v[cs_v_base + 2 * cs_w_stride] = v_new;
++      s_v[v] = conv_silu_bf16(v_acc);
+     }
+   } else {
+-    if (tid < kDimK) {
+-      const int k = tid;
++    if constexpr (kUpdateConvState) {
++      // Lower warps: q conv + decay; upper warps: k conv, then the v conv below.
++      const bool is_q = tid < kDimK;
++      const int k = is_q ? tid : tid - (kThreads - kDimK);
+       const int hk = hk_off + k;
+-      const float exp_a = __shfl_sync(0xffffffffu, lane == 0 ? __expf(a_log[i_h]) : 0.0f, 0);
+-
+-      float q_acc = bias_q[hk];
+-      float k_acc = bias_k[hk];
+-#pragma unroll
++      const int64_t cs_base = slot * cs_slot_stride + hk;
++      __nv_bfloat16* cs_qk = is_q ? cs_q : cs_k;
++      const float* w_qk_t = is_q ? w_q_t : w_k_t;
++
++      float acc = is_q ? bias_q[hk] : bias_k[hk];
++      __nv_bfloat16 shift0 = __float2bfloat16(0.0f);
++      __nv_bfloat16 shift1 = __float2bfloat16(0.0f);
++  #pragma unroll
+       for (int w = 0; w < kConvStateWidth; ++w) {
+-        const int64_t cs_idx = slot * cs_slot_stride + hk + w * cs_w_stride;
+-        q_acc += bf16_load(cs_q, cs_idx) * fp32_at(w_q_t, w * hkv_dim + hk);
+-        k_acc += bf16_load(cs_k, cs_idx) * fp32_at(w_k_t, w * hkv_dim + hk);
++        const __nv_bfloat16 state_w = cs_qk[cs_base + w * cs_w_stride];
++        acc += __bfloat162float(state_w) * fp32_at(w_qk_t, w * hkv_dim + hk);
++        if (w == 1) {
++          shift0 = state_w;
++        } else if (w == 2) {
++          shift1 = state_w;
++        }
+       }
+-      q_acc += bf16_load(x_q, bos * x_row_stride + hk) * fp32_at(w_q_t, (kKernelWidth - 1) * hkv_dim + hk);
+-      k_acc += bf16_load(x_k, bos * x_row_stride + hk) * fp32_at(w_k_t, (kKernelWidth - 1) * hkv_dim + hk);
++      const __nv_bfloat16 x_new = (is_q ? x_q : x_k)[bos * x_row_stride + hk];
++      acc += __bfloat162float(x_new) * fp32_at(w_qk_t, (kKernelWidth - 1) * hkv_dim + hk);
+ 
+-      s_q[k] = conv_silu_bf16(q_acc);
+-      s_k[k] = conv_silu_bf16(k_acc);
+-
+-      const float g_raw = bf16_load(g, bos * g_row_stride + i_hv * kDimK + k) + dt_bias[hk];
+-      if constexpr (kUseLowerBound) {
+-        s_decay[k] = __expf(lower_bound * device::math::sigmoid_fast(exp_a * g_raw));
+-      } else {
+-        s_decay[k] = __expf(-exp_a * device::math::softplus_fast(g_raw));
++      cs_qk[cs_base + 0] = shift0;
++      cs_qk[cs_base + cs_w_stride] = shift1;
++      cs_qk[cs_base + 2 * cs_w_stride] = x_new;
++      (is_q ? s_q : s_k)[k] = conv_silu_bf16(acc);
++
++      if (is_q) {
++        const float exp_a = __shfl_sync(0xffffffffu, lane == 0 ? __expf(a_log[i_h]) : 0.0f, 0);
++        const float g_raw = bf16_load(g, bos * g_row_stride + i_hv * kDimK + k) + dt_bias[hk];
++        if constexpr (kUseLowerBound) {
++          s_decay[k] = __expf(lower_bound * device::math::sigmoid_fast(exp_a * g_raw));
++        } else {
++          s_decay[k] = __expf(-exp_a * device::math::softplus_fast(g_raw));
++        }
+       }
+-    }
+-  }
++    } else {
++      if (tid < kDimK) {
++        const int k = tid;
++        const int hk = hk_off + k;
++        const float exp_a = __shfl_sync(0xffffffffu, lane == 0 ? __expf(a_log[i_h]) : 0.0f, 0);
++
++        float q_acc = bias_q[hk];
++        float k_acc = bias_k[hk];
++  #pragma unroll
++        for (int w = 0; w < kConvStateWidth; ++w) {
++          const int64_t cs_idx = slot * cs_slot_stride + hk + w * cs_w_stride;
++          q_acc += bf16_load(cs_q, cs_idx) * fp32_at(w_q_t, w * hkv_dim + hk);
++          k_acc += bf16_load(cs_k, cs_idx) * fp32_at(w_k_t, w * hkv_dim + hk);
++        }
++        q_acc += bf16_load(x_q, bos * x_row_stride + hk) * fp32_at(w_q_t, (kKernelWidth - 1) * hkv_dim + hk);
++        k_acc += bf16_load(x_k, bos * x_row_stride + hk) * fp32_at(w_k_t, (kKernelWidth - 1) * hkv_dim + hk);
+ 
+-  static_assert(kThreads >= kDimK + kDimV);
+-  // The v conv runs on the upper warps, concurrently with the q/k conv on the lower ones.
+-  if constexpr (kUpdateConvState) {
+-    if (tid >= kThreads - kDimV) {
+-      const int v = tid - (kThreads - kDimV);
+-      const int hvv = hv_off + v;
+-      const int64_t cs_base = slot * cs_slot_stride + hvv;
+-      const int64_t xv_idx = bos * x_row_stride + hvv;
+-
+-      float v_acc = bias_v[hvv];
+-      __nv_bfloat16 v_shift0 = __float2bfloat16(0.0f);
+-      __nv_bfloat16 v_shift1 = __float2bfloat16(0.0f);
+-#pragma unroll
+-      for (int w = 0; w < kConvStateWidth; ++w) {
+-        const __nv_bfloat16 v_state = cs_v[cs_base + w * cs_w_stride];
+-        v_acc += __bfloat162float(v_state) * fp32_at(w_v_t, w * hvv_dim + hvv);
+-        if (w == 1) {
+-          v_shift0 = v_state;
+-        } else if (w == 2) {
+-          v_shift1 = v_state;
++        s_q[k] = conv_silu_bf16(q_acc);
++        s_k[k] = conv_silu_bf16(k_acc);
++
++        const float g_raw = bf16_load(g, bos * g_row_stride + i_hv * kDimK + k) + dt_bias[hk];
++        if constexpr (kUseLowerBound) {
++          s_decay[k] = __expf(lower_bound * device::math::sigmoid_fast(exp_a * g_raw));
++        } else {
++          s_decay[k] = __expf(-exp_a * device::math::softplus_fast(g_raw));
+         }
+       }
+-      const __nv_bfloat16 v_new = x_v[xv_idx];
+-      v_acc += __bfloat162float(v_new) * fp32_at(w_v_t, (kKernelWidth - 1) * hvv_dim + hvv);
+-      cs_v[cs_base + 0] = v_shift0;
+-      cs_v[cs_base + cs_w_stride] = v_shift1;
+-      cs_v[cs_base + 2 * cs_w_stride] = v_new;
+-      s_v[v] = conv_silu_bf16(v_acc);
+     }
+-  } else {
+-    if (tid >= kThreads - kDimV) {
+-      const int v = tid - (kThreads - kDimV);
+-      const int hvv = hv_off + v;
+ 
+-      float v_acc = bias_v[hvv];
+-#pragma unroll
+-      for (int w = 0; w < kConvStateWidth; ++w) {
+-        const int64_t cs_idx = slot * cs_slot_stride + hvv + w * cs_w_stride;
+-        v_acc += bf16_load(cs_v, cs_idx) * fp32_at(w_v_t, w * hvv_dim + hvv);
++    static_assert(kThreads >= kDimK + kDimV);
++    // The v conv runs on the upper warps, concurrently with the q/k conv on the lower ones.
++    if constexpr (kUpdateConvState) {
++      if (tid >= kThreads - kDimV) {
++        const int v = tid - (kThreads - kDimV);
++        const int hvv = hv_off + v;
++        const int64_t cs_base = slot * cs_slot_stride + hvv;
++        const int64_t xv_idx = bos * x_row_stride + hvv;
++
++        float v_acc = bias_v[hvv];
++        __nv_bfloat16 v_shift0 = __float2bfloat16(0.0f);
++        __nv_bfloat16 v_shift1 = __float2bfloat16(0.0f);
++  #pragma unroll
++        for (int w = 0; w < kConvStateWidth; ++w) {
++          const __nv_bfloat16 v_state = cs_v[cs_base + w * cs_w_stride];
++          v_acc += __bfloat162float(v_state) * fp32_at(w_v_t, w * hvv_dim + hvv);
++          if (w == 1) {
++            v_shift0 = v_state;
++          } else if (w == 2) {
++            v_shift1 = v_state;
++          }
++        }
++        const __nv_bfloat16 v_new = x_v[xv_idx];
++        v_acc += __bfloat162float(v_new) * fp32_at(w_v_t, (kKernelWidth - 1) * hvv_dim + hvv);
++        cs_v[cs_base + 0] = v_shift0;
++        cs_v[cs_base + cs_w_stride] = v_shift1;
++        cs_v[cs_base + 2 * cs_w_stride] = v_new;
++        s_v[v] = conv_silu_bf16(v_acc);
++      }
++    } else {
++      if (tid >= kThreads - kDimV) {
++        const int v = tid - (kThreads - kDimV);
++        const int hvv = hv_off + v;
++
++        float v_acc = bias_v[hvv];
++  #pragma unroll
++        for (int w = 0; w < kConvStateWidth; ++w) {
++          const int64_t cs_idx = slot * cs_slot_stride + hvv + w * cs_w_stride;
++          v_acc += bf16_load(cs_v, cs_idx) * fp32_at(w_v_t, w * hvv_dim + hvv);
++        }
++        v_acc += bf16_load(x_v, bos * x_row_stride + hvv) * fp32_at(w_v_t, (kKernelWidth - 1) * hvv_dim + hvv);
++        s_v[v] = conv_silu_bf16(v_acc);
+       }
+-      v_acc += bf16_load(x_v, bos * x_row_stride + hvv) * fp32_at(w_v_t, (kKernelWidth - 1) * hvv_dim + hvv);
+-      s_v[v] = conv_silu_bf16(v_acc);
+     }
+-  }
+ 
+-  if constexpr (kApplyOnorm && kPreloadOnormParams) {
+-    // Loaded by the threads that write `out` in the epilogue.
+-    if (tid < kDimV) {
+-      const int64_t onorm_idx = i_n * onormg_row_stride + i_hv * kDimV + tid;
+-      pre_onorm_gate = device::math::sigmoid_fast(bf16_load(onorm_g, onorm_idx));
+-      pre_onorm_weight = onorm_weight[tid];
++    if constexpr (kApplyOnorm && kPreloadOnormParams) {
++      // Loaded by the threads that write `out` in the epilogue.
++      if (tid < kDimV) {
++        const int64_t onorm_idx = i_n * onormg_row_stride + i_hv * kDimV + tid;
++        pre_onorm_gate = device::math::sigmoid_fast(bf16_load(onorm_g, onorm_idx));
++        pre_onorm_weight = onorm_weight[tid];
++      }
+     }
+-  }
+ 
+-  if (tid == 0) {
+-    const float beta_raw = bf16_load(beta, bos * beta_row_stride + i_hv);
+-    if constexpr (kApplyBetaSigmoid) {
+-      s_beta = device::math::sigmoid_fast(beta_raw);
+-    } else {
+-      s_beta = beta_raw;
++    if (tid == 0) {
++      const float beta_raw = bf16_load(beta, bos * beta_row_stride + i_hv);
++      if constexpr (kApplyBetaSigmoid) {
++        s_beta = device::math::sigmoid_fast(beta_raw);
++      } else {
++        s_beta = beta_raw;
++      }
+     }
+   }
+   __syncthreads();
+@@ -753,6 +877,7 @@
+   float r_k[4] = {k4.x, k4.y, k4.z, k4.w};
+   float r_decay[4] = {decay4.x, decay4.y, decay4.z, decay4.w};
+   float o_sumsq = 0.0f;
++  constexpr bool kQuadRowReduce = kRowsPerWarp == 4 && !(kApplyOnorm && kAccumulateOnormSumsq);
+ 
+ #pragma unroll
+   for (int chunk = 0; chunk < kNumChunks; ++chunk) {
+@@ -783,6 +908,48 @@
+ 
+     const StateT* state_stage = s_state + (kUseTmaLoad ? (chunk % kTmaStages) : (chunk & 1)) * kChunkV * kDimK;
+ 
++    if constexpr (kQuadRowReduce) {
++      // All kRowsPerWarp = 4 rows of this chunk in one reduction chain; per-row
++      // math identical to the pair loop below.
++      float h_vals[4][4];
++      float dot_hk_p[4];
++#pragma unroll
++      for (int r = 0; r < 4; ++r) {
++        const float4 raw_h = load_state4(state_stage + (warp + r * kWarps) * kDimK + k_base);
++        h_vals[r][0] = raw_h.x * r_decay[0];
++        h_vals[r][1] = raw_h.y * r_decay[1];
++        h_vals[r][2] = raw_h.z * r_decay[2];
++        h_vals[r][3] = raw_h.w * r_decay[3];
++        dot_hk_p[r] = h_vals[r][0] * r_k[0] + h_vals[r][1] * r_k[1] + h_vals[r][2] * r_k[2] + h_vals[r][3] * r_k[3];
++      }
++      // Row r's total sits in lane kQuadLane[r] (see warp_reduce_sum_quad_split).
++      const float hk_red = warp_reduce_sum_quad_split(dot_hk_p[0], dot_hk_p[1], dot_hk_p[2], dot_hk_p[3]);
++      const float dot_hk_r[4] = {
++          __shfl_sync(0xffffffffu, hk_red, 0),
++          __shfl_sync(0xffffffffu, hk_red, 16),
++          __shfl_sync(0xffffffffu, hk_red, 8),
++          __shfl_sync(0xffffffffu, hk_red, 24)};
++      const int64_t slot_base_wb = static_cast<int64_t>(slot) * state_slot_stride;
++      float dot_hq_p[4];
++#pragma unroll
++      for (int r = 0; r < 4; ++r) {
++        const int vr = chunk * kChunkV + warp + r * kWarps;
++        const float v_new = (s_v[vr] - dot_hk_r[r]) * s_beta;
++        const float h0 = h_vals[r][0] + r_k[0] * v_new;
++        const float h1 = h_vals[r][1] + r_k[1] * v_new;
++        const float h2 = h_vals[r][2] + r_k[2] * v_new;
++        const float h3 = h_vals[r][3] + r_k[3] * v_new;
++        store_state4<kUseCacheGlobalStore>(
++            state + slot_base_wb + ((i_hv * kDimV + vr) * kDimK + k_base), make_float4(h0, h1, h2, h3));
++        dot_hq_p[r] = h0 * r_q[0] + h1 * r_q[1] + h2 * r_q[2] + h3 * r_q[3];
++      }
++      const float hq_red = warp_reduce_sum_quad_split(dot_hq_p[0], dot_hq_p[1], dot_hq_p[2], dot_hq_p[3]);
++      if ((lane & 7) == 0) {
++        // lane 0/8/16/24 -> row 0/2/1/3
++        const int r = ((lane >> 4) & 1) | ((lane >> 2) & 2);
++        s_o[chunk * kChunkV + warp + r * kWarps] = bf16_round(hq_red);
++      }
++    } else
+ #pragma unroll
+     for (int row = 0; row < kRowsPerWarp; row += 2) {
+       const int v_row_a = warp + row * kWarps;
+diff -ruN -x __pycache__ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512_claude/trial_1_tree_judged/kernels/jit/csrc/kimi_k3/attn_res/fused_tma.cuh /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512_claude/trial_3_tree_judged/kernels/jit/csrc/kimi_k3/attn_res/fused_tma.cuh
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512_claude/trial_1_tree_judged/kernels/jit/csrc/kimi_k3/attn_res/fused_tma.cuh	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512_claude/trial_3_tree_judged/kernels/jit/csrc/kimi_k3/attn_res/fused_tma.cuh	2026-09-25 05:04:26.188096973 -0700
+@@ -175,6 +175,10 @@
+   // row snapshot, bank row nvb (strided by stride_bm like the read rows).
+   // The kernel never reads row nvb, so the write races with nothing.
+   bf16_t* __restrict__ prefix_dst;
++  // Fused pending residual add (nullptr = off): the prefix row becomes
++  // bf16(prefix_sum + prefix_addend), also stored to prefix_sum_out.
++  const bf16_t* prefix_addend;
++  bf16_t* prefix_sum_out;
+   // Optional fused NVLS reduce-scatter source. When input_mc is non-null,
+   // the producer warp materializes this rank's reduced token shard plus the
+   // local residual into prefix_sum/prefix_out before TMA consumes it.
+@@ -246,6 +250,8 @@
+     float warp_ssq[kNumConsumerWarps];
+     uint32_t tmem_base;
+     alignas(128) bf16_t buf[kNumStages][kChunkRows][kDim];
++    // prefix_addend row, staged with the chunk holding the prefix row.
++    alignas(128) bf16_t addend_buf[kNumStages][kDim];
+   };
+ 
+   static SGL_DEVICE void forward(const AttnResTMAParams& params, Smem* smem);
+@@ -303,8 +309,9 @@
+           if (global_chunks >= kNumStages) {
+             ptx::mbar_wait_parity(&smem->bar_free[slot], phase ^ 1);
+           }
++          const bool with_addend = params.prefix_addend != nullptr && base_row + an == kNumRows + 1;
+           // One pull per chunk; each row still gets its own bulk copy.
+-          ptx::mbar_arrive_expect_tx(&smem->bar_full[slot], an * kRowBytes);
++          ptx::mbar_arrive_expect_tx(&smem->bar_full[slot], (an + with_addend) * kRowBytes);
+ #pragma unroll
+           for (uint32_t r = 0; r < an; ++r) {
+             const auto row = base_row + r;
+@@ -315,6 +322,10 @@
+             if (token == blockIdx.x && row == kNumRows) PDLWaitPrimary<true>();
+             ptx::cp_async_bulk_1d_load(&smem->buf[slot][r], src, kRowBytes, &smem->bar_full[slot]);
+           }
++          if (with_addend) {
++            ptx::cp_async_bulk_1d_load(
++                &smem->addend_buf[slot], params.prefix_addend + token * kDim, kRowBytes, &smem->bar_full[slot]);
++          }
+         }
+       }
+       PDLTriggerSecondary<true>();
+@@ -394,6 +405,18 @@
+           for (uint32_t r = 0; r < an; ++r) {
+             rows[si][r].load(&smem->buf[slot][r][offset]);
+           }
++          // Same rounding as the unfused torch add: fp32 sum, one bf16 round.
++          if (params.prefix_addend != nullptr && base_row + an == kNumRows + 1) {
++            const uint32_t pr = kNumRows - base_row;
++            row_vec_t addend;
++            addend.load(&smem->addend_buf[slot][offset]);
++#pragma unroll
++            for (uint32_t j = 0; j < kVecElems / 2; ++j) {
++              const auto x = cast<float2>(rows[si][pr][j]);
++              const auto y = cast<float2>(addend[j]);
++              rows[si][pr][j] = cast<bf16x2_t>(make_float2(x.x + y.x, x.y + y.y));
++            }
++          }
+ #pragma unroll
+           for (uint32_t r = 0; r < an; ++r) {
+ #pragma unroll
+@@ -420,6 +443,16 @@
+             rows[si][pr].store(dst, tile * (kTile / kVecElems) + tid_in_group);
+           }
+         }
++        if (params.prefix_sum_out != nullptr && base_row + an == kNumRows + 1) {
++          const uint32_t pr = kNumRows - base_row;
++          auto* dst = params.prefix_sum_out + static_cast<int64_t>(token) * kDim;
++#pragma unroll
++          for (uint32_t si = 0; si < kSlicesPerGroup; ++si) {
++            const auto tile = si * kNumGroups + group;
++            if (tile >= kNumTiles) continue;
++            rows[si][pr].store(dst, tile * (kTile / kVecElems) + tid_in_group);
++          }
++        }
+ 
+         float acc_rms[kChunkRows];
+         float acc_dot[kChunkRows];
+@@ -685,7 +718,9 @@
+       const tvm::ffi::TensorView out,
+       int64_t nvb,
+       double eps,
+-      bool write_prefix) {
++      bool write_prefix,
++      std::optional<tvm::ffi::TensorView> prefix_addend,
++      std::optional<tvm::ffi::TensorView> prefix_sum_out) {
+     using namespace host;
+ 
+     auto T_ = SymbolicSize{"num_tokens"};
+@@ -697,6 +732,16 @@
+     TensorMatcher({T_, H_}).with_dtype<bf16_t>().with_device(device).verify(prefix_sum).verify(out);
+     TensorMatcher({T_, NB_, H_}).with_dtype<bf16_t>().with_device(device).verify(bank);
+     TensorMatcher({H_}).with_dtype<bf16_t>().with_device(device).verify(cw).verify(ow);
++    RuntimeCheck(
++        prefix_addend.has_value() == prefix_sum_out.has_value(),
++        "attn_res_fused_tma: prefix_addend and prefix_sum_out go together");
++    if (prefix_addend.has_value()) {
++      TensorMatcher({T_, H_})
++          .with_dtype<bf16_t>()
++          .with_device(device)
++          .verify(prefix_addend.value())
++          .verify(prefix_sum_out.value());
++    }
+ 
+     const auto num_tokens = static_cast<int64_t>(T_.unwrap());
+     const auto H = static_cast<int64_t>(H_.unwrap());
+@@ -736,6 +781,8 @@
+         .ow = static_cast<const bf16_t*>(ow.data_ptr()),
+         .out = static_cast<bf16_t*>(out.data_ptr()),
+         .prefix_dst = write_prefix ? static_cast<bf16_t*>(bank.data_ptr()) + nvb * H : nullptr,
++        .prefix_addend = prefix_addend.has_value() ? static_cast<const bf16_t*>(prefix_addend.value().data_ptr()) : nullptr,
++        .prefix_sum_out = prefix_sum_out.has_value() ? static_cast<bf16_t*>(prefix_sum_out.value().data_ptr()) : nullptr,
+         .input_mc = nullptr,
+         .residual = nullptr,
+         .prefix_out = nullptr,
+@@ -816,6 +863,8 @@
+         .ow = static_cast<const bf16_t*>(ow.data_ptr()),
+         .out = static_cast<bf16_t*>(out.data_ptr()),
+         .prefix_dst = nullptr,
++        .prefix_addend = nullptr,
++        .prefix_sum_out = nullptr,
+         .input_mc = reinterpret_cast<const uint8_t*>(static_cast<uintptr_t>(input_mc_ptr)) +
+                     pull.rank * local_elems * sizeof(bf16_t),
+         .residual = residual.has_value() ? static_cast<const bf16_t*>(residual.value().data_ptr()) : nullptr,
+@@ -892,6 +941,8 @@
+         .ow = static_cast<const bf16_t*>(ow.data_ptr()),
+         .out = static_cast<bf16_t*>(out.data_ptr()),
+         .prefix_dst = write_prefix ? static_cast<bf16_t*>(bank.data_ptr()) + nvb * H : nullptr,
++        .prefix_addend = nullptr,
++        .prefix_sum_out = nullptr,
+         .input_mc = nullptr,
+         .residual = nullptr,
+         .prefix_out = nullptr,
+diff -ruN -x __pycache__ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512_claude/trial_1_tree_judged/kernels/ops/kimi_k3/attn_res.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512_claude/trial_3_tree_judged/kernels/ops/kimi_k3/attn_res.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512_claude/trial_1_tree_judged/kernels/ops/kimi_k3/attn_res.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512_claude/trial_3_tree_judged/kernels/ops/kimi_k3/attn_res.py	2026-09-25 05:00:00.001468966 -0700
+@@ -158,6 +158,8 @@
+     eps: float,
+     *,
+     write_prefix: bool = False,
++    prefix_addend: torch.Tensor | None = None,
++    prefix_sum_out: torch.Tensor | None = None,
+ ) -> None:
+     """Warp-specialized TMA aggregation (score -> online softmax -> weighted
+     combine -> fused output RMSNorm), one persistent CTA per SM: a producer
+@@ -182,9 +184,22 @@
+     write_prefix : also snapshot the prefix row into bank[:, nvb, :]
+                  (bit-exact copy, fused into the score pass which already
+                  has the row in registers); requires NB > nvb
++    prefix_addend  : optional [T, H] bf16; the aggregated prefix row becomes
++                 bf16(prefix_sum + prefix_addend) (torch-add rounding)
++    prefix_sum_out : [T, H] bf16 destination of that sum; required iff
++                 prefix_addend is given
+     """
+     _jit_fused_tma_module(*_tuning(nvb, prefix_sum.shape[0])).run(
+-        prefix_sum, bank, cw, ow, out, nvb, eps, write_prefix
++        prefix_sum,
++        bank,
++        cw,
++        ow,
++        out,
++        nvb,
++        eps,
++        write_prefix,
++        prefix_addend,
++        prefix_sum_out,
+     )
+ 
+ 
+diff -ruN -x __pycache__ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512_claude/trial_1_tree_judged/srt/layers/attn_residual.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512_claude/trial_3_tree_judged/srt/layers/attn_residual.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512_claude/trial_1_tree_judged/srt/layers/attn_residual.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512_claude/trial_3_tree_judged/srt/layers/attn_residual.py	2026-09-25 05:00:00.001468966 -0700
+@@ -91,6 +91,8 @@
+     score_norm: RMSNorm,
+     out_norm: RMSNorm,
+     write_bank_row: bool = False,
++    prefix_addend: Optional[torch.Tensor] = None,
++    prefix_sum_out: Optional[torch.Tensor] = None,
+ ) -> torch.Tensor:
+     """Warp-specialized TMA kernel: online softmax over row chunks with the
+     output RMSNorm fused, one persistent CTA per SM, per-nvb tuned launch
+@@ -113,6 +115,8 @@
+         nvb,
+         score_norm.variance_epsilon,
+         write_prefix=write_bank_row,
++        prefix_addend=prefix_addend,
++        prefix_sum_out=prefix_sum_out,
+     )
+     return out
+ 
+@@ -382,6 +386,21 @@
+             out_norm,
+             write_bank_row=write_bank_row,
+         )
++    if _use_fast(prefix_a.shape[1]):
++        # The TMA kernel holds the prefix row in registers, so the add folds in.
++        prefix = torch.empty_like(prefix_a)
++        normed = _aggregate_fast(
++            prefix_a,
++            bank,
++            nvb,
++            score_proj,
++            score_norm,
++            out_norm,
++            write_bank_row=write_bank_row,
++            prefix_addend=prefix_b,
++            prefix_sum_out=prefix,
++        )
++        return normed, prefix
+     prefix = prefix_a + prefix_b
+     return (
+         _aggregate(
+diff -ruN -x __pycache__ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512_claude/trial_1_tree_judged/srt/models/kimi_k3.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512_claude/trial_3_tree_judged/srt/models/kimi_k3.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512_claude/trial_1_tree_judged/srt/models/kimi_k3.py	2026-09-25 03:37:14.516674397 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512_claude/trial_3_tree_judged/srt/models/kimi_k3.py	2026-09-25 05:32:20.449291968 -0700
+@@ -1341,18 +1341,19 @@
+                 and self.tp_size == 1
+                 and not k3_ar_fusion.enabled()
+             )
+-            shared_event = None
+             if overlap_shared:
++                # Routed is captured first so the graph keeps it on the front
++                # GEMM's stream (critical path); shared forks off after it.
+                 current_stream = torch.cuda.current_stream()
+                 self.alt_stream.wait_stream(current_stream)
++                self._forward_routed(hidden_states, router_logits, routed_input, latent)
+                 with torch.cuda.stream(self.alt_stream):
+                     self._forward_shared(gate_up, shared_output)
+                     shared_event = self.alt_stream.record_event()
++                current_stream.wait_event(shared_event)
+             else:
+                 self._forward_shared(gate_up, shared_output)
+-            self._forward_routed(hidden_states, router_logits, routed_input, latent)
+-            if shared_event is not None:
+-                current_stream.wait_event(shared_event)
++                self._forward_routed(hidden_states, router_logits, routed_input, latent)
+             if self.fuse_ar_norm and k3_ar_fusion.enabled():
+                 fused_norm = True
+                 k3_ar_fusion.all_reduce_norm(
+@@ -1538,7 +1539,7 @@
+             # _merge_bfa_weights().
+             self._bfa_w: Optional[torch.Tensor] = None
+             self._bfa_f_b_w: Optional[torch.Tensor] = None
+-            if _is_hip:
++            if True:
+                 # ROCm only: _merge_kda_inproj_weights_hip() may merge the
+                 # whole [q,k,v,g | f_a | b] in-proj instead, making _bfa_w a
+                 # tail view of that buffer. _qkvgbfa_sizes is the split of the
+@@ -1547,7 +1548,7 @@
+                 self._qkvgbfa_layer: Optional[SimpleNamespace] = None
+                 self._qkvgbfa_sizes: Optional[list[int]] = None
+                 self._qkvgbfa_bs_limit = (
+-                    envs.SGLANG_ROCM_K3_FUSE_KDA_INPROJ_MAX_TOKENS.get()
++                    int(__import__("os").environ.get("EXP_MIN", "0"))
+                 )
+         elif self.do_fuse_qkvbfg:
+             self.qkvb_sizes = [
+@@ -1772,7 +1773,7 @@
+             return
+         if _is_npu:
+             return
+-        if _is_hip and self._merge_kda_inproj_weights_hip():
++        if self._merge_kda_inproj_weights_hip():
+             # Split-path f_b GEMM still uses this when the fused in-proj
+             # is above the token threshold.
+             self._bfa_f_b_w = self.f_b_proj.weight
+@@ -1833,7 +1834,7 @@
+         plain unquantized 2-D tensors of one dtype and width -- the checkpoint
+         keeps attention in bf16, but a quantized variant would carry scales
+         that a raw row-cat would silently drop."""
+-        if not (_is_hip and envs.SGLANG_ROCM_K3_FUSE_KDA_INPROJ.get()):
++        if False:
+             return False
+         if not (self.do_fuse_qkvbfg and self.use_full_rank_gate):
+             return False
+@@ -1955,9 +1956,9 @@
+                 from sglang.kernels.ops.kimi_k3 import kimi_k3_tiny_gemm as gemm
+ 
+                 if (
+-                    _is_hip
++                    True
+                     and self._qkvgbfa_sizes is not None
+-                    and 0 < hidden_states.shape[0] <= self._qkvgbfa_bs_limit
++                    and hidden_states.shape[0] > self._qkvgbfa_bs_limit
+                 ):
+                     # ROCm only. One GEMM for the whole in-proj: the [f_a|b]
+                     # tail rides along in the wide projection's bandwidth
