@@ -6,6 +6,8 @@
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 GPU="${K3_GPU_INDEX:-7}"
+TAG="${PROFILE_TAG:-prefill}"          # output name prefix (prefill | prefill_v2 ...)
+EXTRA="${EXTRA_FLAGS:-}"               # e.g. "--bf16-gemm-init --flashinfer-autotune" (production dispatch)
 OUTD="$HERE/kimi_single_layer"; mkdir -p "$OUTD/profiles"
 COMMON="--moe-backend flashinfer_mxfp4 --attn-heads 12 --experts 112 --ep 8 --local-topk 2 --hidden-scale 1.0 --cuda-graph --iters 20 --warmup 5"
 run () { # $1 case, $2 attn args, $3 points
@@ -15,11 +17,11 @@ run () { # $1 case, $2 attn args, $3 points
     -v "$HERE/kimi_single_layer_decode.py:/tmp/kimi_single_layer_decode.py:ro" -v "$OUTD:/out" \
     --workdir /tmp lmsysorg/sglang:v0.5.20 \
     python3 /tmp/kimi_single_layer_decode.py --point "$3" $2 $COMMON \
-      --profile-kernels "/out/profiles/prefill_$1.json" --json-out "/out/result_prefill_$1.json" 2>&1 \
+      $EXTRA --profile-kernels "/out/profiles/${TAG}_$1.json" --json-out "/out/result_${TAG}_$1.json" 2>&1 \
     | grep -E "JSON|\[time\]|\[profile\]|FAILED|Traceback|Error"
 }
 echo "==== $(date +%F_%T) KDA prefill profiles"
 run kda "--attn-type kda" "1,16384,pf;1,16384,pf49152;4,4096,pf"
 echo "==== $(date +%F_%T) MLA prefill profiles"
 run mla "--attn-type mla --attention-backend cutedsl_mla --kv-cache-dtype fp8_e4m3" "1,16384,pf49152;1,16384,pf;4,4096,pf"
-echo "==== $(date +%F_%T) done"; ls -la "$OUTD"/profiles/prefill_* "$OUTD"/result_prefill_* 2>/dev/null
+echo "==== $(date +%F_%T) done"; ls -la "$OUTD"/profiles/${TAG}_* "$OUTD"/result_${TAG}_* 2>/dev/null
