@@ -176,10 +176,11 @@ irrelevant at 512×8k, and the small-m GEMM levers stop engaging), exactly the h
 | KDA-b512 3 | FAIL (null, −0.1%) | route-fusion stack; TMA stages; in-kernel TRT-LLM routing (slower and re-routed 2 of 512 tokens → strict CHECK rejected it); MXFP4×bf16 SiTU (no kernel) | KDA at B=512 is on the same closed MXFP4-cubin wall as at B=128 (57% of the step, R0 961 vs R5 53 µs) |
 | MLA-b512 1 | infra noise | — | B=512 baseline reps 2104/995/3363/3530/3419 µs while Codex B12 kernel-profiled on the same GPU; not a result |
 | MLA-b512 2 | FAIL (null, 0.00%) | MoE tactic buckets, PDL toggle, low-priority-stream overlap (−1 µs), bf16 front GEMM (rejected on correctness) | clean measurement (pristine 991.7, σ 0.4) |
-| MLA-b512 3 | pending | bf16-activation MoE ×2 (no kernel); route+quant cap 64→512 (exact, −1.5 µs, kept); variable-schedule attention (null); tuning ceiling 512→1024 (null); TGV for the m=512 front GEMM (+8% slower) and for shared-down (+2% slower), both reverted | confirms the TGV lever is small-m only |
+| MLA-b512 3 | FAIL (null, −0.17%) | bf16-activation MoE ×2 (no kernel); route+quant cap 64→512 (exact, −1.5 µs, kept); variable-schedule attention (null); tuning ceiling 512→1024 (null); TGV for the m=512 front GEMM (+8% slower) and for shared-down (+2% slower), both reverted | confirms the TGV lever is small-m only |
+| MLA-b512 4 | FAIL (null, 0.00%) | six ideas incl. a PDL policy change (regressed, reverted) and a variable-sequence attention scheduler (exact, neutral) | MLA at B=512 plateaued on the inherited tree |
 
-**Result so far:** at B=512 the inherited trees are the result — KDA −6.5%, MLA −1.4% — and six warm-started
-rounds found nothing further: every remaining large-batch idea is either inactive, neutral, numerics-changing,
+**Result:** at B=512 the inherited trees are the result — KDA −6.5%, MLA −1.4% — and seven clean warm-started
+rounds (KDA 1–3, MLA 2–4) found nothing further: every remaining large-batch idea is either inactive, neutral, numerics-changing,
 or a regression. Both layers are MoE-bound on the closed TRT-LLM MXFP4 cubin at every batch size we can run.
 Prefill rounds start after B12b.
 
