@@ -1,0 +1,1213 @@
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_prefill_claude/pristine_tree/kernels/jit/csrc/attention/kda_fused_decode.cuh /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_prefill_claude/trial_1_tree_judged/kernels/jit/csrc/attention/kda_fused_decode.cuh
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_prefill_claude/pristine_tree/kernels/jit/csrc/attention/kda_fused_decode.cuh	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_prefill_claude/trial_1_tree_judged/kernels/jit/csrc/attention/kda_fused_decode.cuh	2026-09-24 03:06:27.647750753 -0700
+@@ -42,6 +42,7 @@
+ 
+ #include <cstdint>
+ #include <cstdlib>
++#include <type_traits>
+ #include <cuda_bf16.h>
+ #include <cuda_runtime.h>
+ 
+@@ -153,36 +154,77 @@
+   return __float2bfloat16(value);
+ }
+ 
+-template <bool kUseCacheGlobalStore>
+-SGL_DEVICE void store_state_float4(float* ptr, float4 value) {
+-  if constexpr (kUseCacheGlobalStore) {
+-    __stcg(reinterpret_cast<float4*>(ptr), value);
++SGL_DEVICE float bf16_round(float value) {
++  return __bfloat162float(__float2bfloat16(value));
++}
++
++SGL_DEVICE float conv_silu_bf16(float value) {
++  return bf16_round(value / (1.0f + expf(-value)));
++}
++
++template <typename StateT>
++SGL_DEVICE float4 load_state4(const StateT* ptr) {
++  if constexpr (std::is_same_v<StateT, float>) {
++    return *reinterpret_cast<const float4*>(ptr);
++  } else {
++    return make_float4(
++        __bfloat162float(ptr[0]),
++        __bfloat162float(ptr[1]),
++        __bfloat162float(ptr[2]),
++        __bfloat162float(ptr[3]));
++  }
++}
++
++template <bool kUseCacheGlobalStore, typename StateT>
++SGL_DEVICE void store_state4(StateT* ptr, float4 value) {
++  if constexpr (std::is_same_v<StateT, float>) {
++    if constexpr (kUseCacheGlobalStore) {
++      __stcg(reinterpret_cast<float4*>(ptr), value);
++    } else {
++      *reinterpret_cast<float4*>(ptr) = value;
++    }
+   } else {
+-    *reinterpret_cast<float4*>(ptr) = value;
++    reinterpret_cast<__nv_bfloat162*>(ptr)[0] =
++        __float22bfloat162_rn(make_float2(value.x, value.y));
++    reinterpret_cast<__nv_bfloat162*>(ptr)[1] =
++        __float22bfloat162_rn(make_float2(value.z, value.w));
+   }
+ }
+ 
+-template <int kCopyThreads>
++template <int kCopyThreads, typename StateT>
+ SGL_DEVICE void
+-cp_async_state_chunk_for(float* s_state, const float* state, int slot, int i_hv, int64_t state_slot_stride, int chunk) {
+-  constexpr int kFloat4PerChunk = kChunkV * kDimK / 4;
++cp_async_state_chunk_for(
++    StateT* s_state,
++    const StateT* state,
++    int slot,
++    int i_hv,
++    int64_t state_slot_stride,
++    int chunk) {
++  constexpr int kElementsPerCopy = 16 / sizeof(StateT);
++  constexpr int kCopiesPerChunk = kChunkV * kDimK / kElementsPerCopy;
+   const int tid = threadIdx.x;
+   const int stage = chunk & 1;
+   const int v_base = chunk * kChunkV;
+   const int64_t slot_base = static_cast<int64_t>(slot) * state_slot_stride;
+-  for (int linear4 = tid; linear4 < kFloat4PerChunk; linear4 += kCopyThreads) {
+-    const int elem = linear4 * 4;
++  for (int linear = tid; linear < kCopiesPerChunk; linear += kCopyThreads) {
++    const int elem = linear * kElementsPerCopy;
+     const int row = elem / kDimK;
+     const int k = elem - row * kDimK;
+-    float* dst = s_state + (stage * kChunkV + row) * kDimK + k;
+-    const float* src = state + slot_base + ((i_hv * kDimV + v_base + row) * kDimK + k);
++    StateT* dst = s_state + (stage * kChunkV + row) * kDimK + k;
++    const StateT* src = state + slot_base + ((i_hv * kDimV + v_base + row) * kDimK + k);
+     ptx::cp_async_cg_16b(dst, src);
+   }
+   ptx::cp_async_commit_group();
+ }
+ 
+-SGL_DEVICE void
+-cp_async_state_chunk(float* s_state, const float* state, int slot, int i_hv, int64_t state_slot_stride, int chunk) {
++template <typename StateT>
++SGL_DEVICE void cp_async_state_chunk(
++    StateT* s_state,
++    const StateT* state,
++    int slot,
++    int i_hv,
++    int64_t state_slot_stride,
++    int chunk) {
+   cp_async_state_chunk_for<kThreads>(s_state, state, slot, i_hv, state_slot_stride, chunk);
+ }
+ 
+@@ -194,23 +236,23 @@
+ 
+ // 1D TMA bulk copy gmem -> smem; the issuing thread arrives with expect-tx on
+ // the mbarrier, completion is observed via ptx::mbar_wait_parity.
+-template <int kStageChunkV>
++template <int kStageChunkV, typename StateT>
+ SGL_DEVICE void tma_state_chunk_stage(
+-    float* s_state,
+-    const float* state,
++    StateT* s_state,
++    const StateT* state,
+     int slot,
+     int i_hv,
+     int64_t state_slot_stride,
+     int chunk,
+     int stage,
+     uint64_t* bar) {
+-  constexpr uint32_t kBytes = kStageChunkV * kDimK * sizeof(float);
+-  float* dst = s_state + stage * kStageChunkV * kDimK;
++  constexpr uint32_t kBytes = kStageChunkV * kDimK * sizeof(StateT);
++  StateT* dst = s_state + stage * kStageChunkV * kDimK;
+   // 16B-aligned for any slot iff state_slot_stride*sizeof(float) % 16 == 0
+   // (host gates TMA off otherwise); the intra-slot chunk offset is a multiple
+   // of kStageChunkV*kDimK*4, always 16B-aligned.
+   const int64_t slot_base = static_cast<int64_t>(slot) * state_slot_stride;
+-  const float* src = state + slot_base + ((i_hv * kDimV + chunk * kStageChunkV) * kDimK);
++  const StateT* src = state + slot_base + ((i_hv * kDimV + chunk * kStageChunkV) * kDimK);
+ #if KDA_FUSED_DECODE_HAS_TMA
+   ptx::fence_async_smem();
+   ptx::mbar_arrive_expect_tx(bar, kBytes);
+@@ -386,7 +428,8 @@
+     bool kApplyBetaSigmoid = true,
+     bool kUseTmaLoad = false,
+     int kTmaStages = kNumChunks,
+-    bool kUsePDL = false>
++    bool kUsePDL = false,
++    typename StateT = float>
+ // Shapes below use K3's per-TP-rank sizing (linear_attn_config: num_heads=96 over
+ // TP={8,16,32} -> H=HV={12,6,3} local heads; head_dim=128 -> kDimK=kDimV=128; kSeg = H*128;
+ // short_conv_kernel_size=4 -> kKernelWidth=4, kConvStateWidth=3). B is the live
+@@ -415,7 +458,7 @@
+     const int* __restrict__ ssm_state_indices,  // [B] recurrent-state slot per token; <0 marks a padded cuda-graph slot
+     const int* __restrict__ cu_seqlens,         // [B+1] token offsets into x_q/x_k/x_v/g/beta; unused under
+                                                 // kUseStaticDecodeLayout
+-    float* __restrict__ state,  // [slots, HV, 128, 128] recurrent KDA state h, inner [V,K] contiguous, slot pitch =
++    StateT* __restrict__ state,  // [slots, HV, 128, 128] recurrent KDA state h, inner [V,K] contiguous, slot pitch =
+                                 // state_slot_stride
+     __nv_bfloat16* __restrict__ out,  // [B, hv_count*128] fused-decode output, row i_n, col i_hv*128 + v
+     int B,                            // live decode batch size (token count for this launch)
+@@ -488,7 +531,8 @@
+ 
+   // Dynamic size: 2 cp.async stages (32KB) or kTmaStages TMA stages (16KB per
+   // stage; kTmaStages == kNumChunks means no buffer reuse).
+-  extern __shared__ __align__(16) float s_state[];
++  extern __shared__ __align__(16) unsigned char s_state_storage[];
++  StateT* s_state = reinterpret_cast<StateT*>(s_state_storage);
+   __shared__ float s_q[kDimK];
+   __shared__ float s_k[kDimK];
+   __shared__ float s_decay[kDimK];
+@@ -561,8 +605,8 @@
+       cs_k[cs_base + cs_w_stride] = k_shift1;
+       cs_k[cs_base + 2 * cs_w_stride] = k_new;
+ 
+-      s_q[k] = device::math::silu_fast(q_acc);
+-      s_k[k] = device::math::silu_fast(k_acc);
++      s_q[k] = conv_silu_bf16(q_acc);
++      s_k[k] = conv_silu_bf16(k_acc);
+ 
+       const float g_raw = bf16_load(g, bos * g_row_stride + i_hv * kDimK + k) + dt_bias[hk];
+       if constexpr (kUseLowerBound) {
+@@ -588,8 +632,8 @@
+       q_acc += bf16_load(x_q, bos * x_row_stride + hk) * fp32_at(w_q_t, (kKernelWidth - 1) * hkv_dim + hk);
+       k_acc += bf16_load(x_k, bos * x_row_stride + hk) * fp32_at(w_k_t, (kKernelWidth - 1) * hkv_dim + hk);
+ 
+-      s_q[k] = device::math::silu_fast(q_acc);
+-      s_k[k] = device::math::silu_fast(k_acc);
++      s_q[k] = conv_silu_bf16(q_acc);
++      s_k[k] = conv_silu_bf16(k_acc);
+ 
+       const float g_raw = bf16_load(g, bos * g_row_stride + i_hv * kDimK + k) + dt_bias[hk];
+       if constexpr (kUseLowerBound) {
+@@ -625,7 +669,7 @@
+       cs_v[cs_base + 0] = v_shift0;
+       cs_v[cs_base + cs_w_stride] = v_shift1;
+       cs_v[cs_base + 2 * cs_w_stride] = v_new;
+-      s_v[v] = device::math::silu_fast(v_acc);
++      s_v[v] = conv_silu_bf16(v_acc);
+ 
+       if constexpr (kApplyOnorm && kPreloadOnormParams) {
+         const int64_t onorm_idx = i_n * onormg_row_stride + i_hv * kDimV + v;
+@@ -645,7 +689,7 @@
+         v_acc += bf16_load(cs_v, cs_idx) * fp32_at(w_v_t, w * hvv_dim + hvv);
+       }
+       v_acc += bf16_load(x_v, bos * x_row_stride + hvv) * fp32_at(w_v_t, (kKernelWidth - 1) * hvv_dim + hvv);
+-      s_v[v] = device::math::silu_fast(v_acc);
++      s_v[v] = conv_silu_bf16(v_acc);
+ 
+       if constexpr (kApplyOnorm && kPreloadOnormParams) {
+         const int64_t onorm_idx = i_n * onormg_row_stride + i_hv * kDimV + v;
+@@ -719,7 +763,7 @@
+       }
+     }
+ 
+-    const float* state_stage = s_state + (kUseTmaLoad ? (chunk % kTmaStages) : (chunk & 1)) * kChunkV * kDimK;
++    const StateT* state_stage = s_state + (kUseTmaLoad ? (chunk % kTmaStages) : (chunk & 1)) * kChunkV * kDimK;
+ 
+ #pragma unroll
+     for (int row = 0; row < kRowsPerWarp; row += 2) {
+@@ -732,8 +776,8 @@
+       float dot_hk_a = 0.0f;
+       float dot_hk_b = 0.0f;
+ 
+-      const float4 raw_h_a = *reinterpret_cast<const float4*>(state_stage + v_row_a * kDimK + k_base);
+-      const float4 raw_h_b = *reinterpret_cast<const float4*>(state_stage + v_row_b * kDimK + k_base);
++      const float4 raw_h_a = load_state4(state_stage + v_row_a * kDimK + k_base);
++      const float4 raw_h_b = load_state4(state_stage + v_row_b * kDimK + k_base);
+       h_a_vals[0] = raw_h_a.x * r_decay[0];
+       h_a_vals[1] = raw_h_a.y * r_decay[1];
+       h_a_vals[2] = raw_h_a.z * r_decay[2];
+@@ -767,19 +811,19 @@
+       if constexpr (kComputeOutputBeforeStore) {
+         dot_hq_a = h_a_0 * r_q[0] + h_a_1 * r_q[1] + h_a_2 * r_q[2] + h_a_3 * r_q[3];
+         dot_hq_b = h_b_0 * r_q[0] + h_b_1 * r_q[1] + h_b_2 * r_q[2] + h_b_3 * r_q[3];
+-        store_state_float4<kUseCacheGlobalStore>(state + state_idx_a, make_float4(h_a_0, h_a_1, h_a_2, h_a_3));
+-        store_state_float4<kUseCacheGlobalStore>(state + state_idx_b, make_float4(h_b_0, h_b_1, h_b_2, h_b_3));
++        store_state4<kUseCacheGlobalStore>(state + state_idx_a, make_float4(h_a_0, h_a_1, h_a_2, h_a_3));
++        store_state4<kUseCacheGlobalStore>(state + state_idx_b, make_float4(h_b_0, h_b_1, h_b_2, h_b_3));
+       } else {
+-        store_state_float4<kUseCacheGlobalStore>(state + state_idx_a, make_float4(h_a_0, h_a_1, h_a_2, h_a_3));
+-        store_state_float4<kUseCacheGlobalStore>(state + state_idx_b, make_float4(h_b_0, h_b_1, h_b_2, h_b_3));
++        store_state4<kUseCacheGlobalStore>(state + state_idx_a, make_float4(h_a_0, h_a_1, h_a_2, h_a_3));
++        store_state4<kUseCacheGlobalStore>(state + state_idx_b, make_float4(h_b_0, h_b_1, h_b_2, h_b_3));
+         dot_hq_a = h_a_0 * r_q[0] + h_a_1 * r_q[1] + h_a_2 * r_q[2] + h_a_3 * r_q[3];
+         dot_hq_b = h_b_0 * r_q[0] + h_b_1 * r_q[1] + h_b_2 * r_q[2] + h_b_3 * r_q[3];
+       }
+ 
+       const Sum2 dot_hq = warp_reduce_sum_pair(dot_hq_a, dot_hq_b);
+       if (lane == 0) {
+-        s_o[v0] = dot_hq.x;
+-        s_o[v1] = dot_hq.y;
++        s_o[v0] = bf16_round(dot_hq.x);
++        s_o[v1] = bf16_round(dot_hq.y);
+         if constexpr (kApplyOnorm && kAccumulateOnormSumsq) {
+           o_sumsq += dot_hq.x * dot_hq.x + dot_hq.y * dot_hq.y;
+         }
+@@ -887,7 +931,13 @@
+ // and lower-bounded sigmoid) and selected at launch from the model config.
+ // kUseTmaLoad/kTmaStages select the 1D-TMA state-staging path in place of the
+ // cp.async fallback used for a misaligned recurrent-state slot stride.
+-template <int kFixedHeads, bool kUseLowerBound, bool kUsePDL, bool kUseTmaLoad = false, int kTmaStages = kNumChunks>
++template <
++    int kFixedHeads,
++    bool kUseLowerBound,
++    bool kUsePDL,
++    typename StateT = float,
++    bool kUseTmaLoad = false,
++    int kTmaStages = kNumChunks>
+ constexpr auto kda_fused_decode_k3_kernel = kda_decode_fusion_many_heads_kernel<
+     /*kApplyOnorm=*/true,
+     /*kUseStaticDecodeLayout=*/true,
+@@ -907,26 +957,28 @@
+     /*kApplyBetaSigmoid=*/true,
+     kUseTmaLoad,
+     kTmaStages,
+-    kUsePDL>;
++    kUsePDL,
++    StateT>;
+ 
+-template <int kFixedHeads, bool kUsePDL>
++template <int kFixedHeads, bool kUsePDL, typename StateT>
+ auto select_kda_fused_decode_k3_kernel(bool use_lower_bound, int tma_stages) {
+   if (tma_stages == 3) {
+-    return use_lower_bound ? kda_fused_decode_k3_kernel<kFixedHeads, true, kUsePDL, true, 3>
+-                           : kda_fused_decode_k3_kernel<kFixedHeads, false, kUsePDL, true, 3>;
++    return use_lower_bound ? kda_fused_decode_k3_kernel<kFixedHeads, true, kUsePDL, StateT, true, 3>
++                           : kda_fused_decode_k3_kernel<kFixedHeads, false, kUsePDL, StateT, true, 3>;
+   }
+   if (tma_stages == 4) {
+-    return use_lower_bound ? kda_fused_decode_k3_kernel<kFixedHeads, true, kUsePDL, true, 4>
+-                           : kda_fused_decode_k3_kernel<kFixedHeads, false, kUsePDL, true, 4>;
++    return use_lower_bound ? kda_fused_decode_k3_kernel<kFixedHeads, true, kUsePDL, StateT, true, 4>
++                           : kda_fused_decode_k3_kernel<kFixedHeads, false, kUsePDL, StateT, true, 4>;
+   }
+-  return use_lower_bound ? kda_fused_decode_k3_kernel<kFixedHeads, true, kUsePDL>
+-                         : kda_fused_decode_k3_kernel<kFixedHeads, false, kUsePDL>;
++  return use_lower_bound ? kda_fused_decode_k3_kernel<kFixedHeads, true, kUsePDL, StateT>
++                         : kda_fused_decode_k3_kernel<kFixedHeads, false, kUsePDL, StateT>;
+ }
+ 
+ template <bool kUsePDL>
+ struct KdaFusedDecodeKernel {
++  template <typename StateT>
+   static void
+-  run(const tvm::ffi::TensorView mixed_qkv,     // [B, 3*H*128] bf16, row-strided
++  run_impl(const tvm::ffi::TensorView mixed_qkv,     // [B, 3*H*128] bf16, row-strided
+       const tvm::ffi::TensorView a,             // [B, H*128] bf16 raw forget gate
+       const tvm::ffi::TensorView b,             // [B, H] bf16 raw beta logits
+       const tvm::ffi::TensorView conv_states,   // [slots, 3, conv_dim] bf16 pool
+@@ -938,7 +990,7 @@
+       const tvm::ffi::TensorView dt_bias,       // [H*128] fp32
+       const tvm::ffi::TensorView onorm_g,       // [B, H*128] bf16, row-strided
+       const tvm::ffi::TensorView onorm_weight,  // [128] fp32
+-      const tvm::ffi::TensorView state,         // [slots, H, 128, 128] fp32; inner-contiguous, any slot pitch
++      const tvm::ffi::TensorView state,         // [slots, H, 128, 128] state dtype; inner-contiguous, any slot pitch
+       const tvm::ffi::TensorView indices,       // [B] int32 (< 0 = padded slot)
+       const tvm::ffi::TensorView out,           // [B, H*128] bf16 dense
+       double scale,
+@@ -978,7 +1030,7 @@
+     // slot pitch from state.stride(0); only the inner [HV, V, K] contiguity
+     // (strides {V*K, K, 1}) is load-bearing here.
+     TensorMatcher({Slots_, kH, 128, 128})
+-        .with_dtype<fp32_t>()
++        .with_dtype<StateT>()
+         .with_device(device)
+         .with_strides({-1, 128 * 128, 128, 1})
+         .verify(state);
+@@ -1000,23 +1052,27 @@
+     // TMA 1D-bulk needs the per-slot source address (state + slot*stride) 16B
+     // aligned for every slot. state.data_ptr() is torch-aligned and each chunk
+     // offset is a multiple of kChunkV*kDimK*4 B, so alignment holds iff the slot
+-    // pitch itself is 16B-aligned, i.e. state_slot_stride % 4 == 0 (fp32). The
++    // pitch itself is 16B-aligned, i.e. state_slot_stride % (16 / sizeof(StateT)) == 0. The
+     // K3 envelope pitch (14,042,880 elems, %4==0) and the dense pitch both
+     // satisfy this; a pathological stride falls back to cp.async (still fully
+     // fused, just no TMA) rather than silently mis-addressing the descriptor.
+-    const bool tma_slot_stride_aligned = (state_slot_stride % 4) == 0;
++    const bool tma_slot_stride_aligned = (state_slot_stride % (16 / sizeof(StateT))) == 0;
+     if (tma_slot_stride_aligned) {
+       // Full-state staging (4 stages, 64KB, sync-free) wins while the grid
+       // is small enough that occupancy isn't the limiter; past that the
+       // 48KB 3-stage variant (one sync for the single stage reuse) benches
+       // fastest.
+-      tma_stages = B * static_cast<int>(kH) >= 512 ? 3 : 4;
++      if constexpr (std::is_same_v<StateT, float>) {
++        tma_stages = B * static_cast<int>(kH) >= 512 ? 3 : 4;
++      } else {
++        tma_stages = 4;
++      }
+     }
+-    auto kernel = kH == 3 ? select_kda_fused_decode_k3_kernel<3, kUsePDL>(use_lower_bound, tma_stages)
+-                          : (kH == 6 ? select_kda_fused_decode_k3_kernel<6, kUsePDL>(use_lower_bound, tma_stages)
+-                                     : select_kda_fused_decode_k3_kernel<12, kUsePDL>(use_lower_bound, tma_stages));
++    auto kernel = kH == 3 ? select_kda_fused_decode_k3_kernel<3, kUsePDL, StateT>(use_lower_bound, tma_stages)
++                          : (kH == 6 ? select_kda_fused_decode_k3_kernel<6, kUsePDL, StateT>(use_lower_bound, tma_stages)
++                                     : select_kda_fused_decode_k3_kernel<12, kUsePDL, StateT>(use_lower_bound, tma_stages));
+     const int smem_stages = tma_stages == 0 ? 2 : tma_stages;
+-    const size_t smem_bytes = static_cast<size_t>(smem_stages) * kChunkV * kDimK * sizeof(float);
++    const size_t smem_bytes = static_cast<size_t>(smem_stages) * kChunkV * kDimK * sizeof(StateT);
+     host::RuntimeDeviceCheck(
+         cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, static_cast<int>(smem_bytes)));
+ 
+@@ -1043,7 +1099,7 @@
+             static_cast<const fp32_t*>(onorm_weight.data_ptr()),
+             static_cast<const int32_t*>(indices.data_ptr()),
+             /*cu_seqlens=*/static_cast<const int32_t*>(nullptr),
+-            static_cast<fp32_t*>(state.data_ptr()),
++            static_cast<StateT*>(state.data_ptr()),
+             static_cast<__nv_bfloat16*>(out.data_ptr()),
+             B,
+             /*H=*/static_cast<int>(kH),
+@@ -1059,6 +1115,74 @@
+             conv_states.stride(1),
+             state_slot_stride);
+   }
++
++  static void
++  run(const tvm::ffi::TensorView mixed_qkv,
++      const tvm::ffi::TensorView a,
++      const tvm::ffi::TensorView b,
++      const tvm::ffi::TensorView conv_states,
++      const tvm::ffi::TensorView w_q_t,
++      const tvm::ffi::TensorView w_k_t,
++      const tvm::ffi::TensorView w_v_t,
++      const tvm::ffi::TensorView conv_bias,
++      const tvm::ffi::TensorView A_log,
++      const tvm::ffi::TensorView dt_bias,
++      const tvm::ffi::TensorView onorm_g,
++      const tvm::ffi::TensorView onorm_weight,
++      const tvm::ffi::TensorView state,
++      const tvm::ffi::TensorView indices,
++      const tvm::ffi::TensorView out,
++      double scale,
++      double onorm_eps,
++      double lower_bound,
++      bool use_lower_bound) {
++    using namespace host;
++    if (is_type<bf16_t>(state.dtype())) {
++      run_impl<bf16_t>(
++          mixed_qkv,
++          a,
++          b,
++          conv_states,
++          w_q_t,
++          w_k_t,
++          w_v_t,
++          conv_bias,
++          A_log,
++          dt_bias,
++          onorm_g,
++          onorm_weight,
++          state,
++          indices,
++          out,
++          scale,
++          onorm_eps,
++          lower_bound,
++          use_lower_bound);
++    } else if (is_type<fp32_t>(state.dtype())) {
++      run_impl<fp32_t>(
++          mixed_qkv,
++          a,
++          b,
++          conv_states,
++          w_q_t,
++          w_k_t,
++          w_v_t,
++          conv_bias,
++          A_log,
++          dt_bias,
++          onorm_g,
++          onorm_weight,
++          state,
++          indices,
++          out,
++          scale,
++          onorm_eps,
++          lower_bound,
++          use_lower_bound);
++    } else {
++      RuntimeCheck(false, "KDA fused decode state must be bfloat16 or float32, got ", state.dtype());
++    }
++  }
+ };
+ 
+ }  // namespace sglang
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_prefill_claude/pristine_tree/kernels/jit/csrc/kimi_k3/attn_res/fused_tma.cuh /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_prefill_claude/trial_1_tree_judged/kernels/jit/csrc/kimi_k3/attn_res/fused_tma.cuh
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_prefill_claude/pristine_tree/kernels/jit/csrc/kimi_k3/attn_res/fused_tma.cuh	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_prefill_claude/trial_1_tree_judged/kernels/jit/csrc/kimi_k3/attn_res/fused_tma.cuh	2026-09-25 05:49:14.644817782 -0700
+@@ -178,6 +178,8 @@
+   // Optional fused NVLS reduce-scatter source. When input_mc is non-null,
+   // the producer warp materializes this rank's reduced token shard plus the
+   // local residual into prefix_sum/prefix_out before TMA consumes it.
++  // The fused local add (kFuseAdd traits) reuses residual/prefix_out: the
++  // aggregated prefix row is prefix_sum + residual, stored to prefix_out.
+   const uint8_t* input_mc;
+   const bf16_t* residual;
+   bf16_t* prefix_out;
+@@ -191,13 +193,24 @@
+   uint32_t num_tokens;
+ };
+ 
+-template <int64_t kDim_, uint32_t kNumBankRows_, uint32_t kChunkRows_, uint32_t kConsumerRegs_ = 0>
++template <
++    int64_t kDim_,
++    uint32_t kNumBankRows_,
++    uint32_t kChunkRows_,
++    uint32_t kConsumerRegs_ = 0,
++    bool kFuseAdd_ = false>
+ struct KimiK3AttnResTrait {
+  public:
+   static constexpr int64_t kDim = kDim_;
+   static constexpr int64_t kTile = 1024;               // one warp-group-wide 16B sweep
+   static constexpr uint32_t kNumRows = kNumBankRows_;  // bank rows; +1 prefix row
+   static constexpr uint32_t kChunkRows = kChunkRows_;  // rows per chunk (one pull pair per chunk)
++  // Fused pending residual add: the producer bulk-copies the addend row into
++  // one extra row of the last chunk's slot, the consumers add it onto the
++  // prefix row in registers (fp32 add, one RNE rounding: bit-exact with the
++  // unfused torch bf16 add) and store the sum to prefix_out.
++  static constexpr bool kFuseAdd = kFuseAdd_;
++  static constexpr uint32_t kSlotRows = kChunkRows + (kFuseAdd ? 1 : 0);
+   // Chunk slots in the smem ring. Frozen at 2 (double buffering): 1 stalls
+   // the producer behind the consumers (~10% slower), >2 gains nothing and
+   // costs smem at small T.
+@@ -245,7 +258,7 @@
+     // token's first score reduction.
+     float warp_ssq[kNumConsumerWarps];
+     uint32_t tmem_base;
+-    alignas(128) bf16_t buf[kNumStages][kChunkRows][kDim];
++    alignas(128) bf16_t buf[kNumStages][kSlotRows][kDim];
+   };
+ 
+   static SGL_DEVICE void forward(const AttnResTMAParams& params, Smem* smem);
+@@ -268,8 +281,8 @@
+   return reinterpret_cast<const float2&>(result);
+ }
+ 
+-template <int64_t kDim_, uint32_t kNumBankRows_, uint32_t kChunkRows_, uint32_t kConsumerRegs_>
+-SGL_DEVICE void KimiK3AttnResTrait<kDim_, kNumBankRows_, kChunkRows_, kConsumerRegs_>::forward(
++template <int64_t kDim_, uint32_t kNumBankRows_, uint32_t kChunkRows_, uint32_t kConsumerRegs_, bool kFuseAdd_>
++SGL_DEVICE void KimiK3AttnResTrait<kDim_, kNumBankRows_, kChunkRows_, kConsumerRegs_, kFuseAdd_>::forward(
+     const AttnResTMAParams& params, Smem* smem) {
+   using namespace device;
+   using row_vec_t = AlignedVector<bf16x2_t, kVecElems / 2>;  // 16 bytes
+@@ -304,7 +317,8 @@
+             ptx::mbar_wait_parity(&smem->bar_free[slot], phase ^ 1);
+           }
+           // One pull per chunk; each row still gets its own bulk copy.
+-          ptx::mbar_arrive_expect_tx(&smem->bar_full[slot], an * kRowBytes);
++          const bool add_row = kFuseAdd && base_row + an == kNumRows + 1;
++          ptx::mbar_arrive_expect_tx(&smem->bar_full[slot], (an + (add_row ? 1 : 0)) * kRowBytes);
+ #pragma unroll
+           for (uint32_t r = 0; r < an; ++r) {
+             const auto row = base_row + r;
+@@ -315,6 +329,10 @@
+             if (token == blockIdx.x && row == kNumRows) PDLWaitPrimary<true>();
+             ptx::cp_async_bulk_1d_load(&smem->buf[slot][r], src, kRowBytes, &smem->bar_full[slot]);
+           }
++          if (add_row) {
++            ptx::cp_async_bulk_1d_load(
++                &smem->buf[slot][kChunkRows], params.residual + token * kDim, kRowBytes, &smem->bar_full[slot]);
++          }
+         }
+       }
+       PDLTriggerSecondary<true>();
+@@ -394,6 +412,19 @@
+           for (uint32_t r = 0; r < an; ++r) {
+             rows[si][r].load(&smem->buf[slot][r][offset]);
+           }
++          if constexpr (kFuseAdd) {
++            if (base_row + an == kNumRows + 1) {
++              const uint32_t pr = kNumRows - base_row;
++              row_vec_t addend;
++              addend.load(&smem->buf[slot][kChunkRows][offset]);
++#pragma unroll
++              for (uint32_t j = 0; j < kVecElems / 2; ++j) {
++                const auto x = cast<float2>(rows[si][pr][j]);
++                const auto y = cast<float2>(addend[j]);
++                rows[si][pr][j] = cast<bf16x2_t>(make_float2(x.x + y.x, x.y + y.y));
++              }
++            }
++          }
+ #pragma unroll
+           for (uint32_t r = 0; r < an; ++r) {
+ #pragma unroll
+@@ -410,6 +441,16 @@
+         // already in registers; snapshot it to bank row nvb with plain
+         // stores — the .write() copy kernel disappears. Placed after the
+         // arrive so the slot handoff is not delayed.
++        if (kFuseAdd && base_row + an == kNumRows + 1) {
++          const uint32_t pr = kNumRows - base_row;
++          auto* dst = params.prefix_out + static_cast<int64_t>(token) * kDim;
++#pragma unroll
++          for (uint32_t si = 0; si < kSlicesPerGroup; ++si) {
++            const auto tile = si * kNumGroups + group;
++            if (tile >= kNumTiles) continue;
++            rows[si][pr].store(dst, tile * (kTile / kVecElems) + tid_in_group);
++          }
++        }
+         if (params.prefix_dst != nullptr && base_row + an == kNumRows + 1) {
+           const uint32_t pr = kNumRows - base_row;
+           auto* dst = params.prefix_dst + static_cast<int64_t>(token) * params.stride_bm;
+@@ -676,6 +717,15 @@
+         nullptr, attn_res_fused_direct_ag_kernel<Trait<I + 1>, kOccupancy>...};
+   }
+   static constexpr auto kAgTable = make_ag_table(std::make_index_sequence<kMaxBankRows>{});
++  template <uint32_t kNvb>
++  using AddTrait = KimiK3AttnResTrait<kDim, kNvb, kChunkRows, kConsumerRegs, /*kFuseAdd=*/true>;
++  static constexpr size_t kAddSmemBytes = sizeof(typename AddTrait<1>::Smem);
++  static_assert(kOccupancy * kAddSmemBytes <= 233472 - 1024, "occupancy exceeds the smem budget (fused add)");
++  template <std::size_t... I>
++  static constexpr auto make_add_table(std::index_sequence<I...>) {
++    return std::array<KernelFn, kMaxBankRows + 1>{nullptr, attn_res_fused_tma_kernel<AddTrait<I + 1>, kOccupancy>...};
++  }
++  static constexpr auto kAddTable = make_add_table(std::make_index_sequence<kMaxBankRows>{});
+ 
+   static void
+   run(const tvm::ffi::TensorView prefix_sum,
+@@ -751,6 +801,79 @@
+     LaunchKernel(grid, kNumThreads, device.unwrap(), kSmemBytes).enable_pdl(true)(kTable[nvb], params);
+   }
+ 
++  // run() with the pending residual add fused in: aggregates the prefix
++  // input + residual and also stores it to prefix_out.
++  static void run_add(
++      const tvm::ffi::TensorView input,
++      const tvm::ffi::TensorView residual,
++      const tvm::ffi::TensorView bank,
++      const tvm::ffi::TensorView cw,
++      const tvm::ffi::TensorView ow,
++      const tvm::ffi::TensorView out,
++      const tvm::ffi::TensorView prefix_out,
++      int64_t nvb,
++      double eps,
++      bool write_prefix) {
++    using namespace host;
++
++    auto T_ = SymbolicSize{"num_tokens"};
++    auto H_ = SymbolicSize{"hidden_size"};
++    auto NB_ = SymbolicSize{"num_bank_slots"};
++    auto device = SymbolicDevice{};
++    device.set_options<kDLCUDA>();
++
++    TensorMatcher({T_, H_})
++        .with_dtype<bf16_t>()
++        .with_device(device)
++        .verify(input)
++        .verify(residual)
++        .verify(out)
++        .verify(prefix_out);
++    TensorMatcher({T_, NB_, H_}).with_dtype<bf16_t>().with_device(device).verify(bank);
++    TensorMatcher({H_}).with_dtype<bf16_t>().with_device(device).verify(cw).verify(ow);
++
++    const auto num_tokens = static_cast<int64_t>(T_.unwrap());
++    const auto H = static_cast<int64_t>(H_.unwrap());
++    const auto NB = static_cast<int64_t>(NB_.unwrap());
++
++    RuntimeCheck(H == kDim, "attn_res_fused_add: H must be ", kDim, ", got ", H);
++    RuntimeCheck(1 <= nvb && nvb <= kMaxBankRows && nvb <= NB, "attn_res_fused_add: invalid nvb=", nvb, " NB=", NB);
++    RuntimeCheck(!write_prefix || nvb < NB, "attn_res_fused_add: write_prefix targets bank row nvb, needs nvb < NB");
++
++    if (num_tokens == 0) return;
++
++    [[maybe_unused]] static const bool attrs_set = [] {
++      for (uint32_t i = 1; i <= kMaxBankRows; ++i) {
++        RuntimeDeviceCheck(
++            cudaFuncSetAttribute(kAddTable[i], cudaFuncAttributeMaxDynamicSharedMemorySize, kAddSmemBytes));
++      }
++      return true;
++    }();
++
++    const auto num_sm = runtime::get_sm_count(device.unwrap().device_id);
++    const auto grid = std::min<int64_t>((int64_t)num_sm * kOccupancy, num_tokens);
++    const auto params = AttnResTMAParams{
++        .prefix_sum = static_cast<const bf16_t*>(input.data_ptr()),
++        .bank = static_cast<const bf16_t*>(bank.data_ptr()),
++        .cw = static_cast<const bf16_t*>(cw.data_ptr()),
++        .ow = static_cast<const bf16_t*>(ow.data_ptr()),
++        .out = static_cast<bf16_t*>(out.data_ptr()),
++        .prefix_dst = write_prefix ? static_cast<bf16_t*>(bank.data_ptr()) + nvb * H : nullptr,
++        .input_mc = nullptr,
++        .residual = static_cast<const bf16_t*>(residual.data_ptr()),
++        .prefix_out = static_cast<bf16_t*>(prefix_out.data_ptr()),
++        .sem_local = nullptr,
++        .sem_mc = nullptr,
++        .output_mc = nullptr,
++        .world_size = 0,
++        .rank = 0,
++        .stride_bm = NB * H,
++        .eps = static_cast<float>(eps),
++        .num_tokens = static_cast<uint32_t>(num_tokens),
++    };
++    LaunchKernel(grid, kNumThreads, device.unwrap(), kAddSmemBytes).enable_pdl(true)(kAddTable[nvb], params);
++  }
++
+   static void run_pull_rs(
+       CommunicatorRef ref,
+       const tvm::ffi::TensorView input,
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_prefill_claude/pristine_tree/kernels/ops/attention/fla/chunk_delta_h.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_prefill_claude/trial_1_tree_judged/kernels/ops/attention/fla/chunk_delta_h.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_prefill_claude/pristine_tree/kernels/ops/attention/fla/chunk_delta_h.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_prefill_claude/trial_1_tree_judged/kernels/ops/attention/fla/chunk_delta_h.py	2026-09-25 05:36:29.673546437 -0700
+@@ -16,6 +16,7 @@
+ from sglang.kernels.ops.attention.fla.op import exp, exp2, safe_exp
+ from sglang.kernels.ops.attention.fla.utils import (
+     autotune_cache_kwargs,
++    get_multiprocessor_count,
+     is_nvidia_hopper,
+ )
+ 
+@@ -24,6 +25,20 @@
+ GDN_CHUNK_H_BV = int(os.getenv("SGLANG_GDN_CHUNK_H_BV", "32"))
+ GDN_CHUNK_H_NUM_WARPS = int(os.getenv("SGLANG_GDN_CHUNK_H_NUM_WARPS", "4"))
+ GDN_CHUNK_H_NUM_STAGES = int(os.getenv("SGLANG_GDN_CHUNK_H_NUM_STAGES", "2"))
++# Few-sequence chunked prefill launches only cdiv(V, BV) * N * H CTAs, and each
++# one walks all NT chunks serially, so the scan is latency-bound. Halving BV
++# doubles the CTAs, and a third stage prefetches the h-independent w/k/v tiles
++# of the next chunk. V columns of the state recur independently (every
++# reduction is over K) and num_warps is unchanged, so the result is
++# bit-identical. Skipped when the env knobs above pin the tile.
++_CHUNK_H_TILE_PINNED = any(
++    k in os.environ
++    for k in (
++        "SGLANG_GDN_CHUNK_H_BV",
++        "SGLANG_GDN_CHUNK_H_NUM_WARPS",
++        "SGLANG_GDN_CHUNK_H_NUM_STAGES",
++    )
++)
+ 
+ 
+ @triton.autotune(
+@@ -400,7 +415,17 @@
+     def grid(meta):
+         return (triton.cdiv(V, meta["BV"]), N * H)
+ 
+-    chunk_gated_delta_rule_fwd_kernel_h_blockdim64[grid](
++    kernel = chunk_gated_delta_rule_fwd_kernel_h_blockdim64
++    tile = {}
++    if (
++        not _CHUNK_H_TILE_PINNED
++        and k.is_cuda
++        and triton.cdiv(V, 32) * N * H <= 2 * get_multiprocessor_count(k.device.index)
++    ):
++        kernel = chunk_gated_delta_rule_fwd_kernel_h_blockdim64.fn
++        tile = dict(BV=16, num_warps=4, num_stages=3)
++
++    kernel[grid](
+         k=k,
+         v=u,
+         w=w,
+@@ -433,5 +458,6 @@
+         NT_BUCKET=(0 if NT <= 32 else (1 if NT <= 128 else 2)),
+         USE_EXP2=use_exp2,
+         TRACK_STATE=track_state is not None,
++        **tile,
+     )
+     return h, v_new
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_prefill_claude/pristine_tree/kernels/ops/attention/fla/fused_norm_gate.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_prefill_claude/trial_1_tree_judged/kernels/ops/attention/fla/fused_norm_gate.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_prefill_claude/pristine_tree/kernels/ops/attention/fla/fused_norm_gate.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_prefill_claude/trial_1_tree_judged/kernels/ops/attention/fla/fused_norm_gate.py	2026-09-25 05:53:48.849965761 -0700
+@@ -46,6 +46,8 @@
+     HAS_WEIGHT: tl.constexpr,
+     HAS_BIAS: tl.constexpr,
+     USE_GDC: tl.constexpr = False,
++    stride_g=0,
++    G_HEADS: tl.constexpr = 0,
+ ):
+     # PDL: x is the producer's output (e.g. the fused KDA verify kernel, which
+     # triggers its dependents right after the o store), so every load sits
+@@ -98,8 +100,15 @@
+         b_y = b_y + b_b[None, :]
+ 
+     # swish/sigmoid output gate
+-    p_g = tl.make_block_ptr(g, (T, D), (D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
+-    b_g = tl.load(p_g, boundary_check=(0, 1)).to(tl.float32)
++    if G_HEADS > 0:
++        # g is a [T // G_HEADS, G_HEADS, D] view with token stride stride_g.
++        o_t = i_t * BT + tl.arange(0, BT)
++        p_g = g + ((o_t // G_HEADS) * stride_g + (o_t % G_HEADS) * D)[:, None]
++        m_g = (o_t < T)[:, None] & m_d[None, :]
++        b_g = tl.load(p_g + o_d[None, :], mask=m_g, other=0.0).to(tl.float32)
++    else:
++        p_g = tl.make_block_ptr(g, (T, D), (D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
++        b_g = tl.load(p_g, boundary_check=(0, 1)).to(tl.float32)
+     if ACTIVATION == "swish" or ACTIVATION == "silu":
+         b_y = b_y * b_g * tl.sigmoid(b_g)
+     elif ACTIVATION == "sigmoid":
+@@ -195,6 +204,14 @@
+     if residual is not None:
+         residual_dtype = residual.dtype
+     T, D = x.shape
++    # A 3D g is a head-packed [T // H, H, D] view (only the D <= 512 kernel
++    # reads it strided); everything else takes the flat [T, D] layout.
++    g_heads = 0
++    if g.dim() == 3:
++        if D <= 512:
++            g_heads = g.shape[1]
++        else:
++            g = g.reshape(-1, D)
+     if residual is not None:
+         assert residual.shape == (T, D)
+     if weight is not None:
+@@ -250,6 +267,9 @@
+             HAS_BIAS=bias is not None,
+             num_warps=4,
+             **pdl_kwargs,
++            **(
++                {"stride_g": g.stride(0), "G_HEADS": g_heads} if g_heads else {}
++            ),
+         )
+     else:
+         layer_norm_gated_fwd_kernel1[(T,)](
+@@ -296,7 +316,18 @@
+         g_shape_og = g.shape
+         # reshape input data into 2D tensor
+         x = x.reshape(-1, x.shape[-1])
+-        g = g.reshape(-1, g.shape[-1])
++        if (
++            g.dim() >= 3
++            and g.stride(-1) == 1
++            and g.stride(-2) == g.shape[-1]
++            and not g.is_contiguous()
++            and x.shape[0] == g.shape[:-1].numel()
++        ):
++            # Head-packed gate with a token stride (a split of a wider
++            # projection): keep it strided rather than copying it flat.
++            g = g.reshape(-1, g.shape[-2], g.shape[-1])
++        else:
++            g = g.reshape(-1, g.shape[-1])
+         if residual is not None:
+             assert residual.shape == x_shape_og
+             residual = residual.reshape(-1, residual.shape[-1])
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_prefill_claude/pristine_tree/kernels/ops/attention/fla/fused_recurrent.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_prefill_claude/trial_1_tree_judged/kernels/ops/attention/fla/fused_recurrent.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_prefill_claude/pristine_tree/kernels/ops/attention/fla/fused_recurrent.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_prefill_claude/trial_1_tree_judged/kernels/ops/attention/fla/fused_recurrent.py	2026-09-23 06:51:33.279699466 -0700
+@@ -628,6 +628,8 @@
+     # part (~9.6 TB/s) where this triton kernel tops out at ~5 TB/s holding a
+     # [BV, K] register tile per warp. ULP-level output differences only
+     # (reduction order); small batches keep triton (launch-bound anyway).
++    # kda_packed_decode.cuh implements both the standard softplus gate and
++    # KDA's safe lower-bound gate; pass the bound through to that kernel.
+     if use_qk_l2norm_in_kernel:
+         from sglang.kernels.ops.attention import kda_packed_decode as kda_decode_cuda
+ 
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_prefill_claude/pristine_tree/kernels/ops/attention/fla/kda.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_prefill_claude/trial_1_tree_judged/kernels/ops/attention/fla/kda.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_prefill_claude/pristine_tree/kernels/ops/attention/fla/kda.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_prefill_claude/trial_1_tree_judged/kernels/ops/attention/fla/kda.py	2026-09-25 05:56:10.119191770 -0700
+@@ -22,7 +22,10 @@
+ from sglang.kernels.ops.attention.fla.index import (
+     prepare_chunk_indices,
+ )
+-from sglang.kernels.ops.attention.fla.l2norm import l2norm_fwd
++from sglang.kernels.ops.attention.fla.l2norm import (
++    l2norm_fwd,
++    l2norm_fwd_strided_heads,
++)
+ from sglang.kernels.ops.attention.fla.op import exp, exp2, log
+ from sglang.kernels.ops.attention.fla.utils import (
+     autotune_cache_kwargs,
+@@ -538,6 +541,7 @@
+     STORE_KG: tl.constexpr,
+     IS_VARLEN: tl.constexpr,
+     DOT_PRECISION: tl.constexpr,
++    stride_v,
+ ):
+     i_t, i_bh = tl.program_id(0), tl.program_id(1)
+     i_b, i_h = i_bh // H, i_bh % H
+@@ -562,10 +566,11 @@
+     b_A = tl.load(p_A, boundary_check=(0, 1))
+ 
+     for i_v in range(tl.cdiv(V, BV)):
++        # v may be a token-strided view (stride_v per token); u is packed.
+         p_v = tl.make_block_ptr(
+-            v + (bos * H + i_h) * V,
++            v + bos.to(tl.int64) * stride_v + i_h * V,
+             (T, V),
+-            (H * V, 1),
++            (stride_v, 1),
+             (i_t * BT, i_v * BV),
+             (BT, BV),
+             (1, 0),
+@@ -715,7 +720,6 @@
+     NT = cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
+ 
+     w = torch.empty_like(k)
+-    u = torch.empty_like(v)
+     kg = torch.empty_like(k) if gk is not None else None
+     static_config = _get_k3_recompute_w_u_config(k, gk, cu_seqlens, K, V, BT)
+     kernel = (
+@@ -723,6 +727,10 @@
+         if static_config is not None
+         else recompute_w_u_fwd_kernel
+     )
++    # The kernel takes v's token stride (batch offsets assume B == 1 or packed).
++    if not (_is_packed_heads_view(v) or v.is_contiguous()):
++        v = v.contiguous()
++    u = torch.empty(v.shape, dtype=v.dtype, device=v.device)
+     kernel[(NT, B * H)](
+         k=k,
+         kg=kg,
+@@ -742,6 +750,7 @@
+         STORE_KG=kg is not None,
+         IS_VARLEN=cu_seqlens is not None,
+         DOT_PRECISION="ieee",
++        stride_v=v.stride(1),
+         **(static_config or {}),
+     )
+     return w, u, kg
+@@ -1146,6 +1155,8 @@
+     _H_pr = q.shape[-2]
+     _B = q.shape[0]
+     _small_grid = _B * _NT_pr * _H_pr <= 256
++    if _small_grid:
++        v = v.contiguous()
+     w, u, _, kg, Aqk, _ = chunk_kda_fwd_intra(
+         q=q,
+         k=k,
+@@ -1182,7 +1193,8 @@
+         g=g,
+         A=Aqk,
+         h=h,
+-        o=v,
++        # Reuse v's storage for o unless v is a view into the packed qkv.
++        o=v if v.is_contiguous() else torch.empty_like(v, memory_format=torch.contiguous_format),
+         scale=scale,
+         chunk_size=chunk_size,
+         cu_seqlens=cu_seqlens,
+@@ -1199,6 +1211,28 @@
+     return o
+ 
+ 
++def _is_packed_heads_view(x: torch.Tensor) -> bool:
++    # [1, T, H, D] with packed heads and an arbitrary token stride.
++    return (
++        x.dim() == 4
++        and x.shape[0] == 1
++        and x.stride(-1) == 1
++        and x.stride(-2) == x.shape[-1]
++    )
++
++
++def _packed_heads_or_contiguous(x: torch.Tensor) -> torch.Tensor:
++    return x if _is_packed_heads_view(x) else x.contiguous()
++
++
++def _l2norm_heads(x: torch.Tensor) -> torch.Tensor:
++    # Token-strided [1, T, H, D] views (split of the packed qkv conv output)
++    # are read in place instead of through a .contiguous() copy.
++    if _is_packed_heads_view(x) and x.shape[-1] <= 512 and not x.is_contiguous():
++        return l2norm_fwd_strided_heads(x)
++    return l2norm_fwd(x.contiguous())
++
++
+ def chunk_kda(
+     q: torch.Tensor,
+     k: torch.Tensor,
+@@ -1223,8 +1257,8 @@
+         scale = k.shape[-1] ** -0.5
+ 
+     if use_qk_l2norm_in_kernel:
+-        q = l2norm_fwd(q.contiguous())
+-        k = l2norm_fwd(k.contiguous())
++        q = _l2norm_heads(q)
++        k = _l2norm_heads(k)
+ 
+     if beta_is_raw:
+         beta = beta.float().sigmoid()
+@@ -1233,7 +1267,7 @@
+     return chunk_kda_fwd(
+         q=q,
+         k=k,
+-        v=v.contiguous(),
++        v=_packed_heads_or_contiguous(v),
+         g=g.contiguous(),
+         beta=beta.contiguous(),
+         scale=scale,
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_prefill_claude/pristine_tree/kernels/ops/attention/fla/l2norm.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_prefill_claude/trial_1_tree_judged/kernels/ops/attention/fla/l2norm.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_prefill_claude/pristine_tree/kernels/ops/attention/fla/l2norm.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_prefill_claude/trial_1_tree_judged/kernels/ops/attention/fla/l2norm.py	2026-09-25 05:52:50.848799706 -0700
+@@ -120,6 +120,57 @@
+ 
+ 
+ @triton.jit(do_not_specialize=["T"])
++def l2norm_fwd_strided_heads_kernel(
++    x,
++    y,
++    eps,
++    T,
++    stride_x,
++    H: tl.constexpr,
++    D: tl.constexpr,
++    BT: tl.constexpr,
++    BD: tl.constexpr,
++):
++    # l2norm_fwd_kernel over rows (token, head) of a [N, H, D] view whose
++    # token stride is stride_x (heads packed): same tile, same reduction.
++    i_t = tl.program_id(0)
++    o_r = i_t * BT + tl.arange(0, BT)
++    o_d = tl.arange(0, BD)
++    m = (o_r < T)[:, None] & (o_d < D)[None, :]
++    p_x = x + ((o_r // H) * stride_x + (o_r % H) * D)[:, None] + o_d[None, :]
++    b_x = tl.load(p_x, mask=m, other=0.0).to(tl.float32)
++    b_var = tl.sum(b_x * b_x, axis=1)
++    b_y = b_x / tl.sqrt(b_var + eps)[:, None]
++    p_y = y + (o_r * D)[:, None] + o_d[None, :]
++    tl.store(p_y, b_y.to(y.dtype.element_ty), mask=m)
++
++
++def l2norm_fwd_strided_heads(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
++    """l2norm_fwd(x.contiguous()) for x = [1, N, H, D] with packed heads and
++    any token stride, without materializing the contiguous copy."""
++    _, N, H, D = x.shape
++    assert x.shape[0] == 1 and x.stride(-1) == 1 and x.stride(-2) == D
++    assert D <= 512
++    y = torch.empty(x.shape, dtype=x.dtype, device=x.device)
++    T = N * H
++    BT = 16
++    l2norm_fwd_strided_heads_kernel[(triton.cdiv(T, BT),)](
++        x,
++        y,
++        eps,
++        T=T,
++        stride_x=x.stride(1),
++        H=H,
++        D=D,
++        BT=BT,
++        BD=triton.next_power_of_2(D),
++        num_warps=8,
++        num_stages=3,
++    )
++    return y
++
++
++@triton.jit(do_not_specialize=["T"])
+ def gdn_prefill_qkv_prepare_kernel(
+     q,
+     k,
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_prefill_claude/pristine_tree/kernels/ops/attention/kda_fused_decode.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_prefill_claude/trial_1_tree_judged/kernels/ops/attention/kda_fused_decode.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_prefill_claude/pristine_tree/kernels/ops/attention/kda_fused_decode.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_prefill_claude/trial_1_tree_judged/kernels/ops/attention/kda_fused_decode.py	2026-09-24 02:52:24.452488193 -0700
+@@ -61,8 +61,8 @@
+     onorm_g: torch.Tensor,
+ ) -> bool:
+     """The kernel is compiled for the K3 KDA decode regime: H heads of 128,
+-    packed [T, 3*H*128] qkv rows, transposed [slots, 3, 3*H*128] conv pool, fp32
+-    [slots, H, 128, 128] ssm pool (inner-contiguous, any slot pitch — the
++    packed [T, 3*H*128] qkv rows, transposed [slots, 3, 3*H*128] conv pool, BF16
++    or FP32 [slots, H, 128, 128] ssm pool (inner-contiguous, any slot pitch — the
+     kernel reads the real slot stride), one token per request."""
+     if ssm_states.ndim < 4:
+         return False
+@@ -89,7 +89,7 @@
+         and b.dtype == torch.bfloat16
+         and onorm_g.dtype == torch.bfloat16
+         and conv_states.dtype == torch.bfloat16
+-        and ssm_states.dtype == torch.float32
++        and ssm_states.dtype in (torch.bfloat16, torch.float32)
+         and cache_indices.dtype == torch.int32
+         and mixed_qkv.stride(-1) == 1
+         and a.stride(-1) == 1
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_prefill_claude/pristine_tree/kernels/ops/kimi_k3/attn_res.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_prefill_claude/trial_1_tree_judged/kernels/ops/kimi_k3/attn_res.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_prefill_claude/pristine_tree/kernels/ops/kimi_k3/attn_res.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_prefill_claude/trial_1_tree_judged/kernels/ops/kimi_k3/attn_res.py	2026-09-25 05:49:14.645817698 -0700
+@@ -55,6 +55,7 @@
+             cuda_files=["kimi_k3/attn_res/fused_tma.cuh"],
+             cuda_wrappers=[
+                 ("run", f"AttnResFusedTmaKernel<{args}>::run"),
++                ("run_add", f"AttnResFusedTmaKernel<{args}>::run_add"),
+                 ("run_pull_rs", f"AttnResFusedTmaKernel<{args}>::run_pull_rs"),
+                 ("run_direct_ag", f"AttnResFusedTmaKernel<{args}>::run_direct_ag"),
+             ],
+@@ -188,6 +189,29 @@
+     )
+ 
+ 
++def attn_res_fused_tma_add(
++    input: torch.Tensor,
++    residual: torch.Tensor,
++    bank: torch.Tensor,
++    cw: torch.Tensor,
++    ow: torch.Tensor,
++    out: torch.Tensor,
++    prefix_out: torch.Tensor,
++    nvb: int,
++    eps: float,
++    *,
++    write_prefix: bool = False,
++) -> None:
++    """attn_res_fused_tma with the pending residual add fused in: aggregates
++    prefix_out = input + residual (fp32 add, one bf16 rounding -- bit-exact
++    with the unfused torch add), which each CTA materializes for its own
++    tokens before its aggregation pass. Same restrictions as
++    attn_res_fused_tma; input / residual / prefix_out are [T, H] bf16."""
++    _jit_fused_tma_module(*_tuning(nvb, input.shape[0])).run_add(
++        input, residual, bank, cw, ow, out, prefix_out, nvb, eps, write_prefix
++    )
++
++
+ @register_custom_op(mutates_args=["bank", "out"])
+ def _attn_res_fused_direct_ag_op(
+     world_size: int,
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_prefill_claude/pristine_tree/srt/layers/attention/linear/kda_backend.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_prefill_claude/trial_1_tree_judged/srt/layers/attention/linear/kda_backend.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_prefill_claude/pristine_tree/srt/layers/attention/linear/kda_backend.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_prefill_claude/trial_1_tree_judged/srt/layers/attention/linear/kda_backend.py	2026-09-25 05:47:07.300429639 -0700
+@@ -735,11 +735,9 @@
+             conv_state_indices=cache_indices,
+         )
+ 
+-        # The packed kernel assumes one token per request.
+-        if (
+-            self.kernel_dispatcher.supports_packed_decode
+-            and getattr(layer, "lower_bound", None) is None
+-        ):
++        # The packed kernel assumes one token per request. Its Triton KDA
++        # implementation also handles the KDA safe gate (lower_bound).
++        if self.kernel_dispatcher.supports_packed_decode:
+             assert qkv.shape[0] == cache_indices.shape[0], (
+                 "KDA packed decode requires one token per sequence (T=1): "
+                 f"got {qkv.shape[0]} tokens for {cache_indices.shape[0]} requests."
+@@ -822,7 +820,17 @@
+         has_initial_state = forward_batch.extend_prefix_lens > 0
+ 
+         physical_num_tokens = mixed_qkv.shape[0]
+-        logical_num_tokens = int(query_start_loc[-1])
++        # query_start_loc[-1] = extend_start_loc[-1] + extend_seq_lens[-1],
++        # i.e. sum(extend_seq_lens): read it from the host copy when there is
++        # one instead of a device->host sync that drains the launch queue.
++        extend_seq_lens_cpu = forward_batch.extend_seq_lens_cpu
++        if extend_seq_lens_cpu is not None and (
++            forward_batch.forward_mode.is_extend_or_draft_extend_or_mixed()
++            and not forward_batch.forward_mode.is_split_prefill()
++        ):
++            logical_num_tokens = int(sum(extend_seq_lens_cpu))
++        else:
++            logical_num_tokens = int(query_start_loc[-1])
+         if logical_num_tokens < physical_num_tokens:
+             mixed_qkv = mixed_qkv[:logical_num_tokens]
+             a = a[:, :logical_num_tokens]
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_prefill_claude/pristine_tree/srt/layers/attn_residual.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_prefill_claude/trial_1_tree_judged/srt/layers/attn_residual.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_prefill_claude/pristine_tree/srt/layers/attn_residual.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_prefill_claude/trial_1_tree_judged/srt/layers/attn_residual.py	2026-09-25 05:49:14.645817698 -0700
+@@ -117,6 +117,41 @@
+     return out
+ 
+ 
++def _aggregate_fast_add(
++    prefix_a: torch.Tensor,
++    prefix_b: torch.Tensor,
++    bank: torch.Tensor,
++    nvb: int,
++    score_proj: ReplicatedLinear,
++    score_norm: RMSNorm,
++    out_norm: RMSNorm,
++    write_bank_row: bool = False,
++) -> tuple[torch.Tensor, torch.Tensor]:
++    """_aggregate_fast over prefix = prefix_a + prefix_b, with the add fused
++    into the kernel (bit-exact with the torch bf16 add). Returns
++    (normed, prefix)."""
++    from sglang.kernels.ops.kimi_k3.attn_res import attn_res_fused_tma_add
++
++    assert score_norm.variance_epsilon == out_norm.variance_epsilon
++
++    cw = get_cw(score_proj, score_norm, dtype=torch.bfloat16)
++    prefix = torch.empty_like(prefix_a)
++    out = torch.empty_like(prefix_a)
++    attn_res_fused_tma_add(
++        prefix_a,
++        prefix_b,
++        bank,
++        cw,
++        out_norm.weight,
++        out,
++        prefix,
++        nvb,
++        score_norm.variance_epsilon,
++        write_prefix=write_bank_row,
++    )
++    return out, prefix
++
++
+ @triton.jit
+ def _score_kernel(
+     prefix_ptr,  # [T, H]
+@@ -376,6 +411,25 @@
+             prefix_a,
+             prefix_b,
+             bank,
++            nvb,
++            score_proj,
++            score_norm,
++            out_norm,
++            write_bank_row=write_bank_row,
++        )
++    if (
++        _use_fast(prefix_a.shape[1])
++        and prefix_a.shape[0] > 0
++        and prefix_a.is_contiguous()
++        and prefix_b.is_contiguous()
++        and prefix_a.dtype == prefix_b.dtype == torch.bfloat16
++    ):
++        # The TMA kernel materializes the prefix itself (one launch, the add
++        # no longer a separate memory pass ahead of it).
++        return _aggregate_fast_add(
++            prefix_a,
++            prefix_b,
++            bank,
+             nvb,
+             score_proj,
+             score_norm,
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_prefill_claude/pristine_tree/srt/models/kimi_k3.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_prefill_claude/trial_1_tree_judged/srt/models/kimi_k3.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_prefill_claude/pristine_tree/srt/models/kimi_k3.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_prefill_claude/trial_1_tree_judged/srt/models/kimi_k3.py	2026-09-23 07:07:11.894971186 -0700
+@@ -196,6 +196,20 @@
+             (x.shape[0], weight.shape[0]), dtype=out_dtype, device=x.device
+         )
+     if x.dtype == torch.bfloat16 and weight.dtype == torch.bfloat16:
++        if (
++            out_dtype is None
++            and weight.shape == (7168, 6144)
++            and x.shape[0] <= 128
++            and x.is_contiguous()
++        ):
++            from sglang.kernels.ops.gemm.cutedsl_bf16_gemm import (
++                cutedsl_bf16_gemm,
++                cutedsl_bf16_gemm_out,
++            )
++
++            if out is None:
++                return cutedsl_bf16_gemm(x, weight)
++            return cutedsl_bf16_gemm_out(x, weight, out)
+         from sglang.srt.layers.quantization.unquant import get_bf16_gemm_backend
+ 
+         if get_bf16_gemm_backend().is_cutedsl():
+@@ -1318,8 +1332,27 @@
+                     prefix_sum,
+                 )
+         else:  # single collective over the flat [latent | shared] pair
+-            self._forward_shared(gate_up, shared_output)
++            # With one rank there is no collective to overlap, so issue the
++            # independent shared-down GEMM on the existing side stream while
++            # the routed MXFP4 path uses the current stream. Keep the
++            # multi-rank and AR-fusion schedules unchanged.
++            overlap_shared = (
++                self.alt_stream is not None
++                and self.tp_size == 1
++                and not k3_ar_fusion.enabled()
++            )
++            shared_event = None
++            if overlap_shared:
++                current_stream = torch.cuda.current_stream()
++                self.alt_stream.wait_stream(current_stream)
++                with torch.cuda.stream(self.alt_stream):
++                    self._forward_shared(gate_up, shared_output)
++                    shared_event = self.alt_stream.record_event()
++            else:
++                self._forward_shared(gate_up, shared_output)
+             self._forward_routed(hidden_states, router_logits, routed_input, latent)
++            if shared_event is not None:
++                current_stream.wait_event(shared_event)
+             if self.fuse_ar_norm and k3_ar_fusion.enabled():
+                 fused_norm = True
+                 k3_ar_fusion.all_reduce_norm(
