@@ -151,7 +151,7 @@ history available to the agent.
 | Chunked-prefill cases `k3_{kda,mla}_prefill` | Driver point tag `B,L,pf[<prefix>]` (ForwardMode.EXTEND, eager timing): KDA runs `chunk_kda` with carried-in conv/recurrent state; MLA runs the production `trtllm_mla` MHA_CHUNKED_KV path (fp8 ragged attention + chunked prefix-KV merge). Points: 1×16384 first chunk (B200 default `chunked_prefill_size`), 1×16384 as chunk 4 of a 64k prompt (prefix 49,152), 4×4096 mixed batch. |
 | Row-wise prefill correctness | Prefill steps are not bit-reproducible across *processes* (MoE/GEMM autotuners choose among near-equal tactics at m = thousands; ~0.1% of tokens change expert), while replays within one process are identical. Prefill CHECK: ≤0.5% of token rows over tolerance, p99 row error ≤ tol, mean drift ≤1%, post-step state exact. Decode keeps the strict max-error rule. |
 | `--bf16-gemm-init` | Reproduces the production scheduler's bf16 GEMM backend init (`auto` → `cutedsl` on SM100). Found via VibeSim B12: all earlier runs had left every bf16 GEMM on cuBLAS. Measured effect ≤0.7% on every decode point (see below), so earlier results stand; new cases carry the flag. |
-| VibeSim B12a / B12 | B12a: the MLA worklet fed the group's total KV as one request's context (16 ms attention at B=512) — fixed, MLA-b512 predicts 1025/661/251 µs vs 992/661/294 measured. B12: prefill kinds `kda_chunk_prefill`, `causal_conv1d_prefill`, `mla_prefill_attention`, `mla_prefix_gather`, `mla_merge_state`, worklet prefill branches, prefill presets — committed, but predictions land ~60% below the measured step (direct-call rows ≪ the eager layer's cuBLAS/MoE launches); B12b (queued) closes that gap before prefill rounds start. |
+| VibeSim B12a / B12 | B12a: the MLA worklet fed the group's total KV as one request's context (16 ms attention at B=512) — fixed, MLA-b512 predicts 1025/661/251 µs vs 992/661/294 measured. B12: prefill kinds `kda_chunk_prefill`, `causal_conv1d_prefill`, `mla_prefill_attention`, `mla_prefix_gather`, `mla_merge_state`, worklet prefill branches, prefill presets — committed; its predictions match the clean prefill baselines within 3% (the apparent 60% gap was a contaminated measurement, see below). |
 
 **Transfer check** (decode best trees judged on the new points vs the pristine tree; every point correct):
 
@@ -206,9 +206,14 @@ exist; (b) the Claude agents' first accepted change on each layer (a one-shot au
 *is* this warmup — a harness-gap reproduction, not a production gain, recorded like MLA round 20; (c) prefill cases
 now run with both flags; prefill baselines are re-measured before the prefill rounds.
 
-**Prefill baselines (pristine, eager, 16,384 tokens per step):** KDA 22.1 / 22.5 / 22.1 ms, MLA 20.6 / 29.5 /
-17.8 ms; ~95% kernel time, dominated by cuBLAS GEMMs (projections + shared experts, ~11–12 ms) and the MXFP4
-expert GEMM (~3 ms); ~6 ms of the MLA prefix point is the fp8 prefix attention.
+**Prefill baselines (pristine, eager, 16,384 tokens per step), re-measured 04:05 on a clean GPU with the production
+flags:** KDA 8.81 / 8.87 / 8.57 ms (1×16k first chunk / 1×16k at prefix 48k / 4×4k), MLA 12.12 / 8.13 / 7.79 ms
+(1×16k at prefix 48k / 1×16k first chunk / 4×4k); legacy flags on the same clean GPU: KDA 8.96 / 8.56 ms, i.e. the
+flags are worth ~1.6% here. The numbers first reported (KDA 22.1 / 22.5 / 22.1, MLA 20.6 / 29.5 / 17.8 ms) were
+measured on GPU 7 while VibeSim B12a was JIT-filling kernels on the same device and are contention artifacts.
+**VibeSim B12's prefill predictions (KDA 8.9 / 9.0 / 8.5, MLA 11.8 / 8.0 / 7.6 ms) match the clean baselines within
+3%**; the "60% gap" that motivated B12b was the contaminated table, and B12b was stopped (its uncommitted probe diff is
+kept at `codex_runs/b12b_uncommitted.patch`).
 
 ### Campaign 1 — the first 8 trials (superseded)
 
@@ -412,9 +417,9 @@ Why the transfer looks the way it does: the MLA gains are concentrated in the 1�
 small-m GEMM dispatch (M3/M4), neither of which matters at 512×8k, so only the stream overlap (M5) survives there;
 the KDA gains come from the recurrent path (K1(a), K2) and the overlap, which are batch-independent, so almost the
 whole −6% carries to B=512. Attempts to extend the small-m GEMM levers to m = 512 were measured and rejected
-(TGV 8% slower on the front GEMM, 2% slower on shared-down). The chunked-prefill configuration has measured
+(TGV 8% slower on the front GEMM, 2% slower on shared-down). The chunked-prefill configuration has clean
 baselines (§3) but no rounds yet; the prefill step is GEMM-dominated at m = 16k, where none of the decode levers
-apply — that campaign starts once VibeSim's prefill prediction is within tolerance (B12b).
+apply — the Claude prefill campaign starts once the prefill oracles are baked from B12.
 
 ### 6.4 Harness and VibeSim patches
 
