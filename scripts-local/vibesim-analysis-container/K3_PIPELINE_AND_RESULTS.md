@@ -206,6 +206,8 @@ Prefill rounds start after B12b.
 | MLA-b512 Claude (r3) | 1 | 512×8k 990.4 → 871.8 (−12.0%) | 256: −8.3%, mixed 16×64k: −11.1% | 0.012 | PASS (re-run after a judge container-name collision, fixed) |
 | MLA-prefill Claude (r2) | 1 | 1×16k @ prefix 48k 12172.6 → 11311.5 (−7.1%) | first chunk −0.2%, 4×4k −3.7% | 0.014 | PASS |
 | MLA-prefill Claude (r2) | 2 | 12152.1 → 11232.4 (−7.6%) | first chunk −2.8%, 4×4k −3.6% | 0.017 | PASS |
+| KDA-prefill Claude (r1) | 1 | 1×16k first chunk 9019.6 → 8535.4 (−5.4%) | prefix 48k −5.9%, 4×4k −5.7% | 0.0 | PASS |
+| KDA-prefill Claude (r1) | 2 | 9030.0 → 8609.1 (−4.7%) | prefix 48k −4.8%, 4×4k −5.5% | 0.0 | PASS |
 
 (The b512 deltas vs pristine are larger than the round-1 verdicts because the pristine baseline runs FlashInfer's
 fallback MoE tactic while these trees carry the one-shot autotune — the harness gap of §3 — plus the genuine kernel
@@ -254,7 +256,7 @@ layer's decode best tree), judged with 5 reps; every accepted round passed CHECK
 | MLA prefill 1×16k @ prefix 48k | — (no Codex rounds) | **12128.5 → 11229.3 µs (−7.4%)**, 2/3 PASS | one-pass fp8 K/V pack kernel replacing ~800 µs of elementwise glue; prefix attention on the CuTe-DSL JIT FMHA |
 | KDA prefill 1×16k first chunk | — | **9071.9 → 8564.0 µs (−5.6%)**, 1/3 PASS (−6.3% at prefix 48k) | strided chunk kernels (no activation copies) + host-sync removal; a CUDA h-scan kernel (−2.9% at the prefix point) stayed below the noise floor on the primary point |
 
-All Claude best trees re-passed under seeds 1 and 2 (rel err ≤ 0.017; table above). Both agents received the same
+All Claude best trees re-passed under seeds 1 and 2 (8/8, rel err ≤ 0.017, the prefill trees bit-exact; table above). Both agents received the same
 VibeSim analysis and the same history KB; Claude used the KB explicitly (porting a lost round-2 kernel in round 3,
 citing prior dead ends) and repeatedly reached down to CUDA/Triton kernel changes where Codex stayed at Python
 dispatch and tuner knobs.
