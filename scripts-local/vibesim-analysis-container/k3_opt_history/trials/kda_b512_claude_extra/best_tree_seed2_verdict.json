@@ -1,0 +1,139 @@
+{
+  "agent_container": "recheck_kda_b512_claude_seed2",
+  "case_key": "18f70fe40ead",
+  "points": {
+    "512,8192": {
+      "before_us": 719.103991985321,
+      "before_sigma_us": 0.32216607254771834,
+      "after_us": 591.1999940872192,
+      "after_lat": [
+        589.3440246582031,
+        590.2400016784668,
+        591.1999940872192,
+        591.1999940872192,
+        591.1999940872192
+      ],
+      "improvement": 0.1779,
+      "noise_frac_3sigma": 0.0013,
+      "correctness": {
+        "max_abs_err": 0.24609375,
+        "max_rel_err": 0.016406248906250073,
+        "mean_rel_err": 0.0007037929026409984,
+        "nan": false,
+        "rows": 512,
+        "rows_over_tol": 0,
+        "frac_rows_over_tol": 0.0,
+        "p99_row_rel_err": 0.012385430745780468,
+        "rule": "max_rel_err<=tol",
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "latency_mode": "graph",
+      "primary": true,
+      "mixed": ""
+    },
+    "256,8192": {
+      "before_us": 496.0959851741791,
+      "before_sigma_us": 0.3984578298640989,
+      "after_us": 464.1920030117035,
+      "after_lat": [
+        464.1920030117035,
+        463.29599618911743,
+        464.2240107059479,
+        464.1599953174591,
+        464.28799629211426
+      ],
+      "improvement": 0.0643,
+      "noise_frac_3sigma": 0.0024,
+      "correctness": {
+        "max_abs_err": 0.203125,
+        "max_rel_err": 0.014130433799621997,
+        "mean_rel_err": 0.00047227306640706956,
+        "nan": false,
+        "rows": 256,
+        "rows_over_tol": 0,
+        "frac_rows_over_tol": 0.0,
+        "p99_row_rel_err": 0.010869564488530159,
+        "rule": "max_rel_err<=tol",
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "latency_mode": "graph",
+      "primary": false,
+      "mixed": ""
+    },
+    "128,8192": {
+      "before_us": 400.83199739456177,
+      "before_sigma_us": 0.02024344329250359,
+      "after_us": 375.2000033855438,
+      "after_lat": [
+        375.2320110797882,
+        375.2000033855438,
+        375.99998712539673,
+        375.2000033855438,
+        375.2000033855438
+      ],
+      "improvement": 0.0639,
+      "noise_frac_3sigma": 0.0002,
+      "correctness": {
+        "max_abs_err": 0.171875,
+        "max_rel_err": 0.011178861061537492,
+        "mean_rel_err": 0.0004178948875050992,
+        "nan": false,
+        "rows": 128,
+        "rows_over_tol": 0,
+        "frac_rows_over_tol": 0.0,
+        "p99_row_rel_err": 0.008130080997943878,
+        "rule": "max_rel_err<=tol",
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "latency_mode": "graph",
+      "primary": false,
+      "mixed": ""
+    }
+  },
+  "driver_sha": "ff88e72e3180",
+  "pristine_points": {
+    "512,8192": {
+      "median": 719.103991985321,
+      "sigma": 0.32216607254771834
+    },
+    "256,8192": {
+      "median": 496.0959851741791,
+      "sigma": 0.3984578298640989
+    },
+    "128,8192": {
+      "median": 400.83199739456177,
+      "sigma": 0.02024344329250359
+    }
+  },
+  "changed_files": [
+    "kernels/jit/csrc/attention/kda_fused_decode.cuh",
+    "kernels/ops/attention/kda_fused_decode.py",
+    "kernels/ops/attention/fla/fused_recurrent.py",
+    "srt/models/kimi_k3.py",
+    "srt/layers/attention/linear/kda_backend.py",
+    "srt/layers/moe/moe_runner/flashinfer_trtllm.py"
+  ],
+  "diff_patch": "/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512_claude/best_tree_judged.patch",
+  "diff_lines": 873,
+  "gates": {
+    "correctness": true,
+    "latency_improved": true,
+    "no_secondary_regression": true
+  },
+  "required_improvement": 0.005,
+  "before_us": 719.103991985321,
+  "latency_us": 591.1999940872192,
+  "recovered_frac": 0.1779,
+  "correctness": {
+    "pass": true
+  },
+  "golden_dir": "/raid/yilegu/eval_goldens/golden_k3_18f70fe40ead",
+  "verdict": "PASS",
+  "reason": "all gates passed"
+}

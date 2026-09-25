@@ -1,0 +1,139 @@
+{
+  "agent_container": "recheck_kda_b512_claude_seed1",
+  "case_key": "55bd51445ef2",
+  "points": {
+    "512,8192": {
+      "before_us": 707.96799659729,
+      "before_sigma_us": 0.02024344329250359,
+      "after_us": 584.2239856719971,
+      "after_lat": [
+        583.9679837226868,
+        584.0640068054199,
+        584.2239856719971,
+        585.0239992141724,
+        584.9279761314392
+      ],
+      "improvement": 0.1748,
+      "noise_frac_3sigma": 0.0001,
+      "correctness": {
+        "max_abs_err": 0.25,
+        "max_rel_err": 0.015810275679982565,
+        "mean_rel_err": 0.0005553661030717194,
+        "nan": false,
+        "rows": 512,
+        "rows_over_tol": 0,
+        "frac_rows_over_tol": 0.0,
+        "p99_row_rel_err": 0.009772741235792637,
+        "rule": "max_rel_err<=tol",
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "latency_mode": "graph",
+      "primary": true,
+      "mixed": ""
+    },
+    "256,8192": {
+      "before_us": 507.23201036453247,
+      "before_sigma_us": 0.043417348872879374,
+      "after_us": 474.4639992713928,
+      "after_lat": [
+        474.4639992713928,
+        474.4639992713928,
+        474.36800599098206,
+        474.5280146598816,
+        474.43199157714844
+      ],
+      "improvement": 0.0646,
+      "noise_frac_3sigma": 0.0003,
+      "correctness": {
+        "max_abs_err": 0.1875,
+        "max_rel_err": 0.01282051194389662,
+        "mean_rel_err": 0.0007149209268391132,
+        "nan": false,
+        "rows": 256,
+        "rows_over_tol": 0,
+        "frac_rows_over_tol": 0.0,
+        "p99_row_rel_err": 0.010456724092364311,
+        "rule": "max_rel_err<=tol",
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "latency_mode": "graph",
+      "primary": false,
+      "mixed": ""
+    },
+    "128,8192": {
+      "before_us": 398.71999621391296,
+      "before_sigma_us": 0.01568050374835213,
+      "after_us": 372.0960021018982,
+      "after_lat": [
+        372.0960021018982,
+        372.0960021018982,
+        372.0960021018982,
+        372.0960021018982,
+        372.1280097961426
+      ],
+      "improvement": 0.0668,
+      "noise_frac_3sigma": 0.0001,
+      "correctness": {
+        "max_abs_err": 0.125,
+        "max_rel_err": 0.008810572066215185,
+        "mean_rel_err": 0.0002213647385360673,
+        "nan": false,
+        "rows": 128,
+        "rows_over_tol": 0,
+        "frac_rows_over_tol": 0.0,
+        "p99_row_rel_err": 0.006607929244637489,
+        "rule": "max_rel_err<=tol",
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "latency_mode": "graph",
+      "primary": false,
+      "mixed": ""
+    }
+  },
+  "driver_sha": "ff88e72e3180",
+  "pristine_points": {
+    "512,8192": {
+      "median": 707.96799659729,
+      "sigma": 0.02024344329250359
+    },
+    "256,8192": {
+      "median": 507.23201036453247,
+      "sigma": 0.043417348872879374
+    },
+    "128,8192": {
+      "median": 398.71999621391296,
+      "sigma": 0.01568050374835213
+    }
+  },
+  "changed_files": [
+    "kernels/jit/csrc/attention/kda_fused_decode.cuh",
+    "kernels/ops/attention/kda_fused_decode.py",
+    "kernels/ops/attention/fla/fused_recurrent.py",
+    "srt/models/kimi_k3.py",
+    "srt/layers/attention/linear/kda_backend.py",
+    "srt/layers/moe/moe_runner/flashinfer_trtllm.py"
+  ],
+  "diff_patch": "/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_b512_claude/best_tree_judged.patch",
+  "diff_lines": 873,
+  "gates": {
+    "correctness": true,
+    "latency_improved": true,
+    "no_secondary_regression": true
+  },
+  "required_improvement": 0.005,
+  "before_us": 707.96799659729,
+  "latency_us": 584.2239856719971,
+  "recovered_frac": 0.1748,
+  "correctness": {
+    "pass": true
+  },
+  "golden_dir": "/raid/yilegu/eval_goldens/golden_k3_55bd51445ef2",
+  "verdict": "PASS",
+  "reason": "all gates passed"
+}

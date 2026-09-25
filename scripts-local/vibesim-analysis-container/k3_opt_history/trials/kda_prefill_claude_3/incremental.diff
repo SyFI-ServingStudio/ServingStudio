@@ -1,0 +1,1045 @@
+diff -ruN -x __pycache__ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_prefill_claude/trial_1_tree_judged/kernels/jit/csrc/attention/kda_chunk_h.cuh /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_prefill_claude/trial_3_tree_judged/kernels/jit/csrc/attention/kda_chunk_h.cuh
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_prefill_claude/trial_1_tree_judged/kernels/jit/csrc/attention/kda_chunk_h.cuh	1969-12-31 16:00:00.000000000 -0800
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_prefill_claude/trial_3_tree_judged/kernels/jit/csrc/attention/kda_chunk_h.cuh	2026-09-25 08:07:15.992387567 -0700
+@@ -0,0 +1,584 @@
++// Chunked gated delta-rule state scan (KDA chunked prefill, the h-recurrence
++// of chunk_kda). Replaces the Triton chunk_gated_delta_rule_fwd_kernel_h_blockdim64
++// for the per-channel gate (gk, exp2) path with K = 128.
++//
++// Per 64-token chunk t of one (sequence, head), for a 16-column V slice:
++//   h_out[t] = bf16(h)
++//   v        = u[t] - w[t] @ bf16(h)^T              (fp32 acc, chained over K)
++//   v_new[t] = bf16(v)
++//   h        = h * exp2(gk[last token of t]) + (k[t]^T @ bf16(v))^T
++// h starts from the state slot state_indices[n] (zero if < 0) and the final h
++// is written to final_state[final_indices[n]] (skipped if < 0); the two may be
++// the same pool (in-place update) or differ, e.g. an fp32 carry between
++// consecutive segments of one sequence.
++//
++// The Triton kernel runs the four tiny dots of every chunk through the
++// tcgen05 / TMEM path, whose issue -> commit -> wait round trip dominates the
++// serial scan. Here the state lives in mma.sync accumulator registers, the
++// per-chunk operands stream through a cp.async ring, and every dot keeps the
++// Triton reduction order (one fp32 chain over K in k16 steps for w @ h^T; a
++// fresh chain over the 64 tokens for k^T @ v, added after the decay), so the
++// outputs are bit-identical to the Triton kernel.
++
++#include <sgl_kernel/tensor.h>
++#include <sgl_kernel/utils.h>
++
++#include <sgl_kernel/type.cuh>
++#include <sgl_kernel/utils.cuh>
++
++#include <dlpack/dlpack.h>
++#include <tvm/ffi/container/tensor.h>
++
++#include <cstdint>
++#include <cuda_bf16.h>
++#include <type_traits>
++
++namespace sglang {
++
++namespace kda_chunk_h {
++
++constexpr int kBT = 64;       // chunk length (tokens)
++constexpr int kK = 128;       // key head dim
++constexpr int kBV = 16;       // V columns per CTA
++constexpr int kWarps = 8;     // warp j: tokens [8j, 8j + 8) of v, K columns [16j, 16j + 16) of h
++constexpr int kThreads = kWarps * 32;
++constexpr int kRowChunks = kK * 2 / 16;      // 16 B chunks per 128-wide bf16 row
++constexpr int kLoadRows = kThreads / kRowChunks;  // w/k rows covered by one pass of the CTA
++constexpr int kVtPitch = kBT + 8;  // [16 v][64 tok] pitch (144 B rows: ldmatrix conflict-free)
++
++/// Shared-memory ring stage: the h-independent operands of one chunk.
++struct Stage {
++  bf16_t w[kBT * kK];   // [tok][K], 16 B chunks XOR-swizzled by (row & 7)
++  bf16_t k[kBT * kK];   // [tok][K], same swizzle
++  bf16_t u[kBT * kBV];  // [tok][v], dense 32 B rows
++  float gk[kK];         // gate of the last valid token of the chunk
++};
++
++template <int kStages>
++struct Smem {
++  Stage stage[kStages];
++  bf16_t h[kBV * kK];         // [v][K] bf16 state snapshot, swizzled like w/k
++  bf16_t vt[kBV * kVtPitch];  // [v][tok] bf16 v_new (A operand of k^T @ v)
++  bf16_t vn[kBT * kBV];       // [tok][v] bf16 v_new (global store staging)
++};
++
++SGL_DEVICE uint32_t swz(uint32_t row, uint32_t chunk) {
++  return row * kK + ((chunk ^ (row & 7)) * 8);
++}
++
++SGL_DEVICE uint32_t smem_addr(const void* p) {
++  return static_cast<uint32_t>(__cvta_generic_to_shared(p));
++}
++
++SGL_DEVICE void cp_async16(uint32_t dst, const void* src, bool pred) {
++  // src-size 0 zero-fills the destination (rows past the sequence end).
++  asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n" ::"r"(dst), "l"(src), "r"(pred ? 16 : 0));
++}
++
++SGL_DEVICE void cp_async_commit() {
++  asm volatile("cp.async.commit_group;\n" ::);
++}
++
++template <int N>
++SGL_DEVICE void cp_async_wait() {
++  asm volatile("cp.async.wait_group %0;\n" ::"n"(N));
++}
++
++SGL_DEVICE void ldsm_x4(uint32_t (&r)[4], uint32_t addr) {
++  asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0, %1, %2, %3}, [%4];\n"
++               : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3])
++               : "r"(addr));
++}
++
++SGL_DEVICE void ldsm_x4_t(uint32_t (&r)[4], uint32_t addr) {
++  asm volatile("ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%0, %1, %2, %3}, [%4];\n"
++               : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3])
++               : "r"(addr));
++}
++
++/// d = a @ b + d, m16n8k16 bf16 -> fp32.
++SGL_DEVICE void mma_bf16(float (&d)[4], const uint32_t (&a)[4], uint32_t b0, uint32_t b1) {
++  asm volatile(
++      "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, "
++      "{%0, %1, %2, %3};\n"
++      : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3])
++      : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
++}
++
++SGL_DEVICE float ex2_approx(float x) {
++  // Same instruction as Triton's tl.math.exp2 on fp32.
++  float y;
++  asm("ex2.approx.ftz.f32 %0, %1;\n" : "=f"(y) : "f"(x));
++  return y;
++}
++
++SGL_DEVICE uint32_t pack_bf16(float lo, float hi) {
++  const __nv_bfloat162 v = __floats2bfloat162_rn(lo, hi);
++  return *reinterpret_cast<const uint32_t*>(&v);
++}
++
++/**
++ * \brief One CTA scans all chunks of one (sequence, head) for a 16-column V slice.
++ *
++ * \tparam InT     Initial state dtype (bf16_t | fp32_t)
++ * \tparam OutT    Final state dtype (bf16_t | fp32_t)
++ * \tparam kStages cp.async ring depth
++ * \tparam kUsePDL Whether to emit the PDL wait/trigger pair
++ */
++template <typename InT, typename OutT, int kStages, bool kUsePDL>
++__global__ void __launch_bounds__(kThreads) kda_chunk_h_kernel(
++    const bf16_t* __restrict__ k,     // [.., T, Hg, K]
++    const bf16_t* __restrict__ u,     // [.., T, H, V]
++    const bf16_t* __restrict__ w,     // [.., T, H, K]
++    const float* __restrict__ gk,     // [.., T, H, K]
++    bf16_t* __restrict__ v_new,       // [.., T, H, V]
++    bf16_t* __restrict__ h_out,       // [.., NT, H, V, K]
++    const InT* state,                 // [slots, H, V, K] (slot pitch = state_stride), may be null
++    const int32_t* __restrict__ state_indices,  // [N]
++    OutT* final_state,                // [slots, H, V, K] (slot pitch = final_stride), may be null
++    const int32_t* __restrict__ final_indices,  // [N]
++    const int32_t* __restrict__ cu_seqlens,     // [N + 1], null = fixed-length batch
++    int64_t state_stride,
++    int64_t final_stride,
++    int32_t T_fixed,
++    int32_t H,
++    int32_t Hg,
++    int32_t V) {
++  extern __shared__ __align__(128) uint8_t smem_raw[];
++  auto& sm = *reinterpret_cast<Smem<kStages>*>(smem_raw);
++
++  const int tid = threadIdx.x;
++  const int warp = tid >> 5;
++  const int lane = tid & 31;
++  const int g = lane >> 2;
++  const int tig = lane & 3;
++  const int i_v = blockIdx.x;
++  const int i_n = blockIdx.y / H;
++  const int i_h = blockIdx.y % H;
++
++  // Sequence bounds and first chunk index (cumulative ceil(len / 64) of the
++  // preceding sequences; replaces the chunk_offsets tensor).
++  int64_t bos;
++  int32_t T;
++  int64_t boh;
++  if (cu_seqlens != nullptr) {
++    bos = cu_seqlens[i_n];
++    T = cu_seqlens[i_n + 1] - static_cast<int32_t>(bos);
++    int32_t acc = 0;
++    int32_t prev = cu_seqlens[0];
++    for (int i = 1; i <= i_n; ++i) {
++      const int32_t cur = cu_seqlens[i];
++      acc += (cur - prev + kBT - 1) / kBT;
++      prev = cur;
++    }
++    boh = acc;
++  } else {
++    T = T_fixed;
++    bos = static_cast<int64_t>(i_n) * T;
++    boh = static_cast<int64_t>(i_n) * ((T + kBT - 1) / kBT);
++  }
++  const int32_t NT = (T + kBT - 1) / kBT;
++
++  const int64_t stride_w = static_cast<int64_t>(H) * kK;
++  const int64_t stride_k = static_cast<int64_t>(Hg) * kK;
++  const int64_t stride_v = static_cast<int64_t>(H) * V;
++
++  // Loader lanes: thread owns 16 B chunk `ld_ch` of w/k rows ld_row + kLoadRows * i,
++  // tid < 128 also one u half-row, tid in [128, 160) one 16 B chunk of the gk row.
++  const int ld_ch = tid % kRowChunks;
++  const int ld_row = tid / kRowChunks;
++  const bf16_t* w_ld = w + (bos + ld_row) * stride_w + static_cast<int64_t>(i_h) * kK + ld_ch * 8;
++  const bf16_t* k_ld = k + (bos + ld_row) * stride_k + static_cast<int64_t>(i_h / (H / Hg)) * kK + ld_ch * 8;
++  const int u_row = (tid >> 1) & (kBT - 1);
++  const bf16_t* u_ld = u + (bos + u_row) * stride_v + static_cast<int64_t>(i_h) * V + i_v * kBV + (tid & 1) * 8;
++  const float* gk_ld = gk + bos * stride_w + static_cast<int64_t>(i_h) * kK + (tid & 31) * 4;
++  const uint32_t sm_base = smem_addr(&sm);
++  const uint32_t w_dst0 = smem_addr(&sm.stage[0].w[swz(ld_row, ld_ch)]) - sm_base;
++  const uint32_t k_dst0 = smem_addr(&sm.stage[0].k[swz(ld_row, ld_ch)]) - sm_base;
++  const uint32_t u_dst0 = smem_addr(&sm.stage[0].u[u_row * kBV + (tid & 1) * 8]) - sm_base;
++  const uint32_t gk_dst0 = smem_addr(&sm.stage[0].gk[(tid & 31) * 4]) - sm_base;
++
++  auto issue = [&](int i_t) {
++    if (i_t < NT) {
++      const uint32_t st = sm_base + (i_t % kStages) * sizeof(Stage);
++      const int t0 = i_t * kBT;
++      const int rem = T - t0;
++      const int64_t w_off = static_cast<int64_t>(t0) * stride_w;
++      const int64_t k_off = static_cast<int64_t>(t0) * stride_k;
++#pragma unroll
++      for (int i = 0; i < kBT / kLoadRows; ++i) {
++        const bool ok = ld_row + kLoadRows * i < rem;
++        cp_async16(st + w_dst0 + i * kLoadRows * kK * 2, w_ld + w_off + i * kLoadRows * stride_w, ok);
++        cp_async16(st + k_dst0 + i * kLoadRows * kK * 2, k_ld + k_off + i * kLoadRows * stride_k, ok);
++      }
++      if (tid < 2 * kBT) {
++        cp_async16(st + u_dst0, u_ld + static_cast<int64_t>(t0) * stride_v, u_row < rem);
++      } else if (tid < 2 * kBT + kK / 4) {
++        const int64_t last = min(kBT, rem) - 1 + t0;
++        cp_async16(st + gk_dst0, gk_ld + last * stride_w, true);
++      }
++    }
++    cp_async_commit();
++  };
++
++  // State fragments: hs[nt] covers v rows {g, g + 8}, K columns 16 * warp + 8 * nt + 2 * tig + {0, 1}.
++  float hs[2][4];
++#pragma unroll
++  for (int nt = 0; nt < 2; ++nt)
++#pragma unroll
++    for (int e = 0; e < 4; ++e) hs[nt][e] = 0.f;
++
++  const int64_t slot_off = static_cast<int64_t>(i_h) * V * kK + static_cast<int64_t>(i_v) * kBV * kK;
++  const int32_t index = state != nullptr ? state_indices[i_n] : -1;
++  const InT* slot = index >= 0 ? state + index * state_stride + slot_off : nullptr;
++  const int32_t final_index = final_state != nullptr ? final_indices[i_n] : -1;
++  OutT* final_slot = final_index >= 0 ? final_state + final_index * final_stride + slot_off : nullptr;
++
++  device::PDLWaitPrimary<kUsePDL>();
++
++#pragma unroll
++  for (int s = 0; s < kStages - 1; ++s) issue(s);
++
++  if (slot != nullptr) {
++#pragma unroll
++    for (int nt = 0; nt < 2; ++nt) {
++      const int col = 16 * warp + 8 * nt + 2 * tig;
++#pragma unroll
++      for (int r = 0; r < 2; ++r) {
++        const InT* p = slot + (g + 8 * r) * kK + col;
++        float2 x;
++        if constexpr (std::is_same_v<InT, float>) {
++          x = *reinterpret_cast<const float2*>(p);
++        } else {
++          x = __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162*>(p));
++        }
++        hs[nt][2 * r] = x.x;
++        hs[nt][2 * r + 1] = x.y;
++      }
++    }
++  }
++
++  // Per-lane ldmatrix byte offsets, relative to the buffer.
++  const int mi = lane >> 3;
++  const int l7 = lane & 7;
++  // A = h [v][K]: row lane & 15, chunk 2kk + (lane >> 4).
++  uint32_t h_a[kK / 16];
++#pragma unroll
++  for (int kk = 0; kk < kK / 16; ++kk) h_a[kk] = smem_addr(&sm.h[swz(lane & 15, 2 * kk + (lane >> 4))]);
++  // B = w [tok][K] non-trans: tok 8 * warp + l7, chunk 4q + mi.
++  uint32_t w_b[kK / 32];
++#pragma unroll
++  for (int q = 0; q < kK / 32; ++q) w_b[q] = 2 * swz(8 * warp + l7, 4 * q + mi);
++  // A = v^T [v][tok]; B = k [tok][K] trans: tok 16kk + 8 * (mi & 1) + l7, chunk 2 * warp + (mi >> 1).
++  const uint32_t vt_a = smem_addr(&sm.vt[(lane & 15) * kVtPitch + (lane >> 4) * 8]);
++  const uint32_t k_b = 2 * swz(8 * (mi & 1) + l7, 2 * warp + (mi >> 1));
++  const int tok = 8 * warp + 2 * tig;
++
++  // h-independent operands of the next chunk, read from its stage one step early
++  // so that only the h snapshot sits between the two barriers of a step.
++  uint32_t wb[kK / 32][4];
++  uint32_t kb[kBT / 16][4];
++  float uu[2][2];
++  float dec[2][2];
++  auto prefetch = [&](int i_t) {
++    const Stage& st = sm.stage[i_t % kStages];
++    const uint32_t st_w = smem_addr(st.w);
++    const uint32_t st_k = smem_addr(st.k);
++#pragma unroll
++    for (int q = 0; q < kK / 32; ++q) ldsm_x4(wb[q], st_w + w_b[q]);
++#pragma unroll
++    for (int kk = 0; kk < kBT / 16; ++kk) ldsm_x4_t(kb[kk], st_k + k_b + kk * 16 * kK * 2);
++#pragma unroll
++    for (int r = 0; r < 2; ++r) {
++      uu[r][0] = __bfloat162float(st.u[tok * kBV + g + 8 * r]);
++      uu[r][1] = __bfloat162float(st.u[(tok + 1) * kBV + g + 8 * r]);
++    }
++#pragma unroll
++    for (int nt = 0; nt < 2; ++nt) {
++      const float2 gg = *reinterpret_cast<const float2*>(&st.gk[16 * warp + 8 * nt + 2 * tig]);
++      dec[nt][0] = ex2_approx(gg.x);
++      dec[nt][1] = ex2_approx(gg.y);
++    }
++  };
++
++  cp_async_wait<kStages - 2>();
++  __syncthreads();
++  prefetch(0);
++
++  for (int i_t = 0; i_t < NT; ++i_t) {
++    // bf16 snapshot of h -> smem.
++#pragma unroll
++    for (int nt = 0; nt < 2; ++nt) {
++#pragma unroll
++      for (int r = 0; r < 2; ++r) {
++        *reinterpret_cast<uint32_t*>(&sm.h[swz(g + 8 * r, 2 * warp + nt) + 2 * tig]) =
++            pack_bf16(hs[nt][2 * r], hs[nt][2 * r + 1]);
++      }
++    }
++    __syncthreads();
++
++    // v^T[v][tok] = sum_K h[v][K] * w[tok][K] for tokens [8 * warp, 8 * warp + 8), one chain over K.
++    // Independent work below is placed after the chain (in-order issue fills its latency).
++    float acc[4] = {0.f, 0.f, 0.f, 0.f};
++    {
++      uint32_t ha[kK / 16][4];
++#pragma unroll
++      for (int kk = 0; kk < kK / 16; ++kk) ldsm_x4(ha[kk], h_a[kk]);
++#pragma unroll
++      for (int kk = 0; kk < kK / 16; ++kk) mma_bf16(acc, ha[kk], wb[kk / 2][2 * (kk % 2)], wb[kk / 2][2 * (kk % 2) + 1]);
++    }
++    // The stage refilled here was last read by prefetch(i_t - 1), before the barrier above.
++    issue(i_t + kStages - 1);
++
++    // h_out[t] (coalesced 16 B rows from the snapshot).
++    {
++      const int row = tid / kRowChunks;
++      const int ch = tid % kRowChunks;
++      *reinterpret_cast<uint4*>(h_out + (boh + i_t) * H * V * kK + (static_cast<int64_t>(i_h) * V + i_v * kBV) * kK +
++                                row * kK + ch * 8) = *reinterpret_cast<const uint4*>(&sm.h[swz(row, ch)]);
++    }
++#pragma unroll
++    for (int nt = 0; nt < 2; ++nt) {
++      hs[nt][0] = __fmul_rn(hs[nt][0], dec[nt][0]);
++      hs[nt][1] = __fmul_rn(hs[nt][1], dec[nt][1]);
++      hs[nt][2] = __fmul_rn(hs[nt][2], dec[nt][0]);
++      hs[nt][3] = __fmul_rn(hs[nt][3], dec[nt][1]);
++    }
++#pragma unroll
++    for (int r = 0; r < 2; ++r) {
++      const int vv = g + 8 * r;
++      const __nv_bfloat162 x = __floats2bfloat162_rn(uu[r][0] - acc[2 * r], uu[r][1] - acc[2 * r + 1]);
++      *reinterpret_cast<__nv_bfloat162*>(&sm.vt[vv * kVtPitch + tok]) = x;
++      sm.vn[tok * kBV + vv] = x.x;
++      sm.vn[(tok + 1) * kBV + vv] = x.y;
++    }
++    // Stage i_t + 1 must be complete for the prefetch after this barrier.
++    cp_async_wait<kStages - 2>();
++    __syncthreads();
++
++    // h = h * exp2(gk_last) + (k^T @ v)^T; d[v][K] = sum_tok v^T[v][tok] * k[tok][K], fresh chain over tokens.
++    float d[2][4] = {{0.f, 0.f, 0.f, 0.f}, {0.f, 0.f, 0.f, 0.f}};
++    {
++      uint32_t va[kBT / 16][4];
++#pragma unroll
++      for (int kk = 0; kk < kBT / 16; ++kk) ldsm_x4(va[kk], vt_a + kk * 32);
++#pragma unroll
++      for (int kk = 0; kk < kBT / 16; ++kk) {
++        mma_bf16(d[0], va[kk], kb[kk][0], kb[kk][1]);
++        mma_bf16(d[1], va[kk], kb[kk][2], kb[kk][3]);
++      }
++    }
++    if (i_t + 1 < NT) prefetch(i_t + 1);
++
++    // v_new[t] (32 B token rows).
++    if (tid < 2 * kBT) {
++      const int row = tid >> 1;
++      if (i_t * kBT + row < T) {
++        *reinterpret_cast<uint4*>(v_new + (bos + i_t * kBT + row) * stride_v + static_cast<int64_t>(i_h) * V +
++                                  i_v * kBV + (tid & 1) * 8) =
++            *reinterpret_cast<const uint4*>(&sm.vn[row * kBV + (tid & 1) * 8]);
++      }
++    }
++#pragma unroll
++    for (int nt = 0; nt < 2; ++nt)
++#pragma unroll
++      for (int e = 0; e < 4; ++e) hs[nt][e] = __fadd_rn(hs[nt][e], d[nt][e]);
++  }
++  cp_async_wait<0>();
++
++  if (final_slot != nullptr) {
++#pragma unroll
++    for (int nt = 0; nt < 2; ++nt) {
++      const int col = 16 * warp + 8 * nt + 2 * tig;
++#pragma unroll
++      for (int r = 0; r < 2; ++r) {
++        OutT* p = final_slot + (g + 8 * r) * kK + col;
++        if constexpr (std::is_same_v<OutT, float>) {
++          *reinterpret_cast<float2*>(p) = make_float2(hs[nt][2 * r], hs[nt][2 * r + 1]);
++        } else {
++          *reinterpret_cast<uint32_t*>(p) = pack_bf16(hs[nt][2 * r], hs[nt][2 * r + 1]);
++        }
++      }
++    }
++  }
++  device::PDLTriggerSecondary<kUsePDL>();
++}
++
++}  // namespace kda_chunk_h
++
++/// \brief Host launcher for the KDA chunked h-scan (see file header).
++template <int kStages, bool kUsePDL>
++struct KdaChunkHKernel {
++  template <typename InT, typename OutT>
++  static void launch(
++      const tvm::ffi::TensorView k,
++      const tvm::ffi::TensorView u,
++      const tvm::ffi::TensorView w,
++      const tvm::ffi::TensorView gk,
++      const tvm::ffi::TensorView v_new,
++      const tvm::ffi::TensorView h,
++      const tvm::ffi::TensorView state,
++      const tvm::ffi::TensorView state_indices,
++      const tvm::ffi::TensorView final_state,
++      const tvm::ffi::TensorView final_indices,
++      const tvm::ffi::TensorView cu_seqlens,
++      bool has_state,
++      bool has_final,
++      bool is_varlen) {
++    using namespace host;
++    using namespace kda_chunk_h;
++
++    auto B_ = SymbolicSize{"batch"};
++    auto T_ = SymbolicSize{"seqlen"};
++    auto H_ = SymbolicSize{"num_heads"};
++    auto Hg_ = SymbolicSize{"num_k_heads"};
++    auto V_ = SymbolicSize{"head_v_dim"};
++    auto NT_ = SymbolicSize{"num_chunks"};
++    auto N_ = SymbolicSize{"num_seqs"};
++    auto device = SymbolicDevice{};
++    device.set_options<kDLCUDA>();
++
++    TensorMatcher({B_, T_, Hg_, kK}).with_dtype<bf16_t>().with_device(device).verify(k);
++    TensorMatcher({B_, T_, H_, kK}).with_dtype<bf16_t>().with_device(device).verify(w);
++    TensorMatcher({B_, T_, H_, kK}).with_dtype<fp32_t>().with_device(device).verify(gk);
++    TensorMatcher({B_, T_, H_, V_}).with_dtype<bf16_t>().with_device(device).verify(u).verify(v_new);
++    TensorMatcher({B_, NT_, H_, V_, kK}).with_dtype<bf16_t>().with_device(device).verify(h);
++
++    const int64_t B = B_.unwrap();
++    const int64_t T = T_.unwrap();
++    const int64_t H = H_.unwrap();
++    const int64_t Hg = Hg_.unwrap();
++    const int64_t V = V_.unwrap();
++    CHECK_HOST(V % kBV == 0) << "kda_chunk_h: V must be a multiple of " << kBV << ", got " << V;
++    CHECK_HOST(H % Hg == 0) << "kda_chunk_h: H (" << H << ") must be a multiple of Hg (" << Hg << ")";
++
++    int64_t N = B;
++    const int32_t* cu_ptr = nullptr;
++    if (is_varlen) {
++      CHECK_HOST(B == 1) << "kda_chunk_h: varlen input must have batch 1, got " << B;
++      TensorMatcher({N_}).with_dtype<int32_t>().with_device(device).verify(cu_seqlens);
++      N = N_.unwrap() - 1;
++      cu_ptr = static_cast<const int32_t*>(cu_seqlens.data_ptr());
++    }
++    auto verify_pool = [&](const tvm::ffi::TensorView pool, const tvm::ffi::TensorView indices, auto dtype_tag) {
++      using PoolT = decltype(dtype_tag);
++      auto Slots_ = SymbolicSize{"pool_slots"};
++      TensorMatcher({Slots_, H_, V_, kK})
++          .with_dtype<PoolT>()
++          .with_device(device)
++          .with_strides({-1, V * kK, kK, 1})
++          .verify(pool);
++      TensorMatcher({N}).with_dtype<int32_t>().with_device(device).verify(indices);
++      CHECK_HOST(pool.stride(0) % 2 == 0) << "kda_chunk_h: state slot pitch must be even, got " << pool.stride(0);
++      return pool.stride(0);
++    };
++    const InT* state_ptr = nullptr;
++    const int32_t* idx_ptr = nullptr;
++    int64_t state_stride = 0;
++    if (has_state) {
++      state_stride = verify_pool(state, state_indices, InT{});
++      state_ptr = static_cast<const InT*>(state.data_ptr());
++      idx_ptr = static_cast<const int32_t*>(state_indices.data_ptr());
++    }
++    OutT* final_ptr = nullptr;
++    const int32_t* final_idx_ptr = nullptr;
++    int64_t final_stride = 0;
++    if (has_final) {
++      final_stride = verify_pool(final_state, final_indices, OutT{});
++      final_ptr = static_cast<OutT*>(final_state.data_ptr());
++      final_idx_ptr = static_cast<const int32_t*>(final_indices.data_ptr());
++    }
++    if (N == 0) return;
++
++    auto kernel = kda_chunk_h_kernel<InT, OutT, kStages, kUsePDL>;
++    constexpr size_t smem_bytes = sizeof(Smem<kStages>);
++    static bool attr_set = false;
++    if (!attr_set) {
++      RuntimeDeviceCheck(
++          cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, static_cast<int>(smem_bytes)));
++      attr_set = true;
++    }
++    LaunchKernel(dim3(static_cast<uint32_t>(V / kBV), static_cast<uint32_t>(N * H)), dim3(kThreads), device.unwrap(),
++                 smem_bytes)
++        .enable_pdl(kUsePDL)(
++            kernel,
++            static_cast<const bf16_t*>(k.data_ptr()),
++            static_cast<const bf16_t*>(u.data_ptr()),
++            static_cast<const bf16_t*>(w.data_ptr()),
++            static_cast<const float*>(gk.data_ptr()),
++            static_cast<bf16_t*>(v_new.data_ptr()),
++            static_cast<bf16_t*>(h.data_ptr()),
++            state_ptr,
++            idx_ptr,
++            final_ptr,
++            final_idx_ptr,
++            cu_ptr,
++            state_stride,
++            final_stride,
++            static_cast<int32_t>(T),
++            static_cast<int32_t>(H),
++            static_cast<int32_t>(Hg),
++            static_cast<int32_t>(V));
++  }
++
++  template <typename InT>
++  static void dispatch_final(
++      const tvm::ffi::TensorView k,
++      const tvm::ffi::TensorView u,
++      const tvm::ffi::TensorView w,
++      const tvm::ffi::TensorView gk,
++      const tvm::ffi::TensorView v_new,
++      const tvm::ffi::TensorView h,
++      const tvm::ffi::TensorView state,
++      const tvm::ffi::TensorView state_indices,
++      const tvm::ffi::TensorView final_state,
++      const tvm::ffi::TensorView final_indices,
++      const tvm::ffi::TensorView cu_seqlens,
++      bool has_state,
++      bool has_final,
++      bool is_varlen) {
++    using namespace host;
++    if (!has_final || is_type<bf16_t>(final_state.dtype())) {
++      launch<InT, bf16_t>(
++          k, u, w, gk, v_new, h, state, state_indices, final_state, final_indices, cu_seqlens, has_state, has_final,
++          is_varlen);
++    } else if (is_type<fp32_t>(final_state.dtype())) {
++      launch<InT, fp32_t>(
++          k, u, w, gk, v_new, h, state, state_indices, final_state, final_indices, cu_seqlens, has_state, has_final,
++          is_varlen);
++    } else {
++      Panic("kda_chunk_h: final state dtype must be bf16 or fp32");
++    }
++  }
++
++  static void run(
++      const tvm::ffi::TensorView k,
++      const tvm::ffi::TensorView u,
++      const tvm::ffi::TensorView w,
++      const tvm::ffi::TensorView gk,
++      const tvm::ffi::TensorView v_new,
++      const tvm::ffi::TensorView h,
++      const tvm::ffi::TensorView state,
++      const tvm::ffi::TensorView state_indices,
++      const tvm::ffi::TensorView final_state,
++      const tvm::ffi::TensorView final_indices,
++      const tvm::ffi::TensorView cu_seqlens,
++      bool has_state,
++      bool has_final,
++      bool is_varlen) {
++    using namespace host;
++    if (!has_state || is_type<bf16_t>(state.dtype())) {
++      dispatch_final<bf16_t>(
++          k, u, w, gk, v_new, h, state, state_indices, final_state, final_indices, cu_seqlens, has_state, has_final,
++          is_varlen);
++    } else if (is_type<fp32_t>(state.dtype())) {
++      dispatch_final<fp32_t>(
++          k, u, w, gk, v_new, h, state, state_indices, final_state, final_indices, cu_seqlens, has_state, has_final,
++          is_varlen);
++    } else {
++      Panic("kda_chunk_h: state dtype must be bf16 or fp32");
++    }
++  }
++};
++
++}  // namespace sglang
+diff -ruN -x __pycache__ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_prefill_claude/trial_1_tree_judged/kernels/ops/attention/fla/chunk_delta_h.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_prefill_claude/trial_3_tree_judged/kernels/ops/attention/fla/chunk_delta_h.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_prefill_claude/trial_1_tree_judged/kernels/ops/attention/fla/chunk_delta_h.py	2026-09-25 05:36:29.673546437 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_prefill_claude/trial_3_tree_judged/kernels/ops/attention/fla/chunk_delta_h.py	2026-09-25 08:07:45.336948347 -0700
+@@ -9,6 +9,8 @@
+ import triton
+ import triton.language as tl
+ 
++from sglang.kernels.ops.attention.kda_chunk_h import covered as kda_chunk_h_covered
++from sglang.kernels.ops.attention.kda_chunk_h import kda_chunk_h
+ from sglang.kernels.ops.attention.fla.index import (
+     prepare_chunk_indices,
+     prepare_chunk_offsets,
+@@ -76,6 +78,9 @@
+     initial_state,
+     initial_state_indices,
+     stride_init_state,
++    final_state,
++    final_state_indices,
++    stride_final_state,
+     cu_seqlens,
+     chunk_offsets,
+     track_state,
+@@ -143,7 +148,11 @@
+     # (fused_recurrent.py), the chunked extend path did not.
+     valid_state = index >= 0
+     h0 = initial_state + index * stride_init_state
+-    ht = initial_state + index * stride_init_state
++    # The final state goes back to the initial-state slot unless the caller
++    # routes it elsewhere (segmented scan: fp32 carry between segments).
++    index_t = tl.load(final_state_indices + i_n).to(tl.int64)
++    valid_final = index_t >= 0
++    ht = final_state + index_t * stride_final_state
+     if USE_INITIAL_STATE:
+         h0 = h0 + i_h * V * K
+     if INPLACE_UPDATE:
+@@ -343,7 +352,7 @@
+             b_h4 += tl.trans(tl.dot(b_k, b_v))
+ 
+     # epilogue
+-    if INPLACE_UPDATE and valid_state:
++    if INPLACE_UPDATE and valid_final:
+         p_ht = tl.make_block_ptr(ht, (V, K), (K, 1), (i_v * BV, 0), (BV, 64), (1, 0))
+         tl.store(p_ht, b_h1.to(p_ht.dtype.element_ty), boundary_check=(0, 1))
+         if K > 64:
+@@ -378,6 +387,11 @@
+     inplace_update: bool = True,
+     track_state: Optional[torch.Tensor] = None,
+     track_chunk_idx: Optional[torch.Tensor] = None,
++    final_state: Optional[torch.Tensor] = None,
++    final_state_indices: Optional[torch.Tensor] = None,
++    h_out: Optional[torch.Tensor] = None,
++    v_new_out: Optional[torch.Tensor] = None,
++    chunk_offsets: Optional[torch.Tensor] = None,
+ ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+     assert not (use_exp2 and g is not None), (
+         "use_exp2 covers only the per-channel gk path; scalar g stays natural-exp"
+@@ -399,18 +413,60 @@
+         chunk_indices = prepare_chunk_indices(cu_seqlens, CHUNK_SIZE)
+     # N: the actual number of sequences in the batch with either equal or variable lengths
+     if cu_seqlens is None:
+-        N, NT, chunk_offsets = B, triton.cdiv(T, BT), None
++        N, NT = B, triton.cdiv(T, BT)
+     else:
+-        N, NT, chunk_offsets = (
+-            len(cu_seqlens) - 1,
+-            len(chunk_indices),
+-            prepare_chunk_offsets(cu_seqlens, BT),
+-        )
++        N, NT = len(cu_seqlens) - 1, len(chunk_indices)
+     assert K <= 256, "current kernel does not support head dimension larger than 256."
+ 
+-    h = k.new_empty(B, NT, H, V, K)
++    # The CUDA scan keeps one CTA per (seq, head, 16 V columns) resident; it
++    # beats the Triton kernel only while that grid fits in one wave (measured).
++    # It derives the chunk offsets itself, so no host round trip either.
++    if (
++        k.is_cuda
++        and triton.cdiv(V, 16) * N * H <= get_multiprocessor_count(k.device.index)
++        and kda_chunk_h_covered(
++            k=k,
++            w=w,
++            u=u,
++            g=g,
++            gk=gk,
++            initial_state=initial_state,
++            initial_state_indices=initial_state_indices,
++            save_new_value=save_new_value,
++            cu_seqlens=cu_seqlens,
++            use_exp2=use_exp2,
++            inplace_update=inplace_update,
++            track_state=track_state,
++            final_state=final_state,
++            final_state_indices=final_state_indices,
++        )
++    ):
++        return kda_chunk_h(
++            k=k,
++            w=w,
++            u=u,
++            gk=gk,
++            initial_state=initial_state,
++            initial_state_indices=initial_state_indices,
++            cu_seqlens=cu_seqlens,
++            num_chunks=NT,
++            final_state=final_state,
++            final_state_indices=final_state_indices,
++            h_out=h_out,
++            v_new_out=v_new_out,
++        )
++
++    if cu_seqlens is not None and chunk_offsets is None:
++        chunk_offsets = prepare_chunk_offsets(cu_seqlens, BT)
+ 
+-    v_new = torch.empty_like(u) if save_new_value else None
++    h = k.new_empty(B, NT, H, V, K) if h_out is None else h_out
++
++    if not save_new_value:
++        v_new = None
++    else:
++        v_new = torch.empty_like(u) if v_new_out is None else v_new_out
++    if final_state is None:
++        final_state, final_state_indices = initial_state, initial_state_indices
+ 
+     def grid(meta):
+         return (triton.cdiv(V, meta["BV"]), N * H)
+@@ -438,6 +494,9 @@
+         # Envelope-strided state pools (page-major / unified memory) have a
+         # per-slot pitch != H*V*K; contiguous pools pass exactly H*V*K.
+         stride_init_state=(initial_state.stride(0) if initial_state is not None else 0),
++        final_state=final_state,
++        final_state_indices=final_state_indices,
++        stride_final_state=(final_state.stride(0) if final_state is not None else 0),
+         cu_seqlens=cu_seqlens,
+         chunk_offsets=chunk_offsets,
+         track_state=track_state,
+diff -ruN -x __pycache__ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_prefill_claude/trial_1_tree_judged/kernels/ops/attention/fla/kda.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_prefill_claude/trial_3_tree_judged/kernels/ops/attention/fla/kda.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_prefill_claude/trial_1_tree_judged/kernels/ops/attention/fla/kda.py	2026-09-25 05:56:10.119191770 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_prefill_claude/trial_3_tree_judged/kernels/ops/attention/fla/kda.py	2026-09-25 08:14:12.864729930 -0700
+@@ -1155,6 +1155,32 @@
+     _H_pr = q.shape[-2]
+     _B = q.shape[0]
+     _small_grid = _B * _NT_pr * _H_pr <= 256
++    if (
++        not _small_grid
++        and track_state is None
++        and _B == 1
++        and cu_seqlens is not None
++        and cu_seqlens.shape[0] == 2
++        and _NT_pr == triton.cdiv(q.shape[1], chunk_size)
++        and _NT_pr >= _SEG_PIPELINE_MIN_CHUNKS
++        and q.is_cuda
++        and not torch.cuda.is_current_stream_capturing()
++    ):
++        return _chunk_kda_fwd_segmented(
++            q=q,
++            k=k,
++            v=v,
++            g=g,
++            beta=beta,
++            scale=scale,
++            initial_state=initial_state,
++            initial_state_indices=initial_state_indices,
++            cu_seqlens=cu_seqlens,
++            chunk_indices=chunk_indices,
++            chunk_size=chunk_size,
++            safe_gate=lower_bound is not None,
++            output_intermediate_states=output_intermediate_states,
++        )
+     if _small_grid:
+         v = v.contiguous()
+     w, u, _, kg, Aqk, _ = chunk_kda_fwd_intra(
+@@ -1211,6 +1237,148 @@
+     return o
+ 
+ 
++# Segmented single-sequence pipeline (chunk_kda_fwd). The inter-chunk state
++# scan (chunk_gated_delta_rule_fwd_h) walks every chunk serially on
++# cdiv(V, BV) * H CTAs, fewer than the SMs, while the chunk-parallel intra
++# kernels before it and the output kernel after it leave it idle. For one long
++# sequence the chunk axis is cut into segments: the scan of segment s runs on a
++# high-priority side stream while the current stream prepares segment s + 1 and
++# emits the output of segment s - 1. Every kernel sees exactly the rows and
++# chunk-local data it sees in the one-shot call, the tile configs are the same,
++# and the state crosses segment boundaries through an fp32 carry, so the one
++# rounding to the pool dtype still happens once at the end: bit-identical.
++_SEG_PIPELINE_MIN_CHUNKS = 64
++_SEG_PIPELINE_CHUNKS_PER_SEGMENT = 64
++# A short first segment starts the serial scan early (<= chunks per segment).
++_SEG_PIPELINE_FIRST_CHUNKS = 32
++_seg_streams: dict = {}
++
++
++def _seg_pipeline_streams(device: torch.device):
++    """(scan, output) side streams; the serial scan gets the high priority."""
++    streams = _seg_streams.get(device.index)
++    if streams is None:
++        _, hi = torch.cuda.Stream.priority_range()
++        streams = (
++            torch.cuda.Stream(device=device, priority=hi),
++            torch.cuda.Stream(device=device),
++        )
++        _seg_streams[device.index] = streams
++    return streams
++
++
++def _chunk_kda_fwd_segmented(
++    q: torch.Tensor,
++    k: torch.Tensor,
++    v: torch.Tensor,
++    g: torch.Tensor,
++    beta: torch.Tensor,
++    scale: float,
++    initial_state: torch.Tensor,
++    initial_state_indices: torch.Tensor,
++    cu_seqlens: torch.LongTensor,
++    chunk_indices: torch.LongTensor,
++    chunk_size: int,
++    safe_gate: bool,
++    output_intermediate_states: bool,
++):
++    B, T, H, K = k.shape
++    V = v.shape[-1]
++    BT = chunk_size
++    NT = triton.cdiv(T, BT)
++    first, rest = _SEG_PIPELINE_FIRST_CHUNKS, _SEG_PIPELINE_CHUNKS_PER_SEGMENT
++    bounds = [0, *range(first, NT, rest), NT]
++    S = len(bounds) - 1
++
++    # Everything a side stream touches is allocated on the current stream and
++    # stays referenced until the join below.
++    h = k.new_empty(B, NT, H, V, K)
++    v_new = torch.empty(B, T, H, V, device=v.device, dtype=v.dtype)
++    o = v if v.is_contiguous() else torch.empty_like(v, memory_format=torch.contiguous_format)
++    carry = torch.empty(1, H, V, K, device=k.device, dtype=torch.float32)
++    carry_idx = torch.zeros_like(initial_state_indices[:1])
++    # Varlen metadata of every one-sequence segment, derived on the device
++    # (cu_seqlens is [0, T]) so the kernels keep their varlen configs; the
++    # chunk offsets equal prepare_chunk_offsets() minus its blocking copy.
++    starts = (
++        torch.arange(S, device=cu_seqlens.device, dtype=cu_seqlens.dtype) * rest
++        + (first - rest)
++    ).clamp_(min=0) * BT
++    lens = torch.cat([starts[1:], cu_seqlens[-1:]]) - starts
++    seg_cu = torch.minimum(
++        (cu_seqlens[None, :] - starts[:, None]).clamp_(min=0), lens[:, None]
++    )
++    seg_co = torch.div(seg_cu + (BT - 1), BT, rounding_mode="floor")
++
++    main = torch.cuda.current_stream()
++    scan, out = _seg_pipeline_streams(q.device)
++    keep = []
++
++    for s in range(S):
++        c0, c1 = bounds[s], bounds[s + 1]
++        t0, t1 = c0 * BT, min(c1 * BT, T)
++        cu, ci = seg_cu[s], chunk_indices[: c1 - c0]
++        w, u, _, kg, Aqk, Akk = chunk_kda_fwd_intra(
++            q=q[:, t0:t1],
++            k=k[:, t0:t1],
++            v=v[:, t0:t1],
++            gk=g[:, t0:t1],
++            beta=beta[:, t0:t1],
++            scale=scale,
++            cu_seqlens=cu,
++            chunk_size=BT,
++            chunk_indices=ci,
++            safe_gate=safe_gate,
++            fuse_diagonal=False,
++            fuse_recompute=False,
++        )
++        keep.append((w, u, kg, Aqk, Akk))
++        scan.wait_event(main.record_event())
++        with torch.cuda.stream(scan):
++            # fp32 carry between segments: the state is rounded to the pool
++            # dtype once, by the last segment, exactly as in one call.
++            chunk_gated_delta_rule_fwd_h(
++                k=kg,
++                w=w,
++                u=u,
++                gk=g[:, t0:t1],
++                initial_state=initial_state if s == 0 else carry,
++                initial_state_indices=initial_state_indices if s == 0 else carry_idx,
++                final_state=initial_state if s == S - 1 else carry,
++                final_state_indices=(
++                    initial_state_indices if s == S - 1 else carry_idx
++                ),
++                cu_seqlens=cu,
++                chunk_indices=ci,
++                chunk_offsets=seg_co[s],
++                use_exp2=True,
++                h_out=h[:, c0:c1],
++                v_new_out=v_new[:, t0:t1],
++            )
++            scanned = scan.record_event()
++        out.wait_event(scanned)
++        with torch.cuda.stream(out):
++            chunk_gla_fwd_o_gk(
++                q=q[:, t0:t1],
++                v=v_new[:, t0:t1],
++                g=g[:, t0:t1],
++                A=Aqk,
++                h=h[:, c0:c1],
++                o=o[:, t0:t1],
++                scale=scale,
++                cu_seqlens=cu,
++                chunk_size=BT,
++                chunk_indices=ci,
++            )
++    main.wait_stream(scan)
++    main.wait_stream(out)
++    del keep
++
++    if output_intermediate_states:
++        return o, h
++    return o
++
++
+ def _is_packed_heads_view(x: torch.Tensor) -> bool:
+     # [1, T, H, D] with packed heads and an arbitrary token stride.
+     return (
+diff -ruN -x __pycache__ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_prefill_claude/trial_1_tree_judged/kernels/ops/attention/kda_chunk_h.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_prefill_claude/trial_3_tree_judged/kernels/ops/attention/kda_chunk_h.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_prefill_claude/trial_1_tree_judged/kernels/ops/attention/kda_chunk_h.py	1969-12-31 16:00:00.000000000 -0800
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_prefill_claude/trial_3_tree_judged/kernels/ops/attention/kda_chunk_h.py	2026-09-25 08:07:30.135211977 -0700
+@@ -0,0 +1,133 @@
++"""CUDA chunked gated delta-rule state scan for KDA chunked prefill.
++
++Drop-in for the Triton ``chunk_gated_delta_rule_fwd_kernel_h_blockdim64`` on
++the per-channel-gate path used by chunk_kda (gk in log2 space, K = 128, no
++scalar g, no state tracking). See csrc/attention/kda_chunk_h.cuh; the result
++is bit-identical to the Triton kernel. ``covered()`` gates the inputs, the
++caller falls back to Triton for everything else.
++"""
++
++from __future__ import annotations
++
++from typing import TYPE_CHECKING, Optional, Tuple
++
++import torch
++
++from sglang.kernels.jit.utils import (
++    cache_once,
++    is_arch_support_pdl,
++    load_jit,
++    make_cpp_args,
++)
++
++if TYPE_CHECKING:
++    from tvm_ffi.module import Module
++
++_STAGES = 3
++
++
++@cache_once
++def _jit_kda_chunk_h_module() -> Module:
++    args = make_cpp_args(_STAGES, is_arch_support_pdl())
++    return load_jit(
++        "kda_chunk_h",
++        *args,
++        cuda_files=["attention/kda_chunk_h.cuh"],
++        cuda_wrappers=[("run", f"KdaChunkHKernel<{args}>::run")],
++        extra_cuda_cflags=["-O3"],
++    )
++
++
++@cache_once
++def _arch_ok(device_index: int) -> bool:
++    return torch.cuda.get_device_capability(device_index)[0] >= 8
++
++
++def covered(
++    k: torch.Tensor,
++    w: torch.Tensor,
++    u: torch.Tensor,
++    g: Optional[torch.Tensor],
++    gk: Optional[torch.Tensor],
++    initial_state: Optional[torch.Tensor],
++    initial_state_indices: Optional[torch.Tensor],
++    save_new_value: bool,
++    cu_seqlens: Optional[torch.Tensor],
++    use_exp2: bool,
++    inplace_update: bool,
++    track_state: Optional[torch.Tensor],
++    final_state: Optional[torch.Tensor] = None,
++    final_state_indices: Optional[torch.Tensor] = None,
++) -> bool:
++    return (
++        k.is_cuda
++        and gk is not None
++        and g is None
++        and use_exp2
++        and save_new_value
++        and track_state is None
++        and (initial_state is None or (inplace_update and initial_state_indices is not None))
++        and (final_state is None or final_state_indices is not None)
++        and k.shape[-1] == 128
++        and u.shape[-1] % 16 == 0
++        and k.dtype == torch.bfloat16
++        and w.dtype == torch.bfloat16
++        and u.dtype == torch.bfloat16
++        and gk.dtype == torch.float32
++        and k.is_contiguous()
++        and w.is_contiguous()
++        and u.is_contiguous()
++        and gk.is_contiguous()
++        and (cu_seqlens is None or cu_seqlens.dtype == torch.int32)
++        and (
++            initial_state_indices is None or initial_state_indices.dtype == torch.int32
++        )
++        and (
++            final_state_indices is None or final_state_indices.dtype == torch.int32
++        )
++        and _arch_ok(k.device.index)
++    )
++
++
++def kda_chunk_h(
++    k: torch.Tensor,
++    w: torch.Tensor,
++    u: torch.Tensor,
++    gk: torch.Tensor,
++    initial_state: Optional[torch.Tensor],
++    initial_state_indices: Optional[torch.Tensor],
++    cu_seqlens: Optional[torch.Tensor],
++    num_chunks: int,
++    final_state: Optional[torch.Tensor] = None,
++    final_state_indices: Optional[torch.Tensor] = None,
++    h_out: Optional[torch.Tensor] = None,
++    v_new_out: Optional[torch.Tensor] = None,
++) -> Tuple[torch.Tensor, torch.Tensor]:
++    """Returns (h [B, NT, H, V, K], v_new like u). The scan starts from the
++    slots selected by initial_state_indices and writes the final state to the
++    slots selected by final_state_indices (default: the initial ones, i.e. in
++    place). Caller must have checked covered()."""
++    B, _, H, V = u.shape
++    h = k.new_empty(B, num_chunks, H, V, k.shape[-1]) if h_out is None else h_out
++    v_new = torch.empty_like(u) if v_new_out is None else v_new_out
++    if final_state is None:
++        final_state, final_state_indices = initial_state, initial_state_indices
++    has_state = initial_state is not None
++    has_final = final_state is not None
++    _jit_kda_chunk_h_module().run(
++        k,
++        u,
++        w,
++        gk,
++        v_new,
++        h,
++        initial_state if has_state else h,
++        initial_state_indices if has_state else h,
++        final_state if has_final else h,
++        final_state_indices if has_final else h,
++        cu_seqlens if cu_seqlens is not None else h,
++        has_state,
++        has_final,
++        cu_seqlens is not None,
++    )
++    return h, v_new
