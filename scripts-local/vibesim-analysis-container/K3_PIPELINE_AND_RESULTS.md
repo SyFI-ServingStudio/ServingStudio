@@ -347,20 +347,20 @@ moves the critical path (stacked check: −4.8%, not −7%).
 
 ## 6. Code changes, as patches
 
-All patches live under `/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/patches/` (regenerate with `./export_k3_patches.sh`, which also verifies that applying each
+All patches live under `/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/patches/` — every path below is absolute (regenerate with `./export_k3_patches.sh`, which also verifies that applying each
 chain onto a copy of the pristine `python/sglang` tree reproduces the case's best tree exactly). Apply inside
 `python/sglang` of `lmsysorg/sglang:v0.5.20` with `patch -p1`. Δ = latency change, negative = faster.
 
 ### 6.1 MLA layer — six accepted levers, in acceptance order (cumulative 304.6 → 253.5 µs @1×1M, −16.8%)
 
-| # | patch (under `patches/sglang/mla/`) | files | Δ when accepted (1×1M / 128×8k / 16×64k) |
+| # | patch (full path) | files | Δ when accepted (1×1M / 128×8k / 16×64k) |
 |---|---|---|---|
-| M1 | `01_r08_cutedsl_to_trtllm_mla_decode.patch` | `srt/layers/attention/cutedsl_mla_backend.py` (5 lines) | 304.6→267.7 (−12.1%) / 493.0→484.9 (−1.6%) / 302.5→300.5 (−0.7%) |
-| M2 | `02_r20_route_quant_fused_112_top2.patch` | `kernels/jit/csrc/moe/route_quant_fused.cuh`, `route_radix.cuh`, `kernels/ops/moe/moe_route_quant_fused.py`, `srt/layers/moe/topk.py`, `kernels/ops/attention/set_mla_kv_concat_q.py` (277 lines) | 267.7→265.7 (−0.75%) / 0.0% / 302.5→300.5 (−0.7%) |
-| M3 | `03_r21_front_fp32_gemm_cute_tgv.patch` | `srt/models/kimi_k3.py` (16 lines) | 267.8→263.7 (−1.5%) / n/a, engages only at m ≤ 16 (that round's 503.1→486.8 was a noisy baseline) / 300.5→298.5 (−0.7%) |
-| M4 | `04_r23_latent_up_shared_down_bf16_tgv.patch` | `srt/models/kimi_k3.py` (33 lines) | 265.7→261.6 (−1.5%) / 486.0→484.9 (−0.2%) / 298.5→297.4 (−0.4%) |
-| M5 | `05_r24_shared_routed_alt_stream_overlap.patch` | `srt/models/kimi_k3.py` (12 lines) | 261.6→255.4 (−2.4%) / 486.4→475.6 (−2.2%) / 298.4→288.3 (−3.4%) |
-| M6 | `06_r25_is_var_seq_persistent_kvconcat_warps.patch` | `srt/layers/attention/trtllm_mla_backend.py`, `kernels/ops/attention/set_mla_kv_concat_q.py`, `kernels/jit/csrc/elementwise/set_mla_kv_concat_q.cuh` (26 lines) | 255.4→253.5 (−0.8%) / 476.6→474.8 (−0.4%) / 289.3→288.2 (−0.4%) |
+| M1 | `/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/patches/sglang/mla/01_r08_cutedsl_to_trtllm_mla_decode.patch` | `srt/layers/attention/cutedsl_mla_backend.py` (5 lines) | 304.6→267.7 (−12.1%) / 493.0→484.9 (−1.6%) / 302.5→300.5 (−0.7%) |
+| M2 | `/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/patches/sglang/mla/02_r20_route_quant_fused_112_top2.patch` | `kernels/jit/csrc/moe/route_quant_fused.cuh`, `route_radix.cuh`, `kernels/ops/moe/moe_route_quant_fused.py`, `srt/layers/moe/topk.py`, `kernels/ops/attention/set_mla_kv_concat_q.py` (277 lines) | 267.7→265.7 (−0.75%) / 0.0% / 302.5→300.5 (−0.7%) |
+| M3 | `/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/patches/sglang/mla/03_r21_front_fp32_gemm_cute_tgv.patch` | `srt/models/kimi_k3.py` (16 lines) | 267.8→263.7 (−1.5%) / n/a, engages only at m ≤ 16 (that round's 503.1→486.8 was a noisy baseline) / 300.5→298.5 (−0.7%) |
+| M4 | `/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/patches/sglang/mla/04_r23_latent_up_shared_down_bf16_tgv.patch` | `srt/models/kimi_k3.py` (33 lines) | 265.7→261.6 (−1.5%) / 486.0→484.9 (−0.2%) / 298.5→297.4 (−0.4%) |
+| M5 | `/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/patches/sglang/mla/05_r24_shared_routed_alt_stream_overlap.patch` | `srt/models/kimi_k3.py` (12 lines) | 261.6→255.4 (−2.4%) / 486.4→475.6 (−2.2%) / 298.4→288.3 (−3.4%) |
+| M6 | `/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/patches/sglang/mla/06_r25_is_var_seq_persistent_kvconcat_warps.patch` | `srt/layers/attention/trtllm_mla_backend.py`, `kernels/ops/attention/set_mla_kv_concat_q.py`, `kernels/jit/csrc/elementwise/set_mla_kv_concat_q.cuh` (26 lines) | 255.4→253.5 (−0.8%) / 476.6→474.8 (−0.4%) / 289.3→288.2 (−0.4%) |
 
 Cumulative: `/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/patches/sglang/mla_best_tree_vs_pristine.patch` (9 files, 361 changed lines).
 
@@ -414,10 +414,10 @@ Cumulative: `/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/v
 
 ### 6.2 KDA layer — two patches (cumulative 403.0 → 379.4 µs @B=128, −5.9%)
 
-| # | patch (under `patches/sglang/kda/`) | files | Δ (B=128 / 32 / 1 @8k) |
+| # | patch (full path) | files | Δ (B=128 / 32 / 1 @8k) |
 |---|---|---|---|
-| K1 | `01_stacked_fastpath_overlap_cutedsl_gemm_warps.patch` | `srt/layers/attention/linear/kda_backend.py`, `srt/models/kimi_k3.py`, `kernels/ops/attention/fla/fused_recurrent.py` (44 lines) | 403.0→383.7 (−4.8%) / 263.6→249.3 (−5.4%) / 138.8→130.5 (−6.0%) |
-| K2 | `02_r22_bf16_state_fused_kda_decode_kernel.patch` | `kernels/jit/csrc/attention/kda_fused_decode.cuh`, `kernels/ops/attention/kda_fused_decode.py` (242 lines) | 384.4→379.4 (−1.3%) / 249.3→243.1 (−2.5%) / 130.5→126.4 (−3.1%) |
+| K1 | `/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/patches/sglang/kda/01_stacked_fastpath_overlap_cutedsl_gemm_warps.patch` | `srt/layers/attention/linear/kda_backend.py`, `srt/models/kimi_k3.py`, `kernels/ops/attention/fla/fused_recurrent.py` (44 lines) | 403.0→383.7 (−4.8%) / 263.6→249.3 (−5.4%) / 138.8→130.5 (−6.0%) |
+| K2 | `/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/patches/sglang/kda/02_r22_bf16_state_fused_kda_decode_kernel.patch` | `kernels/jit/csrc/attention/kda_fused_decode.cuh`, `kernels/ops/attention/kda_fused_decode.py` (242 lines) | 384.4→379.4 (−1.3%) / 249.3→243.1 (−2.5%) / 130.5→126.4 (−3.1%) |
 
 Cumulative: `/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/patches/sglang/kda_best_tree_vs_pristine.patch` (5 files, 286 changed lines).
 
@@ -469,16 +469,16 @@ apply — the Claude prefill campaign starts once the prefill oracles are baked 
 
 ### 6.5 Claude Opus 5.5 campaign patches (on top of the decode best trees; chains validated against each case's best tree)
 
-| patch (under `patches/sglang/claude/`) | round | Δ latency (judge) | what it does |
+| patch (full path) | round | Δ latency (judge) | what it does |
 |---|---|---|---|
-| `mla_b512_01_r1_moe_autotune_kvconcat_satfinite.patch` (4 files, 242 lines) | MLA-b512 r1 | 976.3 → 904.6 (−7.3%) @512 | one-shot FlashInfer autotune of the MXFP4 MoE tactic (production warmup — harness gap, ≈6.4 pts) + fp8 `set_mla_kv_concat_q` with hardware satfinite convert and exact no-saturate fixup (17.8 → 8.0 µs) |
-| `mla_b512_02_r2_persistent_decode_tail_split.patch` (4 files, 334 lines) | MLA-b512 r2 | 904.6 → 888.0 (−1.8%) @512 | tail split for the persistent TRT-LLM MLA decode kernel: B = 148·3 + 68 leaves a last wave of 68 SMs; the trailing 68 requests' KV is split in halves (136 pseudo-requests) and merged by LSE (`mla_decode_tail_split.py`) |
-| `mla_b512_03_r3_outgate_tail_overlap_attnres_fused_add.patch` (5 files, 264 lines) | MLA-b512 r3 | 887.3 → 877.8 (−1.1%) @512, mixed −3.0% | output-gate GEMM launched into the MLA decode kernel's tail wave; pending residual add fused into the attention-residual TMA kernel (addend row in the TMA ring, add in registers) — exact for MLA |
-| `kda_b512_01_r1_moe_autotune_fused_decode_vector_ldst_bfa_overlap.patch` (3 files, 290 lines) | KDA-b512 r1 | 675.2 → 600.4 (−11.1%) @512 | one-shot MoE autotune (harness gap, ≈9 pts) + 8-byte vectorized bf16 state loads/stores and `__launch_bounds__` (min 5 blocks/SM) in the fused KDA decode kernel (92.6 → 83.0 µs) + bfa side-stream overlap limit 128 → 512 |
-| `mla_prefill_01_r1_kv_pack_quantize_fp8_attnres_fused_add.patch` (8 files, 233 lines) | MLA-prefill r1 | 12128.5 → 11573.4 (−4.6%) @16k, prefix 48k | Triton `mla_kv_pack_quantize_fp8`: one pass packs and fp8-quantizes K/V for the TRT-LLM ragged prefill (chunk and prefix) and casts Q once (replaces ~800 µs of elementwise glue); + the attention-residual fused add (418 → 361 µs at 16k tokens) |
-| `mla_prefill_02_r2_prefix_attention_cutedsl_fmha.patch` (2 files, 168 lines) | MLA-prefill r2 | 11538.6 → 11229.3 (−2.7%) | the non-causal prefix-attention pass moved from the TRT-LLM ragged FMHA to sglang's CuTe-DSL JIT FMHA with a full softmax correction (fp8 P prescale 2^8); rel 0.0156 |
-| `kda_prefill_01_r1_strided_chunk_kernels_no_copies_no_host_sync.patch` (8 files, 389 lines) | KDA-prefill r1 | 9071.9 → 8564.0 (−5.6%) first chunk, −6.3% @prefix 48k | the KDA chunk kernels (l2norm, gated norm, delta-rule `recompute_w_u`) accept strided inputs so three materialized copies of the 16k×(12×128) activations disappear; the `int(query_start_loc[-1])` host sync is dropped |
-| `UNACCEPTED_kda_prefill_r2_cuda_kda_chunk_h_hscan.patch` (3 files, 691 lines) | KDA-prefill r2 (not accepted) | −1.1% first chunk vs a 1.3% floor; −2.9% @prefix 48k | CUDA `kda_chunk_h` h-scan kernel replacing the Triton `chunk_delta_h` state recurrence (516 → 281 µs), gated to the small-grid prefill shape; bit-exact |
+| `/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/patches/sglang/claude/mla_b512_01_r1_moe_autotune_kvconcat_satfinite.patch` (4 files, 242 lines) | MLA-b512 r1 | 976.3 → 904.6 (−7.3%) @512 | one-shot FlashInfer autotune of the MXFP4 MoE tactic (production warmup — harness gap, ≈6.4 pts) + fp8 `set_mla_kv_concat_q` with hardware satfinite convert and exact no-saturate fixup (17.8 → 8.0 µs) |
+| `/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/patches/sglang/claude/mla_b512_02_r2_persistent_decode_tail_split.patch` (4 files, 334 lines) | MLA-b512 r2 | 904.6 → 888.0 (−1.8%) @512 | tail split for the persistent TRT-LLM MLA decode kernel: B = 148·3 + 68 leaves a last wave of 68 SMs; the trailing 68 requests' KV is split in halves (136 pseudo-requests) and merged by LSE (`mla_decode_tail_split.py`) |
+| `/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/patches/sglang/claude/mla_b512_03_r3_outgate_tail_overlap_attnres_fused_add.patch` (5 files, 264 lines) | MLA-b512 r3 | 887.3 → 877.8 (−1.1%) @512, mixed −3.0% | output-gate GEMM launched into the MLA decode kernel's tail wave; pending residual add fused into the attention-residual TMA kernel (addend row in the TMA ring, add in registers) — exact for MLA |
+| `/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/patches/sglang/claude/kda_b512_01_r1_moe_autotune_fused_decode_vector_ldst_bfa_overlap.patch` (3 files, 290 lines) | KDA-b512 r1 | 675.2 → 600.4 (−11.1%) @512 | one-shot MoE autotune (harness gap, ≈9 pts) + 8-byte vectorized bf16 state loads/stores and `__launch_bounds__` (min 5 blocks/SM) in the fused KDA decode kernel (92.6 → 83.0 µs) + bfa side-stream overlap limit 128 → 512 |
+| `/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/patches/sglang/claude/mla_prefill_01_r1_kv_pack_quantize_fp8_attnres_fused_add.patch` (8 files, 233 lines) | MLA-prefill r1 | 12128.5 → 11573.4 (−4.6%) @16k, prefix 48k | Triton `mla_kv_pack_quantize_fp8`: one pass packs and fp8-quantizes K/V for the TRT-LLM ragged prefill (chunk and prefix) and casts Q once (replaces ~800 µs of elementwise glue); + the attention-residual fused add (418 → 361 µs at 16k tokens) |
+| `/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/patches/sglang/claude/mla_prefill_02_r2_prefix_attention_cutedsl_fmha.patch` (2 files, 168 lines) | MLA-prefill r2 | 11538.6 → 11229.3 (−2.7%) | the non-causal prefix-attention pass moved from the TRT-LLM ragged FMHA to sglang's CuTe-DSL JIT FMHA with a full softmax correction (fp8 P prescale 2^8); rel 0.0156 |
+| `/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/patches/sglang/claude/kda_prefill_01_r1_strided_chunk_kernels_no_copies_no_host_sync.patch` (8 files, 389 lines) | KDA-prefill r1 | 9071.9 → 8564.0 (−5.6%) first chunk, −6.3% @prefix 48k | the KDA chunk kernels (l2norm, gated norm, delta-rule `recompute_w_u`) accept strided inputs so three materialized copies of the 16k×(12×128) activations disappear; the `int(query_start_loc[-1])` host sync is dropped |
+| `/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/patches/sglang/claude/UNACCEPTED_kda_prefill_r2_cuda_kda_chunk_h_hscan.patch` (3 files, 691 lines) | KDA-prefill r2 (not accepted) | −1.1% first chunk vs a 1.3% floor; −2.9% @prefix 48k | CUDA `kda_chunk_h` h-scan kernel replacing the Triton `chunk_delta_h` state recurrence (516 → 281 µs), gated to the small-grid prefill shape; bit-exact |
 
 Full paths: `/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/patches/sglang/claude/<name>`. Apply order per case: the seed is the same layer's decode best tree
 (`/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/patches/sglang/mla_best_tree_vs_pristine.patch` or `kda_best_tree_vs_pristine.patch` onto pristine), then the numbered
