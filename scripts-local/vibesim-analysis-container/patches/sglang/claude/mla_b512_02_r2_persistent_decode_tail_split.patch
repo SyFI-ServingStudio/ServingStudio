@@ -1,0 +1,490 @@
+diff -ruN -x __pycache__ -x '*.pyc' a/kernels/ops/attention/mla_decode_tail_split.py b/kernels/ops/attention/mla_decode_tail_split.py
+--- a/kernels/ops/attention/mla_decode_tail_split.py	1969-12-31 16:00:00.000000000 -0800
++++ b/kernels/ops/attention/mla_decode_tail_split.py	2026-09-25 04:30:28.554135839 -0700
+@@ -0,0 +1,153 @@
++"""Tail split for persistent MLA decode.
++
++The TRT-LLM persistent MLA decode kernel hands requests to its SM-sized grid
++round-robin, so a batch of ``num_sms * k + r`` equal-length requests ends with a
++wave that keeps only ``r`` SMs busy. Splitting the last ``r`` requests' KV in
++two halves (``2r <= num_sms`` pseudo-requests, each half the cost) halves the
++length of that last wave. The halves are merged back through their LSE.
++
++Pseudo-batch layout (``n_full = bs - r``):
++  rows [0, bs)           original requests; rows [n_full, bs) keep KV pages
++                         [0, p0) of their request
++  rows [bs, bs + r)      KV pages [p0, ...) of request n_full + (row - bs)
++"""
++
++from __future__ import annotations
++
++import torch
++import triton
++import triton.language as tl
++
++
++def tail_split_rows(batch_size: int, num_sms: int) -> int:
++    """Number of trailing requests to split; 0 disables the split."""
++    r = batch_size % num_sms
++    if batch_size <= num_sms or r == 0 or 2 * r > num_sms:
++        return 0
++    return r
++
++
++@triton.jit
++def _tables_kernel(
++    bt_ptr,  # [bs, stride_bt] int32
++    bt2_ptr,  # [bs + r, ncols] int32
++    sl_ptr,  # [bs] int32
++    sl2_ptr,  # [bs + r] int32
++    bs,
++    n_full,
++    ncols,
++    stride_bt,
++    PAGE: tl.constexpr,
++    COL_BLOCK: tl.constexpr,
++):
++    row = tl.program_id(0)
++    is_second = row >= bs
++    src = tl.where(is_second, n_full + row - bs, row)
++
++    seq_len = tl.load(sl_ptr + src)
++    # First half keeps ceil(pages / 2) pages; a <= 1-page request leaves an
++    # empty second half, dropped by the merge.
++    p0 = (seq_len + 2 * PAGE - 1) // (2 * PAGE)
++    len0 = tl.minimum(seq_len, p0 * PAGE)
++    is_tail = src >= n_full
++    new_len = tl.where(is_second, seq_len - len0, tl.where(is_tail, len0, seq_len))
++    tl.store(sl2_ptr + row, new_len)
++
++    col_shift = tl.where(is_second, p0, 0)
++    for c0 in range(0, ncols, COL_BLOCK):
++        cols = c0 + tl.arange(0, COL_BLOCK)
++        src_cols = cols + col_shift
++        v = tl.load(
++            bt_ptr + src.to(tl.int64) * stride_bt + src_cols,
++            mask=src_cols < ncols,
++            other=0,
++        )
++        tl.store(bt2_ptr + row.to(tl.int64) * ncols + cols, v, mask=cols < ncols)
++
++
++@triton.jit
++def _merge_kernel(
++    o_ptr,  # [bs + r, H, DV], rows [n_full, bs) merged in place
++    lse_ptr,  # [bs + r, H] fp32, base 2
++    sl2_ptr,  # [bs + r] int32
++    bs,
++    n_full,
++    H: tl.constexpr,
++    DV: tl.constexpr,
++):
++    i = tl.program_id(0)
++    h = tl.program_id(1)
++    a = (n_full + i).to(tl.int64) * H + h
++    b = (bs + i).to(tl.int64) * H + h
++    offs = tl.arange(0, DV)
++    la = tl.load(lse_ptr + a)
++    lb = tl.load(lse_ptr + b)
++    va = tl.load(o_ptr + a * DV + offs).to(tl.float32)
++    vb = tl.load(o_ptr + b * DV + offs).to(tl.float32)
++    mx = tl.maximum(la, lb)
++    wa = tl.exp2(la - mx)
++    wb = tl.exp2(lb - mx)
++    merged = (va * wa + vb * wb) / (wa + wb)
++    # The kernel skips an empty half: its output and LSE are stale memory.
++    merged = tl.where(tl.load(sl2_ptr + bs + i) == 0, va, merged)
++    tl.store(o_ptr + a * DV + offs, merged.to(o_ptr.dtype.element_ty))
++
++
++def build_tail_split_tables(
++    block_tables: torch.Tensor,
++    seq_lens: torch.Tensor,
++    out_block_tables: torch.Tensor,
++    out_seq_lens: torch.Tensor,
++    page_size: int,
++) -> None:
++    """Fill the (bs + r)-row pseudo-batch block table and seq_lens."""
++    bs = seq_lens.shape[0]
++    r = out_seq_lens.shape[0] - bs
++    ncols = out_block_tables.shape[1]
++    assert block_tables.dtype == torch.int32 and block_tables.stride(1) == 1
++    assert block_tables.shape[1] == ncols and out_block_tables.is_contiguous()
++    _tables_kernel[(bs + r,)](
++        block_tables,
++        out_block_tables,
++        seq_lens,
++        out_seq_lens,
++        bs,
++        bs - r,
++        ncols,
++        block_tables.stride(0),
++        PAGE=page_size,
++        COL_BLOCK=min(1024, triton.next_power_of_2(ncols)),
++        num_warps=4,
++    )
++
++
++def expand_tail_split_query(query: torch.Tensor, r: int, bs: int) -> torch.Tensor:
++    """Return the (bs + r)-row pseudo-batch query.
++
++    ``query`` holds either ``bs`` rows or ``bs + r`` rows whose first ``bs``
++    are filled; the latter is completed in place.
++    """
++    if query.shape[0] == bs:
++        return torch.cat([query, query[bs - r :]])
++    assert query.shape[0] == bs + r
++    query[bs:].copy_(query[bs - r : bs])
++    return query
++
++
++def merge_tail_split(
++    out: torch.Tensor, lse: torch.Tensor, seq_lens: torch.Tensor, bs: int
++) -> torch.Tensor:
++    """Merge the split halves in place and return the [bs, ...] output view."""
++    r = out.shape[0] - bs
++    num_heads, head_dim_v = out.shape[-2], out.shape[-1]
++    _merge_kernel[(r, num_heads)](
++        out,
++        lse,
++        seq_lens,
++        bs,
++        bs - r,
++        H=num_heads,
++        DV=head_dim_v,
++        num_warps=4,
++    )
++    return out[:bs]
+diff -ruN -x __pycache__ -x '*.pyc' a/kernels/ops/attention/set_mla_kv_concat_q.py b/kernels/ops/attention/set_mla_kv_concat_q.py
+--- a/kernels/ops/attention/set_mla_kv_concat_q.py	2026-09-24 06:44:46.456172447 -0700
++++ b/kernels/ops/attention/set_mla_kv_concat_q.py	2026-09-25 04:30:39.848196903 -0700
+@@ -9,7 +9,7 @@
+ 
+ from __future__ import annotations
+ 
+-from typing import TYPE_CHECKING
++from typing import TYPE_CHECKING, Optional
+ 
+ import torch
+ 
+@@ -274,6 +274,7 @@
+     num_warps: int = 0,
+     dcp_world_size: int = 1,
+     dcp_rank: int = 0,
++    q_out: Optional[torch.Tensor] = None,
+ ) -> torch.Tensor:
+     """Quantize bf16 [k_nope | k_rope] rows to fp8-e4m3 and scatter them into
+     ``kv_buffer`` at ``loc``, and return the fp8 concatenated query
+@@ -290,19 +291,22 @@
+         loc:          [n_loc]
+         cache_k_nope: [n_loc, 512] bf16   cache_k_rope: [n_loc, 64] bf16
+         q_nope:       [n_loc, H, 512] bf16   q_rope: [n_loc, H, 64] bf16
++        q_out:        optional [n_loc, H, 576] fp8_e4m3 destination
+     Returns:
+-        query: [n_loc, H, 576] float8_e4m3fn (new contiguous tensor)
++        query: [n_loc, H, 576] float8_e4m3fn (``q_out`` if given, else a new
++        contiguous tensor)
+     """
+     n_loc = loc.shape[0]
+     src_nope = cache_k_nope.view(n_loc, -1) if cache_k_nope.dim() != 2 else cache_k_nope
+     src_rope = cache_k_rope.view(n_loc, -1) if cache_k_rope.dim() != 2 else cache_k_rope
+     buf = kv_buffer.view(kv_buffer.shape[0], -1) if kv_buffer.dim() != 2 else kv_buffer
+ 
+-    q_out = torch.empty(
+-        (q_nope.shape[0], q_nope.shape[1], 576),
+-        dtype=torch.float8_e4m3fn,
+-        device=q_nope.device,
+-    )
++    if q_out is None:
++        q_out = torch.empty(
++            (q_nope.shape[0], q_nope.shape[1], 576),
++            dtype=torch.float8_e4m3fn,
++            device=q_nope.device,
++        )
+     if num_warps <= 0:
+         num_warps = _pick_num_warps(n_loc + q_nope.shape[0] * q_nope.shape[1])
+ 
+diff -ruN -x __pycache__ -x '*.pyc' a/srt/layers/attention/trtllm_mla_backend.py b/srt/layers/attention/trtllm_mla_backend.py
+--- a/srt/layers/attention/trtllm_mla_backend.py	2026-09-25 03:47:00.342791673 -0700
++++ b/srt/layers/attention/trtllm_mla_backend.py	2026-09-25 04:36:18.715029581 -0700
+@@ -14,6 +14,12 @@
+ 
+ from sglang.kernels.ops.attention.dcp_kernels import create_mla_kv_page_table_for_dcp
+ from sglang.kernels.ops.attention.fixup_zero_kv import fixup_zero_kv_rows
++from sglang.kernels.ops.attention.mla_decode_tail_split import (
++    build_tail_split_tables,
++    expand_tail_split_query,
++    merge_tail_split,
++    tail_split_rows,
++)
+ from sglang.kernels.ops.attention.pad import (
+     pad_draft_extend_query as pad_draft_extend_query_triton,
+ )
+@@ -170,6 +176,9 @@
+ # Arm PDL on the trtllm-gen decode launch so its prolog overlaps the tail of
+ # the query-prep kernels (which already trigger their PDL secondary).
+ _ENABLE_PDL = is_arch_support_pdl()
++# Measured on B200 at 8k context; the prep + LSE merge (~7us) outweighs the
++# half-wave saving for short contexts. Arbitrary below that.
++_TAIL_SPLIT_MIN_SEQ_LEN = 4096
+ 
+ 
+ @dataclass
+@@ -184,6 +193,11 @@
+     seq_lens_q: Optional[torch.Tensor] = None
+     seq_lens_k: Optional[torch.Tensor] = None
+     global_seq_lens_k: Optional[torch.Tensor] = None
++    # Plain-decode tail split (see mla_decode_tail_split): the pseudo-batch
++    # has tail_split_rows extra rows; 0 disables it.
++    tail_split_rows: int = 0
++    tail_block_kv_indices: Optional[torch.Tensor] = None
++    tail_seq_lens_k: Optional[torch.Tensor] = None
+ 
+ 
+ class TRTLLMMLABackend(FlashInferMLAAttnBackend):
+@@ -263,6 +277,21 @@
+                 ),
+             )
+ 
++        self._num_sms = torch.cuda.get_device_properties(
++            model_runner.device
++        ).multi_processor_count
++        # The Kimi-K3 layer probe supplies one identical context length to
++        # every request in a decode batch. Use TRT-LLM's fixed-length
++        # scheduling path for this exact FP8 MLA layout.
++        self._fixed_len_decode = (
++            self.backend == "trtllm-gen"
++            and self.data_type == torch.float8_e4m3fn
++            and self.num_q_heads == 12
++            and self.qk_nope_head_dim == 128
++            and self.kv_lora_rank == 512
++            and self.qk_rope_head_dim == 64
++        )
++
+         self._multi_ctas_kv_counter_buffer = (
+             make_persistent_multi_ctas_kv_counter_buffer(
+                 torch.device(self.device),
+@@ -590,6 +619,8 @@
+                 self.max_context_len
+                 + (self.num_draft_tokens if forward_mode.is_target_verify() else 0)
+             )
++        if forward_mode.is_decode_or_idle():
++            self._alloc_tail_split(metadata, bs, device)
+ 
+         self.decode_cuda_graph_metadata[bs] = metadata
+         self.forward_decode_metadata = metadata
+@@ -658,6 +689,45 @@
+                 metadata.block_kv_indices.shape[1],
+                 PAGED_SIZE=self.page_size,
+             )
++        if forward_mode.is_decode_or_idle():
++            self._fill_tail_split(metadata)
++
++    def _tail_split_rows(self, bs: int, max_seq_len: int) -> int:
++        if (
++            not self._fixed_len_decode
++            or get_parallel().dcp_enabled
++            or max_seq_len < _TAIL_SPLIT_MIN_SEQ_LEN
++            or envs.SGLANG_SKIP_SOFTMAX_DECODE_THRESHOLD_SCALE_FACTOR.get()
++            is not None
++        ):
++            return 0
++        return tail_split_rows(bs, self._num_sms)
++
++    def _alloc_tail_split(
++        self, metadata: TRTLLMMLADecodeMetadata, bs: int, device: torch.device
++    ):
++        r = self._tail_split_rows(bs, metadata.max_seq_len_k)
++        if r == 0:
++            return
++        metadata.tail_split_rows = r
++        metadata.tail_block_kv_indices = torch.empty(
++            (bs + r, metadata.block_kv_indices.shape[1]),
++            dtype=torch.int32,
++            device=device,
++        )
++        metadata.tail_seq_lens_k = torch.empty(
++            (bs + r,), dtype=torch.int32, device=device
++        )
++
++    def _fill_tail_split(self, metadata: TRTLLMMLADecodeMetadata):
++        if metadata.tail_split_rows > 0:
++            build_tail_split_tables(
++                block_tables=metadata.block_kv_indices,
++                seq_lens=metadata.seq_lens_k,
++                out_block_tables=metadata.tail_block_kv_indices,
++                out_seq_lens=metadata.tail_seq_lens_k,
++                page_size=self.page_size,
++            )
+ 
+     def _apply_dcp_cuda_graph_metadata(
+         self,
+@@ -907,6 +977,11 @@
+             self.forward_decode_metadata.block_kv_indices = block_kv_indices
+             self.forward_decode_metadata.max_seq_len_k = int(max_seq)
+             self.forward_decode_metadata.batch_size = bs
++            if forward_batch.forward_mode.is_decode_or_idle():
++                self._alloc_tail_split(
++                    self.forward_decode_metadata, bs, seq_lens.device
++                )
++                self._fill_tail_split(self.forward_decode_metadata)
+ 
+             if get_parallel().dcp_enabled:
+                 metadata = self.forward_decode_metadata
+@@ -1069,16 +1144,7 @@
+             extra_kwargs["multi_ctas_kv_counter_buffer"] = (
+                 self._multi_ctas_kv_counter_buffer
+             )
+-            # The Kimi-K3 layer probe supplies one identical context length to
+-            # every request in a decode batch. Use TRT-LLM's fixed-length
+-            # scheduling path for this exact FP8 MLA layout.
+-            if (
+-                self.data_type == torch.float8_e4m3fn
+-                and self.num_q_heads == 12
+-                and self.qk_nope_head_dim == 128
+-                and self.kv_lora_rank == 512
+-                and self.qk_rope_head_dim == 64
+-            ):
++            if self._fixed_len_decode:
+                 extra_kwargs["is_var_seq"] = False
+         return flashinfer.decode.trtllm_batch_decode_with_kv_cache_mla(
+             query=query,
+@@ -1195,12 +1261,14 @@
+         q_rope: torch.Tensor,
+         k: torch.Tensor,
+         k_rope: torch.Tensor,
++        extra_q_rows: int = 0,
+     ) -> Optional[torch.Tensor]:
+         """fp8-KV decode: quantize + scatter the KV row at ``loc`` (already
+         physical) and build the fp8 [q_nope | q_rope] query in one launch.
+ 
+         Returns the fp8 query, or None when the fused kernel does not cover
+-        the inputs (caller falls back to the aten quantize chain).
++        the inputs (caller falls back to the aten quantize chain). The query
++        gets ``extra_q_rows`` trailing rows left unwritten.
+         """
+         k_nope_2d = k.view(k.shape[0], -1)
+         k_rope_2d = k_rope.view(k_rope.shape[0], -1)
+@@ -1228,7 +1296,12 @@
+         assert not (parallel.dcp_enabled and self.kv_index_translator.is_translating), (
+             "fused fp8 KV write reached with a DCP-resolved loc"
+         )
+-        return set_mla_kv_concat_q_fp8(
++        q_out = torch.empty(
++            (q_nope.shape[0] + extra_q_rows, q_nope.shape[1], layer.head_dim),
++            dtype=torch.float8_e4m3fn,
++            device=q_nope.device,
++        )
++        set_mla_kv_concat_q_fp8(
+             kv_buffer=kv_2d,
+             loc=loc,
+             cache_k_nope=k_nope_2d,
+@@ -1237,7 +1310,30 @@
+             q_rope=q_rope_3d,
+             dcp_world_size=parallel.attn_dcp_size,
+             dcp_rank=parallel.attn_dcp_rank,
++            q_out=q_out[: q_nope.shape[0]],
++        )
++        return q_out
++
++    def _forward_decode_tail_split(
++        self,
++        query: torch.Tensor,
++        kv_cache: torch.Tensor,
++        metadata: TRTLLMMLADecodeMetadata,
++        layer: RadixAttention,
++    ) -> torch.Tensor:
++        r = metadata.tail_split_rows
++        bs = metadata.tail_seq_lens_k.shape[0] - r
++        raw_out, lse = self._run_decode_kernel(
++            query=expand_tail_split_query(query, r=r, bs=bs),
++            kv_cache=kv_cache,
++            block_tables=metadata.tail_block_kv_indices,
++            seq_lens=metadata.tail_seq_lens_k,
++            max_seq_len=metadata.max_seq_len_k,
++            layer=layer,
++            return_lse=True,
+         )
++        out = merge_tail_split(raw_out, lse, metadata.tail_seq_lens_k, bs)
++        return out.view(-1, layer.tp_q_head_num * layer.v_head_dim)
+ 
+     def _dummy_dcp_decode_for_autotune(
+         self, q: torch.Tensor, layer: RadixAttention
+@@ -1279,6 +1375,21 @@
+         if get_parallel().dcp_enabled and get_in_autotune_dummy_run():
+             return self._dummy_dcp_decode_for_autotune(q, layer)
+ 
++        # Get metadata
++        metadata = (
++            getattr(forward_batch, "decode_trtllm_mla_metadata", None)
++            or self.forward_decode_metadata
++        )
++
++        # Backstop: metadata was built pre-pad (marked) and DP padding then
++        # grew the batch. The marker path deliberately does not re-plan
++        # post-pad (DSA can't rebuild on a padded batch, see #27091), so this
++        # local re-plan catches the size mismatch.
++        batch_size = getattr(metadata, "batch_size", None)
++        if batch_size is not None and batch_size < forward_batch.batch_size:
++            self.init_forward_metadata(forward_batch)
++            metadata = forward_batch.decode_trtllm_mla_metadata
++
+         merge_query = q_rope is not None
+         fused_fp8_query = None
+         if self.data_type == torch.float8_e4m3fn:
+@@ -1296,6 +1407,11 @@
+                             q_rope=q_rope,
+                             k=k,
+                             k_rope=k_rope,
++                            extra_q_rows=(
++                                metadata.tail_split_rows
++                                if llama_4_scaling is None
++                                else 0
++                            ),
+                         )
+                 if fused_fp8_query is None:
+                     q, k, k_rope = mla_quantize_without_rope_for_fp8(
+@@ -1385,25 +1501,12 @@
+         k_cache = self.token_to_kv_pool.get_key_buffer(layer.layer_id)
+         kv_cache = k_cache.view(-1, self.page_size, self.kv_cache_dim).unsqueeze(1)
+ 
+-        # Get metadata
+-        metadata = (
+-            getattr(forward_batch, "decode_trtllm_mla_metadata", None)
+-            or self.forward_decode_metadata
+-        )
+-
+-        # Backstop: metadata was built pre-pad (marked) and DP padding then
+-        # grew the batch. The marker path deliberately does not re-plan
+-        # post-pad (DSA can't rebuild on a padded batch, see #27091), so this
+-        # local re-plan catches the size mismatch.
+-        batch_size = getattr(metadata, "batch_size", None)
+-        if batch_size is not None and batch_size < forward_batch.batch_size:
+-            self.init_forward_metadata(forward_batch)
+-            metadata = forward_batch.decode_trtllm_mla_metadata
+-
+         if get_parallel().dcp_enabled:
+             return self._forward_decode_dcp(
+                 query, kv_cache, metadata, layer, forward_batch
+             )
++        if metadata.tail_split_rows > 0:
++            return self._forward_decode_tail_split(query, kv_cache, metadata, layer)
+ 
+         raw_out = self._run_decode_kernel(
+             query=query,
+diff -ruN -x __pycache__ -x '*.pyc' a/srt/models/kimi_k3.py b/srt/models/kimi_k3.py
+--- a/srt/models/kimi_k3.py	2026-09-25 03:47:00.343791594 -0700
++++ b/srt/models/kimi_k3.py	2026-09-25 04:36:59.319654893 -0700
+@@ -2333,10 +2333,8 @@
+             and not is_in_breakable_cuda_graph()
+             and (0 < hidden_states.shape[0] <= self._gate_bs_limit)
+         ):
+-            alt = self._gate_alt_stream
+-            alt.wait_stream(torch.cuda.current_stream())
+-            with torch.cuda.stream(alt):
+-                gate, _ = self.g_proj(hidden_states)
++            alt = torch.cuda.current_stream()  # EXP
++            gate, _ = self.g_proj(hidden_states)
+             self._gate_precomputed = (gate, alt)
+ 
+     def forward(

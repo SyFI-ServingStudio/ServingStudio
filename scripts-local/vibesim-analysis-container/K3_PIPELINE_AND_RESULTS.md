@@ -240,6 +240,25 @@ measured on GPU 7 while VibeSim B12a was JIT-filling kernels on the same device 
 3%**; the "60% gap" that motivated B12b was the contaminated table, and B12b was stopped (its uncommitted probe diff is
 kept at `codex_runs/b12b_uncommitted.patch`).
 
+### Campaign 5 — Claude Opus 5.5 (Bedrock) as the agent harness (2026-09-25 02:56 – 08:18)
+
+Same workload, goldens, judge and warm-start trees as the Codex runs; only the agent changed
+(image `rga-local/sglang-k3:v0520-claude`, `claude -p … --model us.anthropic.claude-opus-5-5`, 45-min budget,
+3 rounds per case, two cases at a time on separate free GPUs). Δ = latency change vs the round-1 seed (the same
+layer's decode best tree), judged with 5 reps; every accepted round passed CHECK against the pristine goldens.
+
+| case | Codex (3 clean rounds) | Claude (3 rounds) | what Claude found |
+|---|---|---|---|
+| KDA 512×8k | 0.0% (all null) | **675.2 → 600.4 µs (−11.1%)**, 1/3 PASS | the missing FlashInfer autotune warmup (harness gap, ≈9 pts) + vectorized bf16 state ld/st and launch bounds in the fused decode kernel; rounds 2–3 had further exact kernel gains lost to noise / a rel-0.02–0.03 reduction reorder |
+| MLA 512×8k | 0.0% (all null) | **976.3 → 877.8 µs (−10.1%)**, 3/3 PASS | autotune gap (≈6.4 pts) + fp8 KV-concat kernel + a wave-quantization fix (tail split of the persistent decode kernel) + output-gate/decode-tail overlap + residual add fused into the attention-residual TMA kernel |
+| MLA prefill 1×16k @ prefix 48k | — (no Codex rounds) | **12128.5 → 11229.3 µs (−7.4%)**, 2/3 PASS | one-pass fp8 K/V pack kernel replacing ~800 µs of elementwise glue; prefix attention on the CuTe-DSL JIT FMHA |
+| KDA prefill 1×16k first chunk | — | **9071.9 → 8564.0 µs (−5.6%)**, 1/3 PASS (−6.3% at prefix 48k) | strided chunk kernels (no activation copies) + host-sync removal; a CUDA h-scan kernel (−2.9% at the prefix point) stayed below the noise floor on the primary point |
+
+All Claude best trees re-passed under seeds 1 and 2 (rel err ≤ 0.017; table above). Both agents received the same
+VibeSim analysis and the same history KB; Claude used the KB explicitly (porting a lost round-2 kernel in round 3,
+citing prior dead ends) and repeatedly reached down to CUDA/Triton kernel changes where Codex stayed at Python
+dispatch and tuner knobs.
+
 ### Campaign 1 — the first 8 trials (superseded)
 
 0/8 passed. Best −2.9% @B=128 (KDA), −14.5% @1×1M (MLA, a secondary point then). These ran on a
@@ -445,6 +464,26 @@ whole −6% carries to B=512. Attempts to extend the small-m GEMM levers to m = 
 (TGV 8% slower on the front GEMM, 2% slower on shared-down). The chunked-prefill configuration has clean
 baselines (§3) but no rounds yet; the prefill step is GEMM-dominated at m = 16k, where none of the decode levers
 apply — the Claude prefill campaign starts once the prefill oracles are baked from B12.
+
+### 6.5 Claude Opus 5.5 campaign patches (on top of the decode best trees; chains validated against each case's best tree)
+
+| patch (under `patches/sglang/claude/`) | round | Δ latency (judge) | what it does |
+|---|---|---|---|
+| `mla_b512_01_r1_moe_autotune_kvconcat_satfinite.patch` (4 files, 242 lines) | MLA-b512 r1 | 976.3 → 904.6 (−7.3%) @512 | one-shot FlashInfer autotune of the MXFP4 MoE tactic (production warmup — harness gap, ≈6.4 pts) + fp8 `set_mla_kv_concat_q` with hardware satfinite convert and exact no-saturate fixup (17.8 → 8.0 µs) |
+| `mla_b512_02_r2_persistent_decode_tail_split.patch` (4 files, 334 lines) | MLA-b512 r2 | 904.6 → 888.0 (−1.8%) @512 | tail split for the persistent TRT-LLM MLA decode kernel: B = 148·3 + 68 leaves a last wave of 68 SMs; the trailing 68 requests' KV is split in halves (136 pseudo-requests) and merged by LSE (`mla_decode_tail_split.py`) |
+| `mla_b512_03_r3_outgate_tail_overlap_attnres_fused_add.patch` (5 files, 264 lines) | MLA-b512 r3 | 887.3 → 877.8 (−1.1%) @512, mixed −3.0% | output-gate GEMM launched into the MLA decode kernel's tail wave; pending residual add fused into the attention-residual TMA kernel (addend row in the TMA ring, add in registers) — exact for MLA |
+| `kda_b512_01_r1_moe_autotune_fused_decode_vector_ldst_bfa_overlap.patch` (3 files, 290 lines) | KDA-b512 r1 | 675.2 → 600.4 (−11.1%) @512 | one-shot MoE autotune (harness gap, ≈9 pts) + 8-byte vectorized bf16 state loads/stores and `__launch_bounds__` (min 5 blocks/SM) in the fused KDA decode kernel (92.6 → 83.0 µs) + bfa side-stream overlap limit 128 → 512 |
+| `mla_prefill_01_r1_kv_pack_quantize_fp8_attnres_fused_add.patch` (8 files, 233 lines) | MLA-prefill r1 | 12128.5 → 11573.4 (−4.6%) @16k, prefix 48k | Triton `mla_kv_pack_quantize_fp8`: one pass packs and fp8-quantizes K/V for the TRT-LLM ragged prefill (chunk and prefix) and casts Q once (replaces ~800 µs of elementwise glue); + the attention-residual fused add (418 → 361 µs at 16k tokens) |
+| `mla_prefill_02_r2_prefix_attention_cutedsl_fmha.patch` (2 files, 168 lines) | MLA-prefill r2 | 11538.6 → 11229.3 (−2.7%) | the non-causal prefix-attention pass moved from the TRT-LLM ragged FMHA to sglang's CuTe-DSL JIT FMHA with a full softmax correction (fp8 P prescale 2^8); rel 0.0156 |
+| `kda_prefill_01_r1_strided_chunk_kernels_no_copies_no_host_sync.patch` (8 files, 389 lines) | KDA-prefill r1 | 9071.9 → 8564.0 (−5.6%) first chunk, −6.3% @prefix 48k | the KDA chunk kernels (l2norm, gated norm, delta-rule `recompute_w_u`) accept strided inputs so three materialized copies of the 16k×(12×128) activations disappear; the `int(query_start_loc[-1])` host sync is dropped |
+| `UNACCEPTED_kda_prefill_r2_cuda_kda_chunk_h_hscan.patch` (3 files, 691 lines) | KDA-prefill r2 (not accepted) | −1.1% first chunk vs a 1.3% floor; −2.9% @prefix 48k | CUDA `kda_chunk_h` h-scan kernel replacing the Triton `chunk_delta_h` state recurrence (516 → 281 µs), gated to the small-grid prefill shape; bit-exact |
+
+Full paths: `/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/patches/sglang/claude/<name>`. Apply order per case: the seed is the same layer's decode best tree
+(`/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/patches/sglang/mla_best_tree_vs_pristine.patch` or `kda_best_tree_vs_pristine.patch` onto pristine), then the numbered
+Claude patches. Notes: the two `r1` b512 patches contain the one-shot MoE autotune that re-creates production's
+warmup — keep only their kernel parts when porting to a server that already autotunes; the KDA-b512 rounds 2–3
+kernel refinements (fused-decode reduction reordering) were rejected because they move the output by rel 0.02–0.03
+and are not shipped here; `UNACCEPTED_*` is exact and real but did not clear the judge's noise floor on the primary point.
 
 ### 6.4 Harness and VibeSim patches
 

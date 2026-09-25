@@ -1,9 +1,9 @@
 diff --git a/scripts-local/vibesim-analysis-container/build_opt_history.py b/scripts-local/vibesim-analysis-container/build_opt_history.py
 new file mode 100755
-index 0000000..01d2641
+index 0000000..5dd51f4
 --- /dev/null
 +++ b/scripts-local/vibesim-analysis-container/build_opt_history.py
-@@ -0,0 +1,229 @@
+@@ -0,0 +1,252 @@
 +#!/usr/bin/env python3
 +"""Build the Kimi-K3 optimization-history knowledge base (warm start for new workload cases).
 +
@@ -67,6 +67,25 @@ index 0000000..01d2641
 +    ("mla", 25): "ACCEPTED: is_var_seq=False (FlashInfer persistent TRT-LLM MLA schedule) for the fp8 K3 layout + 16-warp KV-concat CTA at B=1 (+0.8%); verified on a mixed-length batch (rel 0.0046, -7.4% there)",
 +    ("mla", 26): "null: cutedsl_bf16_gemm.py tweak, 0.0%",
 +    ("mla", 27): "null: fused finalize+shared JIT kernel regressed and was reverted; flashinfer_trtllm.py tweak 0.0% (MLA plateau)",
++    ("kda_b512", 1): "Codex: null (+1.2% < 1.5% need under fill noise); MoE tuner ceiling, route+quant JITs inactive",
++    ("kda_b512", 2): "Codex: null 0.0%; bf16-act MXFP4 (no kernel), route+pack+quant, TMA stages, tuner ceiling",
++    ("kda_b512", 3): "Codex: null +0.1%; in-kernel TRT-LLM routing re-routed 2/512 tokens (CHECK FAIL), SiTU bf16 (no kernel)",
++    ("mla_b512", 1): "INFRA NOISE (concurrent VibeSim profiling on the GPU); not a result",
++    ("mla_b512", 2): "Codex: null 0.00%; tactic buckets, PDL, low-priority overlap (-1us), bf16 front GEMM (numerics FAIL)",
++    ("mla_b512", 3): "Codex: null +0.17%; route+quant cap 64->512 (-1.5us kept), TGV at m=512 8%/2% SLOWER (reverted)",
++    ("mla_b512", 4): "Codex: null 0.00%; PDL policy regressed, var-seq scheduler neutral",
++    ("kda_b512_claude", 1): "ACCEPTED (Claude Opus 5.5): one-shot MXFP4 MoE autotune when rows/expert>8 (= production warmup, HARNESS GAP ~9 pts) + vectorized bf16 state ld/st & launch_bounds in kda_fused_decode.cuh (92.6->83.0us, real) + bfa overlap limit 128->512: 675.2->600.4 @512, exact",
++    ("kda_b512_claude", 2): "Claude: FAIL by noise (+1.4% @512 exact vs 3.65% need, sigma 7.3us): fused-kernel prologue load hoist + quad-row warp reduction (80.4->76.6us) -- real but lost",
++    ("mla_b512_claude", 2): "ACCEPTED (Claude): tail split of the persistent MLA decode kernel's last wave (B=148*3+68 -> split 68 trailing requests into 136 half-KV pseudo-requests, LSE merge; mla_decode_tail_split.py): 904.6->888.0 @512, exact",
++    ("kda_b512_claude", 3): "Claude: FAIL correctness (rel 0.029/0.022/0.021, 8/1/1 rows over tol) -- attn-res TMA fused residual add (fp32 add + RNE) changes rounding; the r2 kernel port (via the KB) and routed-before-shared capture order were exact (-3.1% total @512)",
++    ("mla_prefill_claude", 3): "Claude: null (re-judged clean after a foreign-job-noise verdict): -0.5% @pf49152, +2.0% 4x4k; agent hit its cap without an accepted change",
++    ("mla_prefill_claude", 2): "ACCEPTED (Claude): non-causal prefix attention TRT-LLM ragged FMHA -> sglang CuTe-DSL JIT FMHA with full softmax correction (fp8 P prescale 2^8): 11539->11229 @pf49152 (-2.7%), rel 0.0156",
++    ("kda_prefill_claude", 3): "Claude: FAIL below 3-sigma (+0.95% first chunk vs 1.71% need; +2.2% @pf49152; correct); no agent log, tree carries the r2 h-scan kernel",
++    ("kda_prefill_claude", 2): "Claude: FAIL below 3-sigma (+1.07% first chunk vs 1.33% need; +2.9% @pf49152, +1.7% 4x4k; bit-exact): CUDA kda_chunk_h h-scan kernel replacing Triton chunk_delta_h (516->281us) -- real, worth porting",
++    ("kda_prefill_claude", 1): "ACCEPTED (Claude, re-judged after a GPU-2 OOM): KDA prefill copy removal (strided l2norm q/k, strided o_norm gate, strided v in recompute_w_u) + dropped int(query_start_loc[-1]) host sync; 9007->8584 self-measured, bit-exact; first judge OOM'd (tenant on GPU 2), re-judged",
++    ("mla_prefill_claude", 1): "ACCEPTED (Claude): Triton mla_kv_pack_quantize_fp8 (one-pass K/V pack + fp8 quant for chunk+prefix, Q cast once; replaces ~800us elementwise) + residual add fused into attn-res TMA (418->361us @16k): 12128->11573 @pf49152 (-4.6%), -4.0% first chunk, -2.6% 4x4k; bit-exact",
++    ("mla_b512_claude", 3): "ACCEPTED (Claude): output-gate GEMM launched into the MLA decode kernel's tail wave + pending residual add fused into the attn-res TMA kernel (addend in the TMA ring): 887.3->877.8 @512, mixed -3.0%, exact",
++    ("mla_b512_claude", 1): "ACCEPTED (Claude Opus 5.5): tuned MoE tactic (HARNESS GAP ~6.4 pts) + fp8 set_mla_kv_concat_q satfinite cvt + exact NOSAT fixup (17.8->8.0us, real): 976.3->904.6 @512, exact; merged-front split rejected (slower)",
 +}
 +CAMPAIGN1 = {("kda", k) for k in (4, 5, 6, 7)} | {("mla", k) for k in (4, 5, 6, 7)}
 +
@@ -210,11 +229,12 @@ index 0000000..01d2641
 +def main():
 +    ap = argparse.ArgumentParser()
 +    ap.add_argument("--out", default=str(HERE / "k3_opt_history"))
-+    ap.add_argument("--cases", default="kda,mla,kda_b512,mla_b512,kda_prefill,mla_prefill")
++    ap.add_argument("--cases", default="kda,mla,kda_b512,mla_b512,kda_b512_claude,mla_b512_claude,kda_prefill,mla_prefill,kda_prefill_claude,mla_prefill_claude")
 +    a = ap.parse_args()
-+    out = pathlib.Path(a.out)
-+    if out.exists():
-+        shutil.rmtree(out)
++    final = pathlib.Path(a.out)
++    # build into a sibling temp dir and rsync into place: the final dir is bind-mounted read-only into
++    # running agent containers, so it must never disappear while a trial is in flight.
++    out = final.parent / (final.name + ".build"); shutil.rmtree(out, ignore_errors=True)
 +    (out / "trials").mkdir(parents=True)
 +    hist = []
 +    for case in a.cases.split(","):
@@ -225,6 +245,9 @@ index 0000000..01d2641
 +    if tech.exists():
 +        shutil.copy(tech, out / "TECHNIQUES.md")
 +    write_index(out, hist)
++    final.mkdir(exist_ok=True)
++    subprocess.run(["rsync", "-a", "--delete", str(out) + "/", str(final) + "/"], check=True)
++    shutil.rmtree(out); out = final
 +    n_pass = sum(1 for r in hist if r["verdict"] == "PASS")
 +    print(f"wrote {out}: {len(hist)} trials ({n_pass} PASS), "
 +          f"{sum(1 for p in out.rglob('agent_iterations.md'))} agent_iterations.md, "

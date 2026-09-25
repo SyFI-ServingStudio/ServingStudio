@@ -10,6 +10,11 @@ Regenerate with `./export_k3_patches.sh` (validates that each sglang chain repro
   cumulative 403.0 -> 379.4 us @B=128, -5.9%). `sglang/kda_best_tree_vs_pristine.patch` cumulative.
 - These trees also passed: two extra seeds each (rel_err <= 0.011), the MLA mixed-length point, and the
   B=512/256 transfer checks (see K3_PIPELINE_AND_RESULTS.md).
+- `sglang/claude/`: the Claude Opus 5.5 campaign chains on top of the decode best trees (seed = the same layer's
+  best tree): MLA-b512 r1-r3 (976.3 -> 877.8 us @512x8k), KDA-b512 r1 (675.2 -> 600.4), MLA-prefill r1-r2
+  (12128 -> 11229 us @16k chunk with 48k prefix), KDA-prefill r1 (9072 -> 8564 us). Each chain is validated against
+  the case's best_tree. The r1 b512 patches include the one-shot MoE autotune that reproduces production's warmup
+  (harness gap; see the write-up). UNACCEPTED_*: exact but below the judge's 3-sigma floor.
 
 ## harness (workspace branch `kimi-k3-loop`, vs base `c252264`)
 - `harness/01_driver_*.patch`: the single-layer extractor/driver (CUDA-graph metric, goldens, prefill points, ...).

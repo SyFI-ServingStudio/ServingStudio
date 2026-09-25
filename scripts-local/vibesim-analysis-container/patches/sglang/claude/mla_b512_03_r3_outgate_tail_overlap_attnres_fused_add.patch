@@ -1,0 +1,428 @@
+diff -ruN -x __pycache__ -x '*.pyc' a/kernels/jit/csrc/kimi_k3/attn_res/fused_tma.cuh b/kernels/jit/csrc/kimi_k3/attn_res/fused_tma.cuh
+--- a/kernels/jit/csrc/kimi_k3/attn_res/fused_tma.cuh	2026-09-18 02:16:55.000000000 -0700
++++ b/kernels/jit/csrc/kimi_k3/attn_res/fused_tma.cuh	2026-09-25 05:09:14.713927535 -0700
+@@ -178,6 +178,8 @@
+   // Optional fused NVLS reduce-scatter source. When input_mc is non-null,
+   // the producer warp materializes this rank's reduced token shard plus the
+   // local residual into prefix_sum/prefix_out before TMA consumes it.
++  // The fused local add (kFuseAdd traits) reuses residual/prefix_out: the
++  // aggregated prefix row is prefix_sum + residual, stored to prefix_out.
+   const uint8_t* input_mc;
+   const bf16_t* residual;
+   bf16_t* prefix_out;
+@@ -191,13 +193,24 @@
+   uint32_t num_tokens;
+ };
+ 
+-template <int64_t kDim_, uint32_t kNumBankRows_, uint32_t kChunkRows_, uint32_t kConsumerRegs_ = 0>
++template <
++    int64_t kDim_,
++    uint32_t kNumBankRows_,
++    uint32_t kChunkRows_,
++    uint32_t kConsumerRegs_ = 0,
++    bool kFuseAdd_ = false>
+ struct KimiK3AttnResTrait {
+  public:
+   static constexpr int64_t kDim = kDim_;
+   static constexpr int64_t kTile = 1024;               // one warp-group-wide 16B sweep
+   static constexpr uint32_t kNumRows = kNumBankRows_;  // bank rows; +1 prefix row
+   static constexpr uint32_t kChunkRows = kChunkRows_;  // rows per chunk (one pull pair per chunk)
++  // Fused pending residual add: the producer bulk-copies the addend row into
++  // one extra row of the last chunk's slot, the consumers add it onto the
++  // prefix row in registers (fp32 add, one RNE rounding: bit-exact with the
++  // unfused torch bf16 add) and store the sum to prefix_out.
++  static constexpr bool kFuseAdd = kFuseAdd_;
++  static constexpr uint32_t kSlotRows = kChunkRows + (kFuseAdd ? 1 : 0);
+   // Chunk slots in the smem ring. Frozen at 2 (double buffering): 1 stalls
+   // the producer behind the consumers (~10% slower), >2 gains nothing and
+   // costs smem at small T.
+@@ -245,7 +258,7 @@
+     // token's first score reduction.
+     float warp_ssq[kNumConsumerWarps];
+     uint32_t tmem_base;
+-    alignas(128) bf16_t buf[kNumStages][kChunkRows][kDim];
++    alignas(128) bf16_t buf[kNumStages][kSlotRows][kDim];
+   };
+ 
+   static SGL_DEVICE void forward(const AttnResTMAParams& params, Smem* smem);
+@@ -268,8 +281,8 @@
+   return reinterpret_cast<const float2&>(result);
+ }
+ 
+-template <int64_t kDim_, uint32_t kNumBankRows_, uint32_t kChunkRows_, uint32_t kConsumerRegs_>
+-SGL_DEVICE void KimiK3AttnResTrait<kDim_, kNumBankRows_, kChunkRows_, kConsumerRegs_>::forward(
++template <int64_t kDim_, uint32_t kNumBankRows_, uint32_t kChunkRows_, uint32_t kConsumerRegs_, bool kFuseAdd_>
++SGL_DEVICE void KimiK3AttnResTrait<kDim_, kNumBankRows_, kChunkRows_, kConsumerRegs_, kFuseAdd_>::forward(
+     const AttnResTMAParams& params, Smem* smem) {
+   using namespace device;
+   using row_vec_t = AlignedVector<bf16x2_t, kVecElems / 2>;  // 16 bytes
+@@ -304,7 +317,8 @@
+             ptx::mbar_wait_parity(&smem->bar_free[slot], phase ^ 1);
+           }
+           // One pull per chunk; each row still gets its own bulk copy.
+-          ptx::mbar_arrive_expect_tx(&smem->bar_full[slot], an * kRowBytes);
++          const bool add_row = kFuseAdd && base_row + an == kNumRows + 1;
++          ptx::mbar_arrive_expect_tx(&smem->bar_full[slot], (an + (add_row ? 1 : 0)) * kRowBytes);
+ #pragma unroll
+           for (uint32_t r = 0; r < an; ++r) {
+             const auto row = base_row + r;
+@@ -315,6 +329,10 @@
+             if (token == blockIdx.x && row == kNumRows) PDLWaitPrimary<true>();
+             ptx::cp_async_bulk_1d_load(&smem->buf[slot][r], src, kRowBytes, &smem->bar_full[slot]);
+           }
++          if (add_row) {
++            ptx::cp_async_bulk_1d_load(
++                &smem->buf[slot][kChunkRows], params.residual + token * kDim, kRowBytes, &smem->bar_full[slot]);
++          }
+         }
+       }
+       PDLTriggerSecondary<true>();
+@@ -394,6 +412,19 @@
+           for (uint32_t r = 0; r < an; ++r) {
+             rows[si][r].load(&smem->buf[slot][r][offset]);
+           }
++          if constexpr (kFuseAdd) {
++            if (base_row + an == kNumRows + 1) {
++              const uint32_t pr = kNumRows - base_row;
++              row_vec_t addend;
++              addend.load(&smem->buf[slot][kChunkRows][offset]);
++#pragma unroll
++              for (uint32_t j = 0; j < kVecElems / 2; ++j) {
++                const auto x = cast<float2>(rows[si][pr][j]);
++                const auto y = cast<float2>(addend[j]);
++                rows[si][pr][j] = cast<bf16x2_t>(make_float2(x.x + y.x, x.y + y.y));
++              }
++            }
++          }
+ #pragma unroll
+           for (uint32_t r = 0; r < an; ++r) {
+ #pragma unroll
+@@ -410,6 +441,16 @@
+         // already in registers; snapshot it to bank row nvb with plain
+         // stores — the .write() copy kernel disappears. Placed after the
+         // arrive so the slot handoff is not delayed.
++        if (kFuseAdd && base_row + an == kNumRows + 1) {
++          const uint32_t pr = kNumRows - base_row;
++          auto* dst = params.prefix_out + static_cast<int64_t>(token) * kDim;
++#pragma unroll
++          for (uint32_t si = 0; si < kSlicesPerGroup; ++si) {
++            const auto tile = si * kNumGroups + group;
++            if (tile >= kNumTiles) continue;
++            rows[si][pr].store(dst, tile * (kTile / kVecElems) + tid_in_group);
++          }
++        }
+         if (params.prefix_dst != nullptr && base_row + an == kNumRows + 1) {
+           const uint32_t pr = kNumRows - base_row;
+           auto* dst = params.prefix_dst + static_cast<int64_t>(token) * params.stride_bm;
+@@ -676,6 +717,15 @@
+         nullptr, attn_res_fused_direct_ag_kernel<Trait<I + 1>, kOccupancy>...};
+   }
+   static constexpr auto kAgTable = make_ag_table(std::make_index_sequence<kMaxBankRows>{});
++  template <uint32_t kNvb>
++  using AddTrait = KimiK3AttnResTrait<kDim, kNvb, kChunkRows, kConsumerRegs, /*kFuseAdd=*/true>;
++  static constexpr size_t kAddSmemBytes = sizeof(typename AddTrait<1>::Smem);
++  static_assert(kOccupancy * kAddSmemBytes <= 233472 - 1024, "occupancy exceeds the smem budget (fused add)");
++  template <std::size_t... I>
++  static constexpr auto make_add_table(std::index_sequence<I...>) {
++    return std::array<KernelFn, kMaxBankRows + 1>{nullptr, attn_res_fused_tma_kernel<AddTrait<I + 1>, kOccupancy>...};
++  }
++  static constexpr auto kAddTable = make_add_table(std::make_index_sequence<kMaxBankRows>{});
+ 
+   static void
+   run(const tvm::ffi::TensorView prefix_sum,
+@@ -751,6 +801,79 @@
+     LaunchKernel(grid, kNumThreads, device.unwrap(), kSmemBytes).enable_pdl(true)(kTable[nvb], params);
+   }
+ 
++  // run() with the pending residual add fused in: aggregates the prefix
++  // input + residual and also stores it to prefix_out.
++  static void run_add(
++      const tvm::ffi::TensorView input,
++      const tvm::ffi::TensorView residual,
++      const tvm::ffi::TensorView bank,
++      const tvm::ffi::TensorView cw,
++      const tvm::ffi::TensorView ow,
++      const tvm::ffi::TensorView out,
++      const tvm::ffi::TensorView prefix_out,
++      int64_t nvb,
++      double eps,
++      bool write_prefix) {
++    using namespace host;
++
++    auto T_ = SymbolicSize{"num_tokens"};
++    auto H_ = SymbolicSize{"hidden_size"};
++    auto NB_ = SymbolicSize{"num_bank_slots"};
++    auto device = SymbolicDevice{};
++    device.set_options<kDLCUDA>();
++
++    TensorMatcher({T_, H_})
++        .with_dtype<bf16_t>()
++        .with_device(device)
++        .verify(input)
++        .verify(residual)
++        .verify(out)
++        .verify(prefix_out);
++    TensorMatcher({T_, NB_, H_}).with_dtype<bf16_t>().with_device(device).verify(bank);
++    TensorMatcher({H_}).with_dtype<bf16_t>().with_device(device).verify(cw).verify(ow);
++
++    const auto num_tokens = static_cast<int64_t>(T_.unwrap());
++    const auto H = static_cast<int64_t>(H_.unwrap());
++    const auto NB = static_cast<int64_t>(NB_.unwrap());
++
++    RuntimeCheck(H == kDim, "attn_res_fused_add: H must be ", kDim, ", got ", H);
++    RuntimeCheck(1 <= nvb && nvb <= kMaxBankRows && nvb <= NB, "attn_res_fused_add: invalid nvb=", nvb, " NB=", NB);
++    RuntimeCheck(!write_prefix || nvb < NB, "attn_res_fused_add: write_prefix targets bank row nvb, needs nvb < NB");
++
++    if (num_tokens == 0) return;
++
++    [[maybe_unused]] static const bool attrs_set = [] {
++      for (uint32_t i = 1; i <= kMaxBankRows; ++i) {
++        RuntimeDeviceCheck(
++            cudaFuncSetAttribute(kAddTable[i], cudaFuncAttributeMaxDynamicSharedMemorySize, kAddSmemBytes));
++      }
++      return true;
++    }();
++
++    const auto num_sm = runtime::get_sm_count(device.unwrap().device_id);
++    const auto grid = std::min<int64_t>((int64_t)num_sm * kOccupancy, num_tokens);
++    const auto params = AttnResTMAParams{
++        .prefix_sum = static_cast<const bf16_t*>(input.data_ptr()),
++        .bank = static_cast<const bf16_t*>(bank.data_ptr()),
++        .cw = static_cast<const bf16_t*>(cw.data_ptr()),
++        .ow = static_cast<const bf16_t*>(ow.data_ptr()),
++        .out = static_cast<bf16_t*>(out.data_ptr()),
++        .prefix_dst = write_prefix ? static_cast<bf16_t*>(bank.data_ptr()) + nvb * H : nullptr,
++        .input_mc = nullptr,
++        .residual = static_cast<const bf16_t*>(residual.data_ptr()),
++        .prefix_out = static_cast<bf16_t*>(prefix_out.data_ptr()),
++        .sem_local = nullptr,
++        .sem_mc = nullptr,
++        .output_mc = nullptr,
++        .world_size = 0,
++        .rank = 0,
++        .stride_bm = NB * H,
++        .eps = static_cast<float>(eps),
++        .num_tokens = static_cast<uint32_t>(num_tokens),
++    };
++    LaunchKernel(grid, kNumThreads, device.unwrap(), kAddSmemBytes).enable_pdl(true)(kAddTable[nvb], params);
++  }
++
+   static void run_pull_rs(
+       CommunicatorRef ref,
+       const tvm::ffi::TensorView input,
+diff -ruN -x __pycache__ -x '*.pyc' a/kernels/ops/kimi_k3/attn_res.py b/kernels/ops/kimi_k3/attn_res.py
+--- a/kernels/ops/kimi_k3/attn_res.py	2026-09-18 02:16:55.000000000 -0700
++++ b/kernels/ops/kimi_k3/attn_res.py	2026-09-25 05:05:19.561620928 -0700
+@@ -55,6 +55,7 @@
+             cuda_files=["kimi_k3/attn_res/fused_tma.cuh"],
+             cuda_wrappers=[
+                 ("run", f"AttnResFusedTmaKernel<{args}>::run"),
++                ("run_add", f"AttnResFusedTmaKernel<{args}>::run_add"),
+                 ("run_pull_rs", f"AttnResFusedTmaKernel<{args}>::run_pull_rs"),
+                 ("run_direct_ag", f"AttnResFusedTmaKernel<{args}>::run_direct_ag"),
+             ],
+@@ -188,6 +189,29 @@
+     )
+ 
+ 
++def attn_res_fused_tma_add(
++    input: torch.Tensor,
++    residual: torch.Tensor,
++    bank: torch.Tensor,
++    cw: torch.Tensor,
++    ow: torch.Tensor,
++    out: torch.Tensor,
++    prefix_out: torch.Tensor,
++    nvb: int,
++    eps: float,
++    *,
++    write_prefix: bool = False,
++) -> None:
++    """attn_res_fused_tma with the pending residual add fused in: aggregates
++    prefix_out = input + residual (fp32 add, one bf16 rounding -- bit-exact
++    with the unfused torch add), which each CTA materializes for its own
++    tokens before its aggregation pass. Same restrictions as
++    attn_res_fused_tma; input / residual / prefix_out are [T, H] bf16."""
++    _jit_fused_tma_module(*_tuning(nvb, input.shape[0])).run_add(
++        input, residual, bank, cw, ow, out, prefix_out, nvb, eps, write_prefix
++    )
++
++
+ @register_custom_op(mutates_args=["bank", "out"])
+ def _attn_res_fused_direct_ag_op(
+     world_size: int,
+diff -ruN -x __pycache__ -x '*.pyc' a/srt/layers/attention/trtllm_mla_backend.py b/srt/layers/attention/trtllm_mla_backend.py
+--- a/srt/layers/attention/trtllm_mla_backend.py	2026-09-25 04:36:18.715029581 -0700
++++ b/srt/layers/attention/trtllm_mla_backend.py	2026-09-25 04:53:04.899417605 -0700
+@@ -1112,10 +1112,13 @@
+         single-token verify and draft-extend that ``q_len`` alone lets through
+         (only plain decode requests the LSE the cross-rank merge needs).
+         """
+-        _h = getattr(layer, "_proto_hook", None)
+-        if _h is not None:
+-            layer._proto_hook = None
+-            _h()
++        # Model hook: runs before the decode kernel launch and may return a
++        # callable to issue side-stream work right after it.
++        hook = getattr(layer, "_pre_decode_kernel_hook", None)
++        post_launch = None
++        if hook is not None:
++            layer._pre_decode_kernel_hook = None
++            post_launch = hook()
+         q_len = query.shape[1] if query.dim() == 4 else 1
+         if get_parallel().dcp_enabled and (
+             q_len > 1 or causal_seqs is not None or not return_lse
+@@ -1146,7 +1149,7 @@
+             )
+             if self._fixed_len_decode:
+                 extra_kwargs["is_var_seq"] = False
+-        return flashinfer.decode.trtllm_batch_decode_with_kv_cache_mla(
++        result = flashinfer.decode.trtllm_batch_decode_with_kv_cache_mla(
+             query=query,
+             kv_cache=kv_cache,
+             enable_pdl=_ENABLE_PDL,
+@@ -1162,6 +1165,9 @@
+             skip_softmax_threshold_scale_factor=envs.SGLANG_SKIP_SOFTMAX_DECODE_THRESHOLD_SCALE_FACTOR.get(),
+             **extra_kwargs,
+         )
++        if post_launch is not None:
++            post_launch()
++        return result
+ 
+     def _run_prefill_kernel(
+         self,
+diff -ruN -x __pycache__ -x '*.pyc' a/srt/layers/attn_residual.py b/srt/layers/attn_residual.py
+--- a/srt/layers/attn_residual.py	2026-09-18 02:16:55.000000000 -0700
++++ b/srt/layers/attn_residual.py	2026-09-25 05:05:19.561620928 -0700
+@@ -117,6 +117,41 @@
+     return out
+ 
+ 
++def _aggregate_fast_add(
++    prefix_a: torch.Tensor,
++    prefix_b: torch.Tensor,
++    bank: torch.Tensor,
++    nvb: int,
++    score_proj: ReplicatedLinear,
++    score_norm: RMSNorm,
++    out_norm: RMSNorm,
++    write_bank_row: bool = False,
++) -> tuple[torch.Tensor, torch.Tensor]:
++    """_aggregate_fast over prefix = prefix_a + prefix_b, with the add fused
++    into the kernel (bit-exact with the torch bf16 add). Returns
++    (normed, prefix)."""
++    from sglang.kernels.ops.kimi_k3.attn_res import attn_res_fused_tma_add
++
++    assert score_norm.variance_epsilon == out_norm.variance_epsilon
++
++    cw = get_cw(score_proj, score_norm, dtype=torch.bfloat16)
++    prefix = torch.empty_like(prefix_a)
++    out = torch.empty_like(prefix_a)
++    attn_res_fused_tma_add(
++        prefix_a,
++        prefix_b,
++        bank,
++        cw,
++        out_norm.weight,
++        out,
++        prefix,
++        nvb,
++        score_norm.variance_epsilon,
++        write_prefix=write_bank_row,
++    )
++    return out, prefix
++
++
+ @triton.jit
+ def _score_kernel(
+     prefix_ptr,  # [T, H]
+@@ -376,6 +411,25 @@
+             prefix_a,
+             prefix_b,
+             bank,
++            nvb,
++            score_proj,
++            score_norm,
++            out_norm,
++            write_bank_row=write_bank_row,
++        )
++    if (
++        _use_fast(prefix_a.shape[1])
++        and prefix_a.shape[0] > 0
++        and prefix_a.is_contiguous()
++        and prefix_b.is_contiguous()
++        and prefix_a.dtype == prefix_b.dtype == torch.bfloat16
++    ):
++        # The TMA kernel materializes the prefix itself (one launch, the add
++        # no longer a separate memory pass ahead of it).
++        return _aggregate_fast_add(
++            prefix_a,
++            prefix_b,
++            bank,
+             nvb,
+             score_proj,
+             score_norm,
+diff -ruN -x __pycache__ -x '*.pyc' a/srt/models/kimi_k3.py b/srt/models/kimi_k3.py
+--- a/srt/models/kimi_k3.py	2026-09-25 04:36:59.319654893 -0700
++++ b/srt/models/kimi_k3.py	2026-09-25 05:02:42.660787379 -0700
+@@ -2317,12 +2317,15 @@
+             return AttnForwardMethod.MLA
+         return method
+ 
+-    def _precompute_output_gate(self, hidden_states: torch.Tensor) -> None:
+-        """Issue the output-gate GEMM on the alt stream so it overlaps the
++    def _precompute_output_gate(self, hidden_states: torch.Tensor):
++        """Fork the output-gate GEMM onto the alt stream so it overlaps the
+         attention core; the lazy path in the o_proj wrap otherwise computes
+         it on the critical path right before the gate multiply. The gate
+         tensor stays referenced via _gate_precomputed until the wrap joins,
+-        so its memory cannot be reused while the alt stream still writes."""
++        so its memory cannot be reused while the alt stream still writes.
++
++        Returns the launch callable (run after the decode attention kernel
++        has been enqueued), or None when the lazy path is used."""
+         self._gate_precomputed = None
+         if (
+             self._gate_alt_stream is not None
+@@ -2333,9 +2336,19 @@
+             and not is_in_breakable_cuda_graph()
+             and (0 < hidden_states.shape[0] <= self._gate_bs_limit)
+         ):
+-            alt = torch.cuda.current_stream()  # EXP
+-            gate, _ = self.g_proj(hidden_states)
+-            self._gate_precomputed = (gate, alt)
++            # Fork before the attention kernel but launch after it: the gate
++            # GEMM then fills the SMs the decode kernel's last wave leaves
++            # idle instead of running serially ahead of it.
++            alt = self._gate_alt_stream
++            alt.wait_stream(torch.cuda.current_stream())
++
++            def _launch_gate():
++                with torch.cuda.stream(alt):
++                    gate, _ = self.g_proj(hidden_states)
++                self._gate_precomputed = (gate, alt)
++
++            return _launch_gate
++        return None
+ 
+     def forward(
+         self,
+@@ -2357,9 +2370,15 @@
+             zero_allocator=zero_allocator,
+             **kwargs,
+         )
+-        # Issue the gate GEMM after the q/kv projections so it only competes with the attention core.
+-        self.attn_mqa._proto_hook = lambda: self._precompute_output_gate(hidden_states)
+-        return self.forward_core(state)
++        # Fork the gate GEMM right before the decode attention kernel.
++        self.attn_mqa._pre_decode_kernel_hook = lambda: (
++            self._precompute_output_gate(hidden_states)
++        )
++        try:
++            return self.forward_core(state)
++        finally:
++            # Paths without a trtllm decode launch never consume the hook.
++            self.attn_mqa._pre_decode_kernel_hook = None
+ 
+ 
+ class KimiK3DecoderLayer(nn.Module):

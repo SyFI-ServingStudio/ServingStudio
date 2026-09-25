@@ -1,3 +1,38 @@
+diff --git a/scripts-local/vibesim-analysis-container/after_b12b_claude_prefill.sh b/scripts-local/vibesim-analysis-container/after_b12b_claude_prefill.sh
+new file mode 100755
+index 0000000..d7163ae
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/after_b12b_claude_prefill.sh
+@@ -0,0 +1,29 @@
++#!/usr/bin/env bash
++# Replaces the tail of launch_b12b_then_prefill.sh (stopped 02:50 when the user switched the agent to Claude):
++# wait for the running Codex B12b process, fast-forward main/ kimi-k3, re-bake the oracle image with the prefill
++# predictions, start 8805/8806, then run the PREFILL campaign with the Claude agent (cases *_prefill_claude).
++# Usage: after_b12b_claude_prefill.sh <b12b_codex_pid> <first_round_k> <n_rounds>
++set -uo pipefail
++HERE="$(cd "$(dirname "$0")" && pwd)"
++WT=/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/main-k3-rust
++C_PID="$1"; K0="$2"; N="$3"
++while kill -0 "$C_PID" 2>/dev/null; do sleep 60; done
++echo "==== $(date +%F_%T) B12b codex exited; HEAD $(git -C "$WT" log --oneline -1)"
++[ -n "$(git -C "$WT" status --short | grep -v '^??')" ] && echo "!! B12b left an uncommitted tree (needs review); baking HEAD"
++cd /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/main && git merge --ff-only kimi-k3-arch 2>&1 | tail -1
++echo "==== $(date +%F_%T) baking oracle image incl. prefill predictions"
++if "$HERE/build_context_k3.sh" > "$HERE/k3_prefill_bake.log" 2>&1 \
++   && sed 's#COPY context/#COPY context_k3/#' "$HERE/Dockerfile" | docker build -q -t vibesim-analysis:k3 -f - "$HERE" >> "$HERE/k3_prefill_bake.log" 2>&1; then
++  for spec in k3_kda_prefill:8805 k3_mla_prefill:8806; do
++    run="${spec%%:*}"; port="${spec##*:}"
++    docker rm -f "vibesim_oracle_${run}" >/dev/null 2>&1 || true
++    docker run -d --name "vibesim_oracle_${run}" -e VIBESIM_PREBAKED_RUN="$run" -e VIBESIM_API_PORT="$port" \
++      -p "172.17.0.1:${port}:${port}" vibesim-analysis:k3 >/dev/null
++  done
++  sleep 25
++  for port in 8805 8806; do printf "oracle %s: " "$port"; curl -s "http://172.17.0.1:$port/api/v1/analyze?level=run_summary" | head -c 120; echo; done
++else
++  echo "!! prefill oracle bake failed (k3_prefill_bake.log)"; exit 1
++fi
++echo "==== $(date +%F_%T) handing over to the Claude prefill campaign"
++CASE_SUFFIX=prefill_claude exec "$HERE/run_k3_prefill_when_free.sh" "$K0" "$N"
 diff --git a/scripts-local/vibesim-analysis-container/after_b9_fill.sh b/scripts-local/vibesim-analysis-container/after_b9_fill.sh
 new file mode 100755
 index 0000000..12e32a6
@@ -270,10 +305,10 @@ index 0000000..153d367
 +echo "==== $(date +%F_%T) finish_b12 done"
 diff --git a/scripts-local/vibesim-analysis-container/k3_prefill_profiles.sh b/scripts-local/vibesim-analysis-container/k3_prefill_profiles.sh
 new file mode 100755
-index 0000000..4ea35f4
+index 0000000..458417f
 --- /dev/null
 +++ b/scripts-local/vibesim-analysis-container/k3_prefill_profiles.sh
-@@ -0,0 +1,25 @@
+@@ -0,0 +1,27 @@
 +#!/usr/bin/env bash
 +# Measure the pristine tree at the chunked-prefill case points on GPU 7 (shared, user-authorized) and
 +# dump per-kernel tables: evidence for VibeSim B12 (prefill kinds/worklets/presets). Not a judge run.
@@ -282,6 +317,8 @@ index 0000000..4ea35f4
 +set -uo pipefail
 +HERE="$(cd "$(dirname "$0")" && pwd)"
 +GPU="${K3_GPU_INDEX:-7}"
++TAG="${PROFILE_TAG:-prefill}"          # output name prefix (prefill | prefill_v2 ...)
++EXTRA="${EXTRA_FLAGS:-}"               # e.g. "--bf16-gemm-init --flashinfer-autotune" (production dispatch)
 +OUTD="$HERE/kimi_single_layer"; mkdir -p "$OUTD/profiles"
 +COMMON="--moe-backend flashinfer_mxfp4 --attn-heads 12 --experts 112 --ep 8 --local-topk 2 --hidden-scale 1.0 --cuda-graph --iters 20 --warmup 5"
 +run () { # $1 case, $2 attn args, $3 points
@@ -291,14 +328,14 @@ index 0000000..4ea35f4
 +    -v "$HERE/kimi_single_layer_decode.py:/tmp/kimi_single_layer_decode.py:ro" -v "$OUTD:/out" \
 +    --workdir /tmp lmsysorg/sglang:v0.5.20 \
 +    python3 /tmp/kimi_single_layer_decode.py --point "$3" $2 $COMMON \
-+      --profile-kernels "/out/profiles/prefill_$1.json" --json-out "/out/result_prefill_$1.json" 2>&1 \
++      $EXTRA --profile-kernels "/out/profiles/${TAG}_$1.json" --json-out "/out/result_${TAG}_$1.json" 2>&1 \
 +    | grep -E "JSON|\[time\]|\[profile\]|FAILED|Traceback|Error"
 +}
 +echo "==== $(date +%F_%T) KDA prefill profiles"
 +run kda "--attn-type kda" "1,16384,pf;1,16384,pf49152;4,4096,pf"
 +echo "==== $(date +%F_%T) MLA prefill profiles"
 +run mla "--attn-type mla --attention-backend cutedsl_mla --kv-cache-dtype fp8_e4m3" "1,16384,pf49152;1,16384,pf;4,4096,pf"
-+echo "==== $(date +%F_%T) done"; ls -la "$OUTD"/profiles/prefill_* "$OUTD"/result_prefill_* 2>/dev/null
++echo "==== $(date +%F_%T) done"; ls -la "$OUTD"/profiles/${TAG}_* "$OUTD"/result_${TAG}_* 2>/dev/null
 diff --git a/scripts-local/vibesim-analysis-container/launch_b12_after_b12a.sh b/scripts-local/vibesim-analysis-container/launch_b12_after_b12a.sh
 new file mode 100755
 index 0000000..c273b2e
@@ -386,7 +423,7 @@ index 0000000..7672fdb
 +echo "==== $(date +%F_%T) 8804 restarted"
 diff --git a/scripts-local/vibesim-analysis-container/recheck_best_trees_seeds.sh b/scripts-local/vibesim-analysis-container/recheck_best_trees_seeds.sh
 new file mode 100755
-index 0000000..c4e474e
+index 0000000..dd4b4c2
 --- /dev/null
 +++ b/scripts-local/vibesim-analysis-container/recheck_best_trees_seeds.sh
 @@ -0,0 +1,33 @@
@@ -394,13 +431,13 @@ index 0000000..c4e474e
 +# Accuracy hardening: re-judge the final best trees against FRESH pristine goldens under extra
 +# seeds (new weights/state/inputs). The continuous loop only ever checked seed 0. Verdict files:
 +#   iter_opt_eval_k3_<case>/best_tree_seed<k>_verdict.json  (improvement is vs the PRISTINE tree)
-+# Usage: recheck_best_trees_seeds.sh <gpu> <seed> [<seed> ...]
++# Usage: [CASES="mla kda"] recheck_best_trees_seeds.sh <gpu> <seed> [<seed> ...]   (CASES: e.g. "mla_b512_claude kda_b512_claude")
 +set -uo pipefail
 +HERE="$(cd "$(dirname "$0")" && pwd)"
-+GPU_IDX="$1"; shift
++GPU_IDX="$1"; shift; CASES="${CASES:-mla kda}"
 +export DOCKER_GPU_ARG="\"device=$GPU_IDX\""
 +for seed in "$@"; do
-+  for case_name in mla kda; do
++  for case_name in $CASES; do
 +    OUT="$HERE/iter_opt_eval_k3_${case_name}"
 +    CFG="$OUT/issue_k3_${case_name}_seed${seed}.json"
 +    python3 - "$HERE/issue_k3_${case_name}.json" "$CFG" "$seed" <<'PY'
@@ -603,9 +640,49 @@ index 0000000..db7b135
 +done
 +echo "==== $(date +%F_%T) starting alternate rounds $K0..$((K0+N-1)) for mla_b512 kda_b512 on GPU $GPU_IDX"
 +CASES="mla_b512 kda_b512" exec "$HERE/run_k3_alternate.sh" "$GPU_IDX" "$K0" "$N"
+diff --git a/scripts-local/vibesim-analysis-container/run_k3_claude_b512_when_free.sh b/scripts-local/vibesim-analysis-container/run_k3_claude_b512_when_free.sh
+new file mode 100755
+index 0000000..d47cf29
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/run_k3_claude_b512_when_free.sh
+@@ -0,0 +1,34 @@
++#!/usr/bin/env bash
++# Large-batch rounds with the CLAUDE agent (Opus 5.5 via Bedrock; cases k3_{kda,mla}_b512_claude), warm-started
++# from the decode best trees (already transfer-checked on the b512 points -> no new transfer check; goldens are
++# shared with the Codex b512 cases via the same case key). GPU: 2 or 3 after IDLE_CHECKS consecutive idle
++# readings (the user's neighbours cycle every ~10 min), GPU 7 only with >= 60 GB free.
++# Usage: run_k3_claude_b512_when_free.sh <first_round_k> <n_rounds_per_case>
++set -uo pipefail
++HERE="$(cd "$(dirname "$0")" && pwd)"
++K0="$1"; N="$2"
++export AGENT_TIMEOUT="${AGENT_TIMEOUT:-2700}"
++IDLE_CHECKS="${IDLE_CHECKS:-30}"
++declare -A IDLE_STREAK=([2]=0 [3]=0)
++GPU_IDX=""
++while [ -z "$GPU_IDX" ]; do
++  for g in 2 3; do
++    used="$(nvidia-smi -i "$g" --query-gpu=memory.used --format=csv,noheader,nounits | tr -d ' ')"
++    if [ "${used:-99999}" -lt 1000 ]; then IDLE_STREAK[$g]=$((IDLE_STREAK[$g] + 1)); else IDLE_STREAK[$g]=0; fi
++    if [ "${IDLE_STREAK[$g]}" -ge "$IDLE_CHECKS" ]; then GPU_IDX="$g"; break; fi
++  done
++  [ -n "$GPU_IDX" ] && break
++  used7="$(nvidia-smi -i 7 --query-gpu=memory.used --format=csv,noheader,nounits | tr -d ' ')"
++  total7="$(nvidia-smi -i 7 --query-gpu=memory.total --format=csv,noheader,nounits | tr -d ' ')"
++  if [ $((total7 - used7)) -ge 61440 ]; then GPU_IDX=7; export K3_SHARED_GPU=1; break; fi
++  echo "$(date +%T) idle streaks 2=${IDLE_STREAK[2]} 3=${IDLE_STREAK[3]} (need $IDLE_CHECKS), GPU 7 free=$((total7 - used7)) MiB -> wait 120s"; sleep 120
++done
++echo "==== $(date +%F_%T) using GPU $GPU_IDX (shared=${K3_SHARED_GPU:-0})"
++export DOCKER_GPU_ARG="\"device=$GPU_IDX\""
++for c in kda mla; do
++  SRC="$HERE/iter_opt_eval_k3_${c}"; OUT="$HERE/iter_opt_eval_k3_${c}_b512_claude"; mkdir -p "$OUT"
++  [ -d "$OUT/pristine_tree" ] || cp -a "$SRC/pristine_tree" "$OUT/pristine_tree"
++  [ -d "$OUT/best_tree" ] || { cp -a "$SRC/best_tree" "$OUT/best_tree"; echo "==== seeded ${c}_b512_claude best_tree from $SRC/best_tree"; }
++done
++echo "==== $(date +%F_%T) Claude rounds $K0..$((K0+N-1)) for kda_b512_claude mla_b512_claude on GPU $GPU_IDX"
++CASES="kda_b512_claude mla_b512_claude" exec "$HERE/run_k3_alternate.sh" "$GPU_IDX" "$K0" "$N"
 diff --git a/scripts-local/vibesim-analysis-container/run_k3_continuous.sh b/scripts-local/vibesim-analysis-container/run_k3_continuous.sh
 new file mode 100755
-index 0000000..839a799
+index 0000000..df6a619
 --- /dev/null
 +++ b/scripts-local/vibesim-analysis-container/run_k3_continuous.sh
 @@ -0,0 +1,52 @@
@@ -624,7 +701,7 @@ index 0000000..839a799
 +set -uo pipefail
 +HERE="$(cd "$(dirname "$0")" && pwd)"
 +GPU_IDX="$1"; CASE="$2"; K0="$3"; N="$4"; SEED="${5:-}"
-+case "$GPU_IDX" in 2|3|7) ;; *) echo "!! GPU $GPU_IDX not authorized (only 2,3,7)"; exit 1;; esac
++case "$GPU_IDX" in [0-7]) ;; *) echo "!! bad GPU index $GPU_IDX"; exit 1;; esac   # 2026-09-25: any free GPU (user)
 +export DOCKER_GPU_ARG="\"device=$GPU_IDX\"" AGENT_TIMEOUT="${AGENT_TIMEOUT:-2700}" MIN_IMPROVEMENT=0
 +OUT="$HERE/iter_opt_eval_k3_${CASE}"; BEST="$OUT/best_tree"; HIST="$OUT/rounds.jsonl"
 +mkdir -p "$OUT"
@@ -864,10 +941,10 @@ index 0000000..5920f97
 +echo "==== done ===="
 diff --git a/scripts-local/vibesim-analysis-container/run_k3_prefill_when_free.sh b/scripts-local/vibesim-analysis-container/run_k3_prefill_when_free.sh
 new file mode 100755
-index 0000000..44f6414
+index 0000000..837cac2
 --- /dev/null
 +++ b/scripts-local/vibesim-analysis-container/run_k3_prefill_when_free.sh
-@@ -0,0 +1,61 @@
+@@ -0,0 +1,48 @@
 +#!/usr/bin/env bash
 +# Chunked-prefill campaign (cases k3_{kda,mla}_prefill; user request 2026-09-24), warm-started from the
 +# decode best trees. Waits until (a) the prefill oracles answer on 8805/8806 (baked after VibeSim B12) and
@@ -877,7 +954,7 @@ index 0000000..44f6414
 +# Usage: run_k3_prefill_when_free.sh <first_round_k> <n_rounds_per_case>
 +set -uo pipefail
 +HERE="$(cd "$(dirname "$0")" && pwd)"
-+K0="$1"; N="$2"
++K0="$1"; N="$2"; SUFFIX="${CASE_SUFFIX:-prefill}"   # prefill | prefill_claude
 +export AGENT_TIMEOUT="${AGENT_TIMEOUT:-2700}"
 +IDLE_CHECKS="${IDLE_CHECKS:-30}"
 +oracles_up () {
@@ -887,29 +964,16 @@ index 0000000..44f6414
 +}
 +until oracles_up; do echo "$(date +%T) prefill oracles 8805/8806 not up yet -> wait 300s"; sleep 300; done
 +echo "==== $(date +%F_%T) prefill oracles up"
-+declare -A IDLE_STREAK=([2]=0 [3]=0)
-+GPU_IDX=""
-+while [ -z "$GPU_IDX" ]; do
-+  for g in 3 2; do
-+    used="$(nvidia-smi -i "$g" --query-gpu=memory.used --format=csv,noheader,nounits | tr -d ' ')"
-+    if [ "${used:-99999}" -lt 1000 ]; then IDLE_STREAK[$g]=$((IDLE_STREAK[$g] + 1)); else IDLE_STREAK[$g]=0; fi
-+    if [ "${IDLE_STREAK[$g]}" -ge "$IDLE_CHECKS" ]; then GPU_IDX="$g"; break; fi
-+  done
-+  [ -n "$GPU_IDX" ] && break
-+  used7="$(nvidia-smi -i 7 --query-gpu=memory.used --format=csv,noheader,nounits | tr -d ' ')"
-+  total7="$(nvidia-smi -i 7 --query-gpu=memory.total --format=csv,noheader,nounits | tr -d ' ')"
-+  if [ $((total7 - used7)) -ge 61440 ]; then GPU_IDX=7; export K3_SHARED_GPU=1; break; fi
-+  echo "$(date +%T) GPUs 2/3 busy, GPU 7 free=$((total7 - used7)) MiB -> wait 120s"; sleep 120
-+done
++GPU_IDX="$("$HERE/pick_free_gpu.sh" "${K3_GPU_EXCLUDE:-}")"   # any free GPU (user policy 2026-09-25)
 +echo "==== $(date +%F_%T) using GPU $GPU_IDX (shared=${K3_SHARED_GPU:-0})"
 +export DOCKER_GPU_ARG="\"device=$GPU_IDX\""
 +for c in mla kda; do
-+  SRC="$HERE/iter_opt_eval_k3_${c}"; OUT="$HERE/iter_opt_eval_k3_${c}_prefill"; mkdir -p "$OUT"
++  SRC="$HERE/iter_opt_eval_k3_${c}"; OUT="$HERE/iter_opt_eval_k3_${c}_${SUFFIX}"; mkdir -p "$OUT"
 +  [ -d "$OUT/pristine_tree" ] || cp -a "$SRC/pristine_tree" "$OUT/pristine_tree"
 +  if [ ! -d "$OUT/best_tree" ]; then
-+    cp -a "$SRC/best_tree" "$OUT/best_tree"; echo "==== seeded ${c}_prefill best_tree from $SRC/best_tree"
-+    echo "==== $(date +%F_%T) transfer check: ${c}_prefill seed tree vs pristine on the prefill points"
-+    python3 "$HERE/judge_k3.py" --agent-container transfer_check --config "$HERE/issue_k3_${c}_prefill.json" \
++    cp -a "$SRC/best_tree" "$OUT/best_tree"; echo "==== seeded ${c}_${SUFFIX} best_tree from $SRC/best_tree"
++    echo "==== $(date +%F_%T) transfer check: ${c}_${SUFFIX} seed tree vs pristine on the prefill points"
++    python3 "$HERE/judge_k3.py" --agent-container transfer_check --config "$HERE/issue_k3_${c}_${SUFFIX}.json" \
 +      --golden-dir /raid/yilegu/eval_goldens --out "$OUT/seed_transfer_verdict.json" \
 +      --tree-dir "$OUT/best_tree" --pristine-dir "$OUT/pristine_tree" --min-improvement 0 \
 +      > "$OUT/seed_transfer_judge.log" 2>&1
@@ -927,8 +991,8 @@ index 0000000..44f6414
 +PY
 +  fi
 +done
-+echo "==== $(date +%F_%T) starting alternate rounds $K0..$((K0+N-1)) for mla_prefill kda_prefill on GPU $GPU_IDX"
-+CASES="mla_prefill kda_prefill" exec "$HERE/run_k3_alternate.sh" "$GPU_IDX" "$K0" "$N"
++echo "==== $(date +%F_%T) starting alternate rounds $K0..$((K0+N-1)) for mla_${SUFFIX} kda_${SUFFIX} on GPU $GPU_IDX"
++CASES="mla_${SUFFIX} kda_${SUFFIX}" exec "$HERE/run_k3_alternate.sh" "$GPU_IDX" "$K0" "$N"
 diff --git a/scripts-local/vibesim-analysis-container/run_k3_trials_direct.sh b/scripts-local/vibesim-analysis-container/run_k3_trials_direct.sh
 new file mode 100755
 index 0000000..45422da

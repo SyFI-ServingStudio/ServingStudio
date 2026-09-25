@@ -1,0 +1,410 @@
+diff -ruN -x __pycache__ -x '*.pyc' a/kernels/jit/csrc/attention/kda_fused_decode.cuh b/kernels/jit/csrc/attention/kda_fused_decode.cuh
+--- a/kernels/jit/csrc/attention/kda_fused_decode.cuh	2026-09-24 03:06:27.647750753 -0700
++++ b/kernels/jit/csrc/attention/kda_fused_decode.cuh	2026-09-25 03:45:25.497584101 -0700
+@@ -167,11 +167,11 @@
+   if constexpr (std::is_same_v<StateT, float>) {
+     return *reinterpret_cast<const float4*>(ptr);
+   } else {
+-    return make_float4(
+-        __bfloat162float(ptr[0]),
+-        __bfloat162float(ptr[1]),
+-        __bfloat162float(ptr[2]),
+-        __bfloat162float(ptr[3]));
++    // One 8-byte load of 4 bf16 (ptr is 8B-aligned: k offset is a multiple of 4).
++    const uint2 raw = *reinterpret_cast<const uint2*>(ptr);
++    const float2 lo = __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162*>(&raw.x));
++    const float2 hi = __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162*>(&raw.y));
++    return make_float4(lo.x, lo.y, hi.x, hi.y);
+   }
+ }
+ 
+@@ -184,13 +184,19 @@
+       *reinterpret_cast<float4*>(ptr) = value;
+     }
+   } else {
+-    reinterpret_cast<__nv_bfloat162*>(ptr)[0] =
+-        __float22bfloat162_rn(make_float2(value.x, value.y));
+-    reinterpret_cast<__nv_bfloat162*>(ptr)[1] =
+-        __float22bfloat162_rn(make_float2(value.z, value.w));
++    // One 8-byte store so a warp writes full 32B sectors.
++    const __nv_bfloat162 lo = __float22bfloat162_rn(make_float2(value.x, value.y));
++    const __nv_bfloat162 hi = __float22bfloat162_rn(make_float2(value.z, value.w));
++    uint2 packed;
++    packed.x = *reinterpret_cast<const uint32_t*>(&lo);
++    packed.y = *reinterpret_cast<const uint32_t*>(&hi);
++    *reinterpret_cast<uint2*>(ptr) = packed;
+   }
+ }
+ 
++template <typename StateT>
++inline constexpr int kKdaMinBlocksPerSm = std::is_same_v<StateT, float> ? 2 : 5;
++
+ template <int kCopyThreads, typename StateT>
+ SGL_DEVICE void
+ cp_async_state_chunk_for(
+@@ -294,6 +300,28 @@
+   return {device::warp::reduce_sum(x), device::warp::reduce_sum(y)};
+ }
+ 
++// One butterfly for two sums: after the xor-16 step lanes 0-15 carry x and
++// lanes 16-31 carry y. Bitwise equal to reduce_sum(x) / reduce_sum(y) (same
++// xor order, commutative adds); returns x's total in the low half, y's in the high.
++SGL_DEVICE float warp_reduce_sum_pair_split(float x, float y) {
++  const bool upper = (threadIdx.x & 16) != 0;
++  float value = upper ? y : x;
++  value += __shfl_xor_sync(0xffffffffu, upper ? x : y, 16);
++#pragma unroll
++  for (int mask = 8; mask >= 1; mask >>= 1) {
++    value += __shfl_xor_sync(0xffffffffu, value, mask);
++  }
++  return value;
++}
++
++// Both totals in every lane (one extra shuffle across the halves).
++SGL_DEVICE Sum2 warp_reduce_sum_pair_packed(float x, float y) {
++  const float value = warp_reduce_sum_pair_split(x, y);
++  const float other = __shfl_xor_sync(0xffffffffu, value, 16);
++  const bool upper = (threadIdx.x & 16) != 0;
++  return {upper ? other : value, upper ? value : other};
++}
++
+ template <int kReduceWarps>
+ SGL_DEVICE Sum2 block_reduce_sum2_for(float x, float y, float* scratch) {
+   const int lane = threadIdx.x & 31;
+@@ -435,7 +463,9 @@
+ // short_conv_kernel_size=4 -> kKernelWidth=4, kConvStateWidth=3). B is the live
+ // (post-padding, under kUseStaticDecodeLayout) decode batch size; slots is the
+ // recurrent-state / conv-cache pool capacity, addressed by ssm_state_indices, not B.
+-__global__ __launch_bounds__(kThreads, 2) void kda_decode_fusion_many_heads_kernel(
++// bf16 state: 32KB smem allows 5 blocks/SM, capping regs at 48 (no spills);
++// measured 93->82us at B=512 on B200. fp32 state stays smem-bound at 2.
++__global__ __launch_bounds__(kThreads, kKdaMinBlocksPerSm<StateT>) void kda_decode_fusion_many_heads_kernel(
+     const __nv_bfloat16* __restrict__ x_q,  // [B, H*128] row bos*x_row_stride + hk, sliced from mixed_qkv q-segment
+     const __nv_bfloat16* __restrict__ x_k,  // [B, H*128] row bos*x_row_stride + hk, sliced from mixed_qkv k-segment
+     const __nv_bfloat16* __restrict__ x_v,  // [B, HV*128] row bos*x_row_stride + hvv, sliced from mixed_qkv v-segment
+@@ -566,48 +596,37 @@
+   }
+ 
+   if constexpr (kUpdateConvState) {
+-    if (tid < kDimK) {
+-      const int k = tid;
+-      const int hk = hk_off + k;
+-      const int64_t cs_base = slot * cs_slot_stride + hk;
+-      const int64_t xq_idx = bos * x_row_stride + hk;
+-      const float exp_a = __shfl_sync(0xffffffffu, lane == 0 ? __expf(a_log[i_h]) : 0.0f, 0);
+-
+-      float q_acc = bias_q[hk];
+-      float k_acc = bias_k[hk];
+-      __nv_bfloat16 q_shift0 = __float2bfloat16(0.0f);
+-      __nv_bfloat16 q_shift1 = __float2bfloat16(0.0f);
+-      __nv_bfloat16 k_shift0 = __float2bfloat16(0.0f);
+-      __nv_bfloat16 k_shift1 = __float2bfloat16(0.0f);
++    // Lower warps: q conv + decay; upper warps: k conv, then the v conv below.
++    const bool is_q = tid < kDimK;
++    const int k = is_q ? tid : tid - (kThreads - kDimK);
++    const int hk = hk_off + k;
++    const int64_t cs_base = slot * cs_slot_stride + hk;
++    __nv_bfloat16* cs_qk = is_q ? cs_q : cs_k;
++    const float* w_qk_t = is_q ? w_q_t : w_k_t;
++
++    float acc = is_q ? bias_q[hk] : bias_k[hk];
++    __nv_bfloat16 shift0 = __float2bfloat16(0.0f);
++    __nv_bfloat16 shift1 = __float2bfloat16(0.0f);
+ #pragma unroll
+-      for (int w = 0; w < kConvStateWidth; ++w) {
+-        const __nv_bfloat16 q_state = cs_q[cs_base + w * cs_w_stride];
+-        const __nv_bfloat16 k_state = cs_k[cs_base + w * cs_w_stride];
+-        q_acc += __bfloat162float(q_state) * fp32_at(w_q_t, w * hkv_dim + hk);
+-        k_acc += __bfloat162float(k_state) * fp32_at(w_k_t, w * hkv_dim + hk);
+-        if (w == 1) {
+-          q_shift0 = q_state;
+-          k_shift0 = k_state;
+-        } else if (w == 2) {
+-          q_shift1 = q_state;
+-          k_shift1 = k_state;
+-        }
+-      }
+-      const __nv_bfloat16 q_new = x_q[xq_idx];
+-      const __nv_bfloat16 k_new = x_k[xq_idx];
+-      q_acc += __bfloat162float(q_new) * fp32_at(w_q_t, (kKernelWidth - 1) * hkv_dim + hk);
+-      k_acc += __bfloat162float(k_new) * fp32_at(w_k_t, (kKernelWidth - 1) * hkv_dim + hk);
+-
+-      cs_q[cs_base + 0] = q_shift0;
+-      cs_q[cs_base + cs_w_stride] = q_shift1;
+-      cs_q[cs_base + 2 * cs_w_stride] = q_new;
+-      cs_k[cs_base + 0] = k_shift0;
+-      cs_k[cs_base + cs_w_stride] = k_shift1;
+-      cs_k[cs_base + 2 * cs_w_stride] = k_new;
+-
+-      s_q[k] = conv_silu_bf16(q_acc);
+-      s_k[k] = conv_silu_bf16(k_acc);
++    for (int w = 0; w < kConvStateWidth; ++w) {
++      const __nv_bfloat16 state_w = cs_qk[cs_base + w * cs_w_stride];
++      acc += __bfloat162float(state_w) * fp32_at(w_qk_t, w * hkv_dim + hk);
++      if (w == 1) {
++        shift0 = state_w;
++      } else if (w == 2) {
++        shift1 = state_w;
++      }
++    }
++    const __nv_bfloat16 x_new = (is_q ? x_q : x_k)[bos * x_row_stride + hk];
++    acc += __bfloat162float(x_new) * fp32_at(w_qk_t, (kKernelWidth - 1) * hkv_dim + hk);
++
++    cs_qk[cs_base + 0] = shift0;
++    cs_qk[cs_base + cs_w_stride] = shift1;
++    cs_qk[cs_base + 2 * cs_w_stride] = x_new;
++    (is_q ? s_q : s_k)[k] = conv_silu_bf16(acc);
+ 
++    if (is_q) {
++      const float exp_a = __shfl_sync(0xffffffffu, lane == 0 ? __expf(a_log[i_h]) : 0.0f, 0);
+       const float g_raw = bf16_load(g, bos * g_row_stride + i_hv * kDimK + k) + dt_bias[hk];
+       if constexpr (kUseLowerBound) {
+         s_decay[k] = __expf(lower_bound * device::math::sigmoid_fast(exp_a * g_raw));
+@@ -644,9 +663,11 @@
+     }
+   }
+ 
++  static_assert(kThreads >= kDimK + kDimV);
++  // The v conv runs on the upper warps, concurrently with the q/k conv on the lower ones.
+   if constexpr (kUpdateConvState) {
+-    if (tid < kDimV) {
+-      const int v = tid;
++    if (tid >= kThreads - kDimV) {
++      const int v = tid - (kThreads - kDimV);
+       const int hvv = hv_off + v;
+       const int64_t cs_base = slot * cs_slot_stride + hvv;
+       const int64_t xv_idx = bos * x_row_stride + hvv;
+@@ -670,16 +691,10 @@
+       cs_v[cs_base + cs_w_stride] = v_shift1;
+       cs_v[cs_base + 2 * cs_w_stride] = v_new;
+       s_v[v] = conv_silu_bf16(v_acc);
+-
+-      if constexpr (kApplyOnorm && kPreloadOnormParams) {
+-        const int64_t onorm_idx = i_n * onormg_row_stride + i_hv * kDimV + v;
+-        pre_onorm_gate = device::math::sigmoid_fast(bf16_load(onorm_g, onorm_idx));
+-        pre_onorm_weight = onorm_weight[v];
+-      }
+     }
+   } else {
+-    if (tid < kDimV) {
+-      const int v = tid;
++    if (tid >= kThreads - kDimV) {
++      const int v = tid - (kThreads - kDimV);
+       const int hvv = hv_off + v;
+ 
+       float v_acc = bias_v[hvv];
+@@ -690,12 +705,15 @@
+       }
+       v_acc += bf16_load(x_v, bos * x_row_stride + hvv) * fp32_at(w_v_t, (kKernelWidth - 1) * hvv_dim + hvv);
+       s_v[v] = conv_silu_bf16(v_acc);
++    }
++  }
+ 
+-      if constexpr (kApplyOnorm && kPreloadOnormParams) {
+-        const int64_t onorm_idx = i_n * onormg_row_stride + i_hv * kDimV + v;
+-        pre_onorm_gate = device::math::sigmoid_fast(bf16_load(onorm_g, onorm_idx));
+-        pre_onorm_weight = onorm_weight[v];
+-      }
++  if constexpr (kApplyOnorm && kPreloadOnormParams) {
++    // Loaded by the threads that write `out` in the epilogue.
++    if (tid < kDimV) {
++      const int64_t onorm_idx = i_n * onormg_row_stride + i_hv * kDimV + tid;
++      pre_onorm_gate = device::math::sigmoid_fast(bf16_load(onorm_g, onorm_idx));
++      pre_onorm_weight = onorm_weight[tid];
+     }
+   }
+ 
+@@ -789,7 +807,7 @@
+       dot_hk_a = h_a_vals[0] * r_k[0] + h_a_vals[1] * r_k[1] + h_a_vals[2] * r_k[2] + h_a_vals[3] * r_k[3];
+       dot_hk_b = h_b_vals[0] * r_k[0] + h_b_vals[1] * r_k[1] + h_b_vals[2] * r_k[2] + h_b_vals[3] * r_k[3];
+ 
+-      const Sum2 dot_hk = warp_reduce_sum_pair(dot_hk_a, dot_hk_b);
++      const Sum2 dot_hk = warp_reduce_sum_pair_packed(dot_hk_a, dot_hk_b);
+       const float v_new0 = (s_v[v0] - dot_hk.x) * s_beta;
+       const float v_new1 = (s_v[v1] - dot_hk.y) * s_beta;
+ 
+@@ -820,13 +838,18 @@
+         dot_hq_b = h_b_0 * r_q[0] + h_b_1 * r_q[1] + h_b_2 * r_q[2] + h_b_3 * r_q[3];
+       }
+ 
+-      const Sum2 dot_hq = warp_reduce_sum_pair(dot_hq_a, dot_hq_b);
+-      if (lane == 0) {
+-        s_o[v0] = bf16_round(dot_hq.x);
+-        s_o[v1] = bf16_round(dot_hq.y);
+-        if constexpr (kApplyOnorm && kAccumulateOnormSumsq) {
++      if constexpr (kApplyOnorm && kAccumulateOnormSumsq) {
++        const Sum2 dot_hq = warp_reduce_sum_pair(dot_hq_a, dot_hq_b);
++        if (lane == 0) {
++          s_o[v0] = bf16_round(dot_hq.x);
++          s_o[v1] = bf16_round(dot_hq.y);
+           o_sumsq += dot_hq.x * dot_hq.x + dot_hq.y * dot_hq.y;
+         }
++      } else {
++        const float dot_hq = warp_reduce_sum_pair_split(dot_hq_a, dot_hq_b);
++        if ((lane & 15) == 0) {
++          s_o[lane == 0 ? v0 : v1] = bf16_round(dot_hq);
++        }
+       }
+     }
+ 
+diff -ruN -x __pycache__ -x '*.pyc' a/srt/layers/moe/moe_runner/flashinfer_trtllm.py b/srt/layers/moe/moe_runner/flashinfer_trtllm.py
+--- a/srt/layers/moe/moe_runner/flashinfer_trtllm.py	2026-09-18 02:16:55.000000000 -0700
++++ b/srt/layers/moe/moe_runner/flashinfer_trtllm.py	2026-09-25 03:15:38.113779735 -0700
+@@ -1,5 +1,6 @@
+ from __future__ import annotations
+ 
++import contextlib
+ import contextvars
+ from contextlib import contextmanager
+ from dataclasses import dataclass
+@@ -56,6 +57,58 @@
+     return is_arch_support_pdl() and num_tokens <= _TRTLLM_MOE_PDL_MAX_TOKENS
+ 
+ 
++_MXFP4_TUNE_OP = "flashinfer::trtllm_fp4_block_scale_moe"
++# FlashInfer's untuned fallback tile_N; see _mxfp4_moe_tune_context.
++_MXFP4_MIN_TILE_N = 8
++_mxfp4_self_tuned_buckets: set[int] = set()
++
++
++def _mxfp4_moe_tune_context(num_tokens: int, top_k: int, num_local_experts: int):
++    """Profile the trtllm-gen MXFP4 tactic of this token bucket once, eagerly.
++
++    Untuned, FlashInfer runs the tile_N one below nextPow2(rows per expert), so
++    above 8 rows/expert each expert's weights are split over 2+ CTAs (B=512
++    over 112 local experts: tile 8, ~15% slower than a tuned tile-16 tactic).
++    Only engaged in that regime, when no runner-level autotune pass produced
++    data for this op, outside graph capture; one bucket is profiled per shape.
++    """
++    from flashinfer.autotuner import AutoTuner, autotune
++
++    if num_tokens * top_k <= _MXFP4_MIN_TILE_N * num_local_experts:
++        return contextlib.nullcontext()
++    bucket = 1 << (num_tokens.bit_length() - 1)
++    tuner = AutoTuner.get()
++    if (
++        bucket in _mxfp4_self_tuned_buckets
++        or tuner.is_tuning_mode
++        or torch.cuda.is_current_stream_capturing()
++    ):
++        return contextlib.nullcontext()
++    if not _mxfp4_self_tuned_buckets:
++        if _flashinfer_autotune_disabled() or any(
++            k.custom_op == _MXFP4_TUNE_OP for k in tuner.profiling_cache
++        ):
++            _mxfp4_self_tuned_buckets.add(-1)
++    if -1 in _mxfp4_self_tuned_buckets:
++        return contextlib.nullcontext()
++    _mxfp4_self_tuned_buckets.add(bucket)
++    return autotune(True, tuning_buckets=(bucket,))
++
++
++def _flashinfer_autotune_disabled() -> bool:
++    from sglang.srt.runtime_context import get_exec
++
++    try:
++        exec_cfg = get_exec()
++        return bool(
++            exec_cfg.kernel.disable_flashinfer_autotune
++            or exec_cfg.deterministic.enable_deterministic_inference
++        )
++    except Exception:
++        # No server config (standalone layer drivers): nothing disabled it.
++        return False
++
++
+ @dataclass
+ class FlashInferTrtllmDeferredFinalizeOutput:
+     gemm2_out: torch.Tensor
+@@ -1105,38 +1158,43 @@
+             routed_top_k = _routing_top_k(routing)
+ 
+             defer_finalize = _deferred_finalize_enabled.get()
+-            result = trtllm_fp4_block_scale_routed_moe(
+-                topk_ids=routing,
+-                routing_bias=None,
+-                hidden_states=x_quant,
+-                hidden_states_scale=x_scale,
+-                gemm1_weights=quant_info.w13_weight,
+-                gemm1_weights_scale=quant_info.w13_weight_scale,
+-                gemm1_bias=None,
+-                gemm1_alpha=quant_info.gemm1_alpha,
+-                gemm1_beta=quant_info.gemm1_clamp_limit,
+-                gemm1_clamp_limit=None,
+-                gemm2_weights=quant_info.w2_weight,
+-                gemm2_weights_scale=quant_info.w2_weight_scale,
+-                gemm2_bias=None,
+-                output1_scale_scalar=None,
+-                output1_scale_gate_scalar=None,
+-                output2_scale_scalar=None,
+-                num_experts=quant_info.global_num_experts,
++            with _mxfp4_moe_tune_context(
++                num_tokens=x_quant.shape[0],
+                 top_k=routed_top_k,
+-                n_group=None,
+-                topk_group=None,
+-                intermediate_size=quant_info.intermediate_size_per_partition,
+-                local_expert_offset=quant_info.local_expert_offset,
+-                local_num_experts=quant_info.local_num_experts,
+-                routed_scaling_factor=None,
+-                routing_method_type=RoutingMethodType.TopK.value,
+-                activation_type=ActivationType.Situ.value,
+-                tune_max_num_tokens=next_power_of_2(x_quant.shape[0]),
+-                output=symm_output,
+-                do_finalize=not defer_finalize,
+-                enable_pdl=trtllm_moe_enable_pdl(x_quant.shape[0]),
+-            )
++                num_local_experts=quant_info.local_num_experts,
++            ):
++                result = trtllm_fp4_block_scale_routed_moe(
++                    topk_ids=routing,
++                    routing_bias=None,
++                    hidden_states=x_quant,
++                    hidden_states_scale=x_scale,
++                    gemm1_weights=quant_info.w13_weight,
++                    gemm1_weights_scale=quant_info.w13_weight_scale,
++                    gemm1_bias=None,
++                    gemm1_alpha=quant_info.gemm1_alpha,
++                    gemm1_beta=quant_info.gemm1_clamp_limit,
++                    gemm1_clamp_limit=None,
++                    gemm2_weights=quant_info.w2_weight,
++                    gemm2_weights_scale=quant_info.w2_weight_scale,
++                    gemm2_bias=None,
++                    output1_scale_scalar=None,
++                    output1_scale_gate_scalar=None,
++                    output2_scale_scalar=None,
++                    num_experts=quant_info.global_num_experts,
++                    top_k=routed_top_k,
++                    n_group=None,
++                    topk_group=None,
++                    intermediate_size=quant_info.intermediate_size_per_partition,
++                    local_expert_offset=quant_info.local_expert_offset,
++                    local_num_experts=quant_info.local_num_experts,
++                    routed_scaling_factor=None,
++                    routing_method_type=RoutingMethodType.TopK.value,
++                    activation_type=ActivationType.Situ.value,
++                    tune_max_num_tokens=next_power_of_2(x_quant.shape[0]),
++                    output=symm_output,
++                    do_finalize=not defer_finalize,
++                    enable_pdl=trtllm_moe_enable_pdl(x_quant.shape[0]),
++                )
+             if defer_finalize:
+                 gemm2_out, topk_weights, expanded_idx = result
+                 result = FlashInferTrtllmDeferredFinalizeOutput(
+diff -ruN -x __pycache__ -x '*.pyc' a/srt/models/kimi_k3.py b/srt/models/kimi_k3.py
+--- a/srt/models/kimi_k3.py	2026-09-23 07:07:11.894971186 -0700
++++ b/srt/models/kimi_k3.py	2026-09-25 03:37:14.516674397 -0700
+@@ -1439,10 +1439,11 @@
+         # Side stream for the [f_a|b] + f_b tiny GEMVs: they read only
+         # hidden_states, so they can run concurrently with the wide fused
+         # [q,k,v,g] GEMM on the main stream (graphed decode/verify only).
+-        # Same SM bound rationale as the MLA gate stream.
++        # Same SM bound rationale as the MLA gate stream; on B200 the overlap
++        # still wins at 256/512 tokens (measured, single KDA layer decode).
+         self._bfa_alt_stream = bfa_alt_stream
+         self._bfa_bs_limit = (
+-            (128 if get_platform().is_blackwell else 64)
++            (512 if get_platform().is_blackwell else 64)
+             if bfa_alt_stream is not None
+             else 0
+         )

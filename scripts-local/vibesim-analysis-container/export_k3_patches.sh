@@ -64,6 +64,26 @@ tree_diff "$K/stacked_tree_judged"  "$K/trial_22_tree_judged" "$OUT/sglang/kda/0
 tree_diff "$K/pristine_tree"        "$K/best_tree"            "$OUT/sglang/kda_best_tree_vs_pristine.patch"
 validate_chain "$K/pristine_tree" "$K/best_tree" "$OUT"/sglang/kda/0*.patch
 
+echo "== sglang Claude (Opus 5.5 via Bedrock) campaign chains (seed = the decode best tree of the same layer)"
+mkdir -p "$OUT/sglang/claude"
+CB="$HERE/iter_opt_eval_k3_mla_b512_claude"
+tree_diff "$HERE/iter_opt_eval_k3_mla/best_tree" "$CB/trial_1_tree_judged" "$OUT/sglang/claude/mla_b512_01_r1_moe_autotune_kvconcat_satfinite.patch"
+tree_diff "$CB/trial_1_tree_judged" "$CB/trial_2_tree_judged" "$OUT/sglang/claude/mla_b512_02_r2_persistent_decode_tail_split.patch"
+tree_diff "$CB/trial_2_tree_judged" "$CB/trial_3_tree_judged" "$OUT/sglang/claude/mla_b512_03_r3_outgate_tail_overlap_attnres_fused_add.patch"
+validate_chain "$HERE/iter_opt_eval_k3_mla/best_tree" "$CB/best_tree" "$OUT"/sglang/claude/mla_b512_0*.patch
+CB="$HERE/iter_opt_eval_k3_kda_b512_claude"
+tree_diff "$HERE/iter_opt_eval_k3_kda/best_tree" "$CB/trial_1_tree_judged" "$OUT/sglang/claude/kda_b512_01_r1_moe_autotune_fused_decode_vector_ldst_bfa_overlap.patch"
+validate_chain "$HERE/iter_opt_eval_k3_kda/best_tree" "$CB/best_tree" "$OUT"/sglang/claude/kda_b512_0*.patch
+CB="$HERE/iter_opt_eval_k3_mla_prefill_claude"
+tree_diff "$HERE/iter_opt_eval_k3_mla/best_tree" "$CB/trial_1_tree_judged" "$OUT/sglang/claude/mla_prefill_01_r1_kv_pack_quantize_fp8_attnres_fused_add.patch"
+tree_diff "$CB/trial_1_tree_judged" "$CB/trial_2_tree_judged" "$OUT/sglang/claude/mla_prefill_02_r2_prefix_attention_cutedsl_fmha.patch"
+validate_chain "$HERE/iter_opt_eval_k3_mla/best_tree" "$CB/best_tree" "$OUT"/sglang/claude/mla_prefill_0*.patch
+CB="$HERE/iter_opt_eval_k3_kda_prefill_claude"
+tree_diff "$HERE/iter_opt_eval_k3_kda/best_tree" "$CB/trial_1_tree_judged" "$OUT/sglang/claude/kda_prefill_01_r1_strided_chunk_kernels_no_copies_no_host_sync.patch"
+validate_chain "$HERE/iter_opt_eval_k3_kda/best_tree" "$CB/best_tree" "$OUT"/sglang/claude/kda_prefill_0*.patch
+# unaccepted but exact and worth keeping (below the 3-sigma floor on the primary point):
+tree_diff "$CB/best_tree" "$CB/trial_2_tree_judged" "$OUT/sglang/claude/UNACCEPTED_kda_prefill_r2_cuda_kda_chunk_h_hscan.patch"
+
 echo "== harness (workspace branch kimi-k3-loop vs its base)"
 BASE="$(git -C "$WS" merge-base kimi-k3-loop yilegu/dev)"
 C=scripts-local/vibesim-analysis-container
@@ -95,6 +115,11 @@ Regenerate with \`./export_k3_patches.sh\` (validates that each sglang chain rep
   cumulative 403.0 -> 379.4 us @B=128, -5.9%). \`sglang/kda_best_tree_vs_pristine.patch\` cumulative.
 - These trees also passed: two extra seeds each (rel_err <= 0.011), the MLA mixed-length point, and the
   B=512/256 transfer checks (see K3_PIPELINE_AND_RESULTS.md).
+- \`sglang/claude/\`: the Claude Opus 5.5 campaign chains on top of the decode best trees (seed = the same layer's
+  best tree): MLA-b512 r1-r3 (976.3 -> 877.8 us @512x8k), KDA-b512 r1 (675.2 -> 600.4), MLA-prefill r1-r2
+  (12128 -> 11229 us @16k chunk with 48k prefix), KDA-prefill r1 (9072 -> 8564 us). Each chain is validated against
+  the case's best_tree. The r1 b512 patches include the one-shot MoE autotune that reproduces production's warmup
+  (harness gap; see the write-up). UNACCEPTED_*: exact but below the judge's 3-sigma floor.
 
 ## harness (workspace branch \`kimi-k3-loop\`, vs base \`$(git -C "$WS" rev-parse --short "$BASE")\`)
 - \`harness/01_driver_*.patch\`: the single-layer extractor/driver (CUDA-graph metric, goldens, prefill points, ...).

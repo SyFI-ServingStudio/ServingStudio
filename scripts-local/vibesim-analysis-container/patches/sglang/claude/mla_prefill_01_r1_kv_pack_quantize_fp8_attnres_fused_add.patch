@@ -1,0 +1,468 @@
+diff -ruN -x __pycache__ -x '*.pyc' a/kernels/jit/csrc/kimi_k3/attn_res/fused_tma.cuh b/kernels/jit/csrc/kimi_k3/attn_res/fused_tma.cuh
+--- a/kernels/jit/csrc/kimi_k3/attn_res/fused_tma.cuh	2026-09-18 02:16:55.000000000 -0700
++++ b/kernels/jit/csrc/kimi_k3/attn_res/fused_tma.cuh	2026-09-25 05:10:23.900140039 -0700
+@@ -175,6 +175,10 @@
+   // row snapshot, bank row nvb (strided by stride_bm like the read rows).
+   // The kernel never reads row nvb, so the write races with nothing.
+   bf16_t* __restrict__ prefix_dst;
++  // Fused pending residual add (nullptr = off): the prefix row is
++  // bf16(prefix_sum + prefix_addend), materialized into prefix_sum_out.
++  const bf16_t* prefix_addend;
++  bf16_t* prefix_sum_out;
+   // Optional fused NVLS reduce-scatter source. When input_mc is non-null,
+   // the producer warp materializes this rank's reduced token shard plus the
+   // local residual into prefix_sum/prefix_out before TMA consumes it.
+@@ -246,6 +250,7 @@
+     float warp_ssq[kNumConsumerWarps];
+     uint32_t tmem_base;
+     alignas(128) bf16_t buf[kNumStages][kChunkRows][kDim];
++    alignas(128) bf16_t addend[kNumStages][kDim];  // prefix_addend row, per slot
+   };
+ 
+   static SGL_DEVICE void forward(const AttnResTMAParams& params, Smem* smem);
+@@ -304,7 +309,8 @@
+             ptx::mbar_wait_parity(&smem->bar_free[slot], phase ^ 1);
+           }
+           // One pull per chunk; each row still gets its own bulk copy.
+-          ptx::mbar_arrive_expect_tx(&smem->bar_full[slot], an * kRowBytes);
++          const bool has_addend = params.prefix_addend != nullptr && base_row + an == kNumRows + 1;
++          ptx::mbar_arrive_expect_tx(&smem->bar_full[slot], (an + (has_addend ? 1 : 0)) * kRowBytes);
+ #pragma unroll
+           for (uint32_t r = 0; r < an; ++r) {
+             const auto row = base_row + r;
+@@ -315,6 +321,10 @@
+             if (token == blockIdx.x && row == kNumRows) PDLWaitPrimary<true>();
+             ptx::cp_async_bulk_1d_load(&smem->buf[slot][r], src, kRowBytes, &smem->bar_full[slot]);
+           }
++          if (has_addend) {
++            ptx::cp_async_bulk_1d_load(
++                &smem->addend[slot], params.prefix_addend + token * kDim, kRowBytes, &smem->bar_full[slot]);
++          }
+         }
+       }
+       PDLTriggerSecondary<true>();
+@@ -394,6 +404,18 @@
+           for (uint32_t r = 0; r < an; ++r) {
+             rows[si][r].load(&smem->buf[slot][r][offset]);
+           }
++          if (params.prefix_addend != nullptr && base_row + an == kNumRows + 1) {
++            // Same fp32 add + single bf16 rounding as torch's a + b.
++            const uint32_t pr = kNumRows - base_row;
++            row_vec_t addend;
++            addend.load(&smem->addend[slot][offset]);
++#pragma unroll
++            for (uint32_t j = 0; j < kVecElems / 2; ++j) {
++              const auto x = cast<float2>(rows[si][pr][j]);
++              const auto y = cast<float2>(addend[j]);
++              rows[si][pr][j] = cast<bf16x2_t>(make_float2(x.x + y.x, x.y + y.y));
++            }
++          }
+ #pragma unroll
+           for (uint32_t r = 0; r < an; ++r) {
+ #pragma unroll
+@@ -420,6 +442,16 @@
+             rows[si][pr].store(dst, tile * (kTile / kVecElems) + tid_in_group);
+           }
+         }
++        if (params.prefix_sum_out != nullptr && base_row + an == kNumRows + 1) {
++          const uint32_t pr = kNumRows - base_row;
++          auto* dst = params.prefix_sum_out + static_cast<int64_t>(token) * kDim;
++#pragma unroll
++          for (uint32_t si = 0; si < kSlicesPerGroup; ++si) {
++            const auto tile = si * kNumGroups + group;
++            if (tile >= kNumTiles) continue;
++            rows[si][pr].store(dst, tile * (kTile / kVecElems) + tid_in_group);
++          }
++        }
+ 
+         float acc_rms[kChunkRows];
+         float acc_dot[kChunkRows];
+@@ -685,7 +717,9 @@
+       const tvm::ffi::TensorView out,
+       int64_t nvb,
+       double eps,
+-      bool write_prefix) {
++      bool write_prefix,
++      std::optional<tvm::ffi::TensorView> prefix_addend,
++      std::optional<tvm::ffi::TensorView> prefix_sum_out) {
+     using namespace host;
+ 
+     auto T_ = SymbolicSize{"num_tokens"};
+@@ -697,6 +731,16 @@
+     TensorMatcher({T_, H_}).with_dtype<bf16_t>().with_device(device).verify(prefix_sum).verify(out);
+     TensorMatcher({T_, NB_, H_}).with_dtype<bf16_t>().with_device(device).verify(bank);
+     TensorMatcher({H_}).with_dtype<bf16_t>().with_device(device).verify(cw).verify(ow);
++    RuntimeCheck(
++        prefix_addend.has_value() == prefix_sum_out.has_value(),
++        "attn_res_fused_tma: prefix_addend and prefix_sum_out go together");
++    if (prefix_addend.has_value()) {
++      TensorMatcher({T_, H_})
++          .with_dtype<bf16_t>()
++          .with_device(device)
++          .verify(prefix_addend.value())
++          .verify(prefix_sum_out.value());
++    }
+ 
+     const auto num_tokens = static_cast<int64_t>(T_.unwrap());
+     const auto H = static_cast<int64_t>(H_.unwrap());
+@@ -736,6 +780,10 @@
+         .ow = static_cast<const bf16_t*>(ow.data_ptr()),
+         .out = static_cast<bf16_t*>(out.data_ptr()),
+         .prefix_dst = write_prefix ? static_cast<bf16_t*>(bank.data_ptr()) + nvb * H : nullptr,
++        .prefix_addend =
++            prefix_addend.has_value() ? static_cast<const bf16_t*>(prefix_addend.value().data_ptr()) : nullptr,
++        .prefix_sum_out =
++            prefix_sum_out.has_value() ? static_cast<bf16_t*>(prefix_sum_out.value().data_ptr()) : nullptr,
+         .input_mc = nullptr,
+         .residual = nullptr,
+         .prefix_out = nullptr,
+@@ -816,6 +864,8 @@
+         .ow = static_cast<const bf16_t*>(ow.data_ptr()),
+         .out = static_cast<bf16_t*>(out.data_ptr()),
+         .prefix_dst = nullptr,
++        .prefix_addend = nullptr,
++        .prefix_sum_out = nullptr,
+         .input_mc = reinterpret_cast<const uint8_t*>(static_cast<uintptr_t>(input_mc_ptr)) +
+                     pull.rank * local_elems * sizeof(bf16_t),
+         .residual = residual.has_value() ? static_cast<const bf16_t*>(residual.value().data_ptr()) : nullptr,
+@@ -892,6 +942,8 @@
+         .ow = static_cast<const bf16_t*>(ow.data_ptr()),
+         .out = static_cast<bf16_t*>(out.data_ptr()),
+         .prefix_dst = write_prefix ? static_cast<bf16_t*>(bank.data_ptr()) + nvb * H : nullptr,
++        .prefix_addend = nullptr,
++        .prefix_sum_out = nullptr,
+         .input_mc = nullptr,
+         .residual = nullptr,
+         .prefix_out = nullptr,
+diff -ruN -x __pycache__ -x '*.pyc' a/kernels/ops/kimi_k3/attn_res.py b/kernels/ops/kimi_k3/attn_res.py
+--- a/kernels/ops/kimi_k3/attn_res.py	2026-09-18 02:16:55.000000000 -0700
++++ b/kernels/ops/kimi_k3/attn_res.py	2026-09-25 05:20:26.744784866 -0700
+@@ -83,7 +83,14 @@
+ }
+ 
+ 
+-def _tuning(nvb: int, num_tokens: int) -> tuple[int, int, int]:
++# With a fused pending add the ring carries one more row per token; at nvb=1
++# the 2-CTA/SM config loses to the setmaxnreg split (B200, T=16384: 211 vs 184 us).
++_TMA_FUSED_ADD_CONFIG: dict[int, tuple[int, int, int]] = {1: (2, 1, 200)}
++
++
++def _tuning(
++    nvb: int, num_tokens: int, fused_add: bool = False
++) -> tuple[int, int, int]:
+     """(chunk_rows, occupancy, consumer_regs) for this aggregation point.
+ 
+     Shared by all three entry points below: they run the same kernel template
+@@ -91,6 +98,8 @@
+     if not 1 <= nvb <= _MAX_BANK_ROWS:
+         raise ValueError(f"attn_res: nvb must be in [1, {_MAX_BANK_ROWS}], got {nvb}")
+     best = _TMA_BEST_CONFIG[nvb]
++    if fused_add:
++        best = _TMA_FUSED_ADD_CONFIG.get(nvb, best)
+     if best[1] > 1 and num_tokens < 128:
+         # occupancy=2 only pays off once there are enough tokens to fill both
+         # CTAs per SM; below that its tighter register budget just costs ~10%.
+@@ -158,6 +167,8 @@
+     eps: float,
+     *,
+     write_prefix: bool = False,
++    prefix_addend: torch.Tensor | None = None,
++    prefix_sum_out: torch.Tensor | None = None,
+ ) -> None:
+     """Warp-specialized TMA aggregation (score -> online softmax -> weighted
+     combine -> fused output RMSNorm), one persistent CTA per SM: a producer
+@@ -182,9 +193,24 @@
+     write_prefix : also snapshot the prefix row into bank[:, nvb, :]
+                  (bit-exact copy, fused into the score pass which already
+                  has the row in registers); requires NB > nvb
++    prefix_addend  : optional [T, H] bf16 — fuses a pending residual add: the
++                 aggregated prefix row becomes bf16(prefix_sum + prefix_addend)
++    prefix_sum_out : [T, H] bf16, required with prefix_addend — receives that
++                 materialized prefix row
+     """
+-    _jit_fused_tma_module(*_tuning(nvb, prefix_sum.shape[0])).run(
+-        prefix_sum, bank, cw, ow, out, nvb, eps, write_prefix
++    _jit_fused_tma_module(
++        *_tuning(nvb, prefix_sum.shape[0], fused_add=prefix_addend is not None)
++    ).run(
++        prefix_sum,
++        bank,
++        cw,
++        ow,
++        out,
++        nvb,
++        eps,
++        write_prefix,
++        prefix_addend,
++        prefix_sum_out,
+     )
+ 
+ 
+diff -ruN -x __pycache__ -x '*.pyc' a/kernels/ops/kvcache/kv_indices.py b/kernels/ops/kvcache/kv_indices.py
+--- a/kernels/ops/kvcache/kv_indices.py	2026-09-18 02:16:55.000000000 -0700
++++ b/kernels/ops/kvcache/kv_indices.py	2026-09-25 05:23:54.025488318 -0700
+@@ -119,8 +119,9 @@
+     chunk_start_pos = tl.load(chunk_start_idx_ptr + pid).to(tl.int32)
+     chunk_seq_len = tl.load(chunk_seq_lens_ptr + pid).to(tl.int32)
+ 
++    # Grid axis 1 (optional) splits one request's copy across CTAs.
+     num_loop = tl.cdiv(chunk_seq_len, BLOCK_SIZE)
+-    for i in range(num_loop):
++    for i in range(tl.program_id(axis=1), num_loop, tl.num_programs(axis=1)):
+         offset = tl.arange(0, BLOCK_SIZE) + i * BLOCK_SIZE
+         mask = offset < chunk_seq_len
+         data = tl.load(
+diff -ruN -x __pycache__ -x '*.pyc' a/kernels/ops/kvcache/mla_buffer.py b/kernels/ops/kvcache/mla_buffer.py
+--- a/kernels/ops/kvcache/mla_buffer.py	2026-09-18 02:16:55.000000000 -0700
++++ b/kernels/ops/kvcache/mla_buffer.py	2026-09-25 05:38:00.229005581 -0700
+@@ -465,31 +465,34 @@
+     cache_k_nope_ptr,
+     cache_k_rope_ptr,
+     loc_ptr,
++    n_loc,
+     buffer_stride: tl.constexpr,
+     nope_stride: tl.constexpr,
+     rope_stride: tl.constexpr,
+     nope_dim: tl.constexpr,
+     rope_dim: tl.constexpr,
++    ROWS: tl.constexpr,
+ ):
+-    pid_loc = tl.program_id(0)
+-    loc = tl.load(loc_ptr + pid_loc).to(tl.int64)
+-    loc_src_ptr = kv_buffer_ptr + loc * buffer_stride
+-
+-    nope_offs = tl.arange(0, nope_dim)
+-    nope_src_ptr = loc_src_ptr + nope_offs
+-    nope_src = tl.load(nope_src_ptr)
++    rows = tl.program_id(0) * ROWS + tl.arange(0, ROWS)
++    row_mask = (rows < n_loc)[:, None]
++    loc = tl.load(loc_ptr + rows, mask=rows < n_loc, other=0).to(tl.int64)
++    loc_src_ptr = kv_buffer_ptr + loc[:, None] * buffer_stride
++    rows = rows.to(tl.int64)[:, None]
+ 
++    nope_offs = tl.arange(0, nope_dim)[None, :]
++    nope_src = tl.load(loc_src_ptr + nope_offs, mask=row_mask)
+     tl.store(
+-        cache_k_nope_ptr + pid_loc * nope_stride + nope_offs,
++        cache_k_nope_ptr + rows * nope_stride + nope_offs,
+         nope_src,
++        mask=row_mask,
+     )
+ 
+-    rope_offs = tl.arange(0, rope_dim)
+-    rope_src_ptr = loc_src_ptr + nope_dim + rope_offs
+-    rope_src = tl.load(rope_src_ptr)
++    rope_offs = tl.arange(0, rope_dim)[None, :]
++    rope_src = tl.load(loc_src_ptr + nope_dim + rope_offs, mask=row_mask)
+     tl.store(
+-        cache_k_rope_ptr + pid_loc * rope_stride + rope_offs,
++        cache_k_rope_ptr + rows * rope_stride + rope_offs,
+         rope_src,
++        mask=row_mask,
+     )
+ 
+ 
+@@ -538,14 +541,19 @@
+         return
+ 
+     rope_dim = cache_k_rope.shape[-1]  # 64
+-    get_mla_kv_buffer_kernel[grid](
++    # 8 rows per program: 31 -> 14 us for 49152 fp8->bf16 rows on B200 (one row per program is latency-bound).
++    rows_per_program = 8
++    get_mla_kv_buffer_kernel[(triton.cdiv(n_loc, rows_per_program),)](
+         kv_buffer,
+         cache_k_nope,
+         cache_k_rope,
+         loc,
++        n_loc,
+         kv_buffer.stride(0),
+         cache_k_nope.stride(0),
+         cache_k_rope.stride(0),
+         nope_dim,
+         rope_dim,
++        ROWS=rows_per_program,
++        num_warps=4,
+     )
+diff -ruN -x __pycache__ -x '*.pyc' a/srt/layers/attention/trtllm_mla_backend.py b/srt/layers/attention/trtllm_mla_backend.py
+--- a/srt/layers/attention/trtllm_mla_backend.py	2026-09-24 06:59:06.973744766 -0700
++++ b/srt/layers/attention/trtllm_mla_backend.py	2026-09-25 05:37:03.572723692 -0700
+@@ -34,6 +34,9 @@
+     set_mla_kv_concat_q,
+     set_mla_kv_concat_q_fp8,
+ )
++from sglang.kernels.ops.attention.mla_kv_pack_quantize_fp8 import (
++    mla_kv_pack_quantize_fp8,
++)
+ from sglang.kernels.ops.attention.utils import (
+     concat_mla_absorb_q_general,
+     mla_quantize_and_rope_for_fp8,
+@@ -122,7 +125,9 @@
+     q = q.to(torch.float8_e4m3fn)
+ 
+     k_scale = getattr(layer, "k_scale_float", None)
+-    if k_scale is None:
++    if k_scale is None or k.dtype == torch.float8_e4m3fn:
++        # K already packed to fp8 (pack_extend_kv / pack_prefix_chunk_kv
++        # quantize at unit scale), so the kernel must not rescale it.
+         k_scale = 1.0
+     if k_scale != 1.0:
+         assert hasattr(layer, "k_scale"), "k_scale is not set"
+@@ -134,7 +139,7 @@
+         k = k.to(torch.float8_e4m3fn)
+ 
+     v_scale = getattr(layer, "v_scale_float", None)
+-    if v_scale is None:
++    if v_scale is None or v.dtype == torch.float8_e4m3fn:
+         v_scale = 1.0
+     if v_scale != 1.0:
+         assert hasattr(layer, "v_scale"), "v_scale is not set"
+@@ -1138,6 +1143,70 @@
+             skip_softmax_threshold_scale_factor=envs.SGLANG_SKIP_SOFTMAX_PREFILL_THRESHOLD_SCALE_FACTOR.get(),
+         )
+ 
++    def _packs_fp8_prefill_kv(self, forward_batch: ForwardBatch) -> bool:
++        """The ragged prefill kernel reads unit-scale fp8 Q/K/V; the fp8 cast
++        is exact either way, so doing it at pack time only drops the bf16
++        concat + strided cast passes. Not for the flashinfer fallback, which
++        wants bf16 inputs."""
++        return (
++            self.data_type == torch.float8_e4m3fn
++            and forward_batch.forward_mode.is_extend()
++            and not forward_batch.forward_mode.is_target_verify()
++            and not forward_batch.forward_mode.is_draft_extend_v2()
++            and self.forward_prefill_metadata is not None
++            and not self.forward_prefill_metadata.fallback_to_flashinfer_impl
++        )
++
++    def pack_extend_kv(
++        self,
++        k_nope: torch.Tensor,
++        k_pe: torch.Tensor,
++        v: torch.Tensor,
++        layer: RadixAttention,
++        forward_batch: ForwardBatch,
++    ) -> Optional[tuple[torch.Tensor, torch.Tensor]]:
++        """Build the current chunk's fp8 K = [k_nope | k_pe] and fp8 V in one
++        launch (bit-identical to concat + ``.to(fp8)``). Returns None when the
++        default bf16 path must be kept."""
++        if not self._packs_fp8_prefill_kv(forward_batch):
++            return None
++        if getattr(layer, "k_scale_float", None) not in (None, 1.0) or getattr(
++            layer, "v_scale_float", None
++        ) not in (None, 1.0):
++            return None
++        return mla_kv_pack_quantize_fp8(k_nope, k_pe, v, enable_pdl=False)
++
++    def pack_prefix_chunk_kv(
++        self,
++        k_nope: torch.Tensor,
++        k_pe: torch.Tensor,
++        v: torch.Tensor,
++    ) -> tuple[torch.Tensor, torch.Tensor]:
++        """Pack a materialized prefix chunk into contiguous K/V for the ragged
++        kernel: unit-scale fp8 in one launch for the fp8 KV cache, else the
++        bf16 concat."""
++        if self.data_type == torch.float8_e4m3fn:
++            return mla_kv_pack_quantize_fp8(k_nope, k_pe, v, enable_pdl=False)
++        k = k_nope.new_empty(
++            (k_nope.shape[0], k_nope.shape[1], k_nope.shape[2] + k_pe.shape[-1])
++        )
++        k[..., : k_nope.shape[-1]] = k_nope
++        k[..., k_nope.shape[-1] :] = k_pe
++        return k, v
++
++    def prepare_chunked_prefill_qkv(
++        self,
++        q: torch.Tensor,
++        k: torch.Tensor,
++        v: torch.Tensor,
++        forward_batch: ForwardBatch,
++    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
++        """Cast Q once for the causal pass and every prefix pass (each ragged
++        launch would otherwise re-cast the same bf16 Q)."""
++        if self._packs_fp8_prefill_kv(forward_batch):
++            q = q.to(torch.float8_e4m3fn)
++        return q, k, v
++
+     def _set_kv_and_concat_q_fused(
+         self,
+         layer: RadixAttention,
+diff -ruN -x __pycache__ -x '*.pyc' a/srt/layers/attn_residual.py b/srt/layers/attn_residual.py
+--- a/srt/layers/attn_residual.py	2026-09-18 02:16:55.000000000 -0700
++++ b/srt/layers/attn_residual.py	2026-09-25 05:10:41.865637605 -0700
+@@ -91,6 +91,8 @@
+     score_norm: RMSNorm,
+     out_norm: RMSNorm,
+     write_bank_row: bool = False,
++    prefix_addend: Optional[torch.Tensor] = None,
++    prefix_sum_out: Optional[torch.Tensor] = None,
+ ) -> torch.Tensor:
+     """Warp-specialized TMA kernel: online softmax over row chunks with the
+     output RMSNorm fused, one persistent CTA per SM, per-nvb tuned launch
+@@ -113,6 +115,8 @@
+         nvb,
+         score_norm.variance_epsilon,
+         write_prefix=write_bank_row,
++        prefix_addend=prefix_addend,
++        prefix_sum_out=prefix_sum_out,
+     )
+     return out
+ 
+@@ -382,6 +386,23 @@
+             out_norm,
+             write_bank_row=write_bank_row,
+         )
++    if prefix_a.shape[0] > 0 and _use_fast(prefix_a.shape[1]):
++        # The TMA kernel streams the prefix row anyway, so the add folds into it.
++        prefix = torch.empty_like(prefix_a)
++        return (
++            _aggregate_fast(
++                prefix_a,
++                bank,
++                nvb,
++                score_proj,
++                score_norm,
++                out_norm,
++                write_bank_row=write_bank_row,
++                prefix_addend=prefix_b,
++                prefix_sum_out=prefix,
++            ),
++            prefix,
++        )
+     prefix = prefix_a + prefix_b
+     return (
+         _aggregate(
+diff -ruN -x __pycache__ -x '*.pyc' a/srt/model_executor/forward_batch_deepseek_mha_mixin.py b/srt/model_executor/forward_batch_deepseek_mha_mixin.py
+--- a/srt/model_executor/forward_batch_deepseek_mha_mixin.py	2026-09-18 02:16:55.000000000 -0700
++++ b/srt/model_executor/forward_batch_deepseek_mha_mixin.py	2026-09-25 05:23:54.025488318 -0700
+@@ -93,7 +93,11 @@
+                 num_chunk_tokens, dtype=torch.int32, device=device
+             )
+ 
+-            create_chunked_prefix_cache_kv_indices[(self.batch_size,)](
++            # 512 = the kernel's BLOCK_SIZE; 64 CTAs per request is arbitrary.
++            num_blocks = min(-(-self.prefix_chunk_max_seq_lens[idx] // 512), 64)
++            create_chunked_prefix_cache_kv_indices[
++                (self.batch_size, max(num_blocks, 1))
++            ](
+                 req_to_token,
+                 self.req_pool_indices,
+                 chunk_starts,
+diff -ruN -x __pycache__ -x '*.pyc' a/srt/models/deepseek_common/attention_forward_methods/forward_mha.py b/srt/models/deepseek_common/attention_forward_methods/forward_mha.py
+--- a/srt/models/deepseek_common/attention_forward_methods/forward_mha.py	2026-09-18 02:16:55.000000000 -0700
++++ b/srt/models/deepseek_common/attention_forward_methods/forward_mha.py	2026-09-25 05:02:58.010498115 -0700
+@@ -288,6 +288,14 @@
+         k_nope = kv[..., : self.qk_nope_head_dim]
+         v = kv[..., self.qk_nope_head_dim :]
+ 
++        # Backends whose kernel reads fp8 K/V pack [k_nope | k_pe] and cast V
++        # in one launch instead of a bf16 concat followed by strided casts.
++        pack_extend_kv = getattr(backend, "pack_extend_kv", None)
++        if pack_extend_kv is not None and self.qk_rope_head_dim > 0:
++            packed = pack_extend_kv(k_nope, k_pe, v, self.attn_mha, forward_batch)
++            if packed is not None:
++                return q, packed[0], packed[1], forward_batch
++
+         k = self._concat_and_cast_mha_k(k_nope, k_pe, forward_batch)
+         return q, k, v, forward_batch
+ 

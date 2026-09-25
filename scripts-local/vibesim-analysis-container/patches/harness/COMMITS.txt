@@ -90,3 +90,33 @@ d179b50 K3 driver: --bf16-gemm-init reproduces the production scheduler's bf16 G
 82e72f9 K3: new cases run with --bf16-gemm-init (production bf16 GEMM dispatch); report: fidelity gap quantified at <= 0.7%, decode results stand
 4428db9 K3: B12 commit-at-cap script, Codex B12b (prefill prediction fidelity) chained after the MLA-b512 rounds, then prefill oracle bake + prefill rounds
 38cf3ce K3 write-up: campaign 4 section (warm start, large-batch transfer + rounds, prefill infrastructure, fidelity gap, lessons 8-11)
+ca9f3c5 K3: patches/ — per-lever sglang patches (chain-validated against the best trees), harness + VibeSim patches; write-up §6 references each code change
+d80f157 K3 docs: one sign convention (Δ = latency change, negative = faster) in the write-up; legend in the report
+4e85ac8 K3 write-up §6: per-patch mechanism explanations with full patch paths, transfer to other input configurations, r21 128x8k noisy-baseline note
+bfd776e K3 write-up: name and describe the oracle and agent containers under the pipeline figure
+e45b701 K3 docs: MLA-b512 rounds 3-4 null; b512 campaign closed
+5e1f264 K3 loop: Claude Code (Opus 5.5 via Bedrock) as an alternative agent harness -- claude runner image, AGENT_KIND branch in the trial runner, *_claude cases (b512 + prefill), launchers
+303439e K3 loop: any free GPU may be used (user policy 2026-09-25): pick_free_gpu.sh, continuous runner accepts 0-7, prefill waiter uses it; Claude KDA/MLA b512 loops in parallel on two free GPUs
+18efb17 K3 driver: --flashinfer-autotune reproduces the production runner's FlashInfer autotune warmup (tuned MXFP4 MoE tactics; fallback tactic was ~9% slower at B=512)
+cad5858 K3 prefill cases: run with --flashinfer-autotune as well (production MoE tactics)
+69e04e9 K3 docs: second fidelity gap (FlashInfer autotune warmup) quantified; Claude round-1 b512 PASSes classified as harness-gap reproduction
+53de365 K3 docs: Claude Opus 5.5 b512 round-1 verdicts (KDA -11.1%, MLA -7.3% at 512; decomposition into harness-gap vs genuine kernel wins)
+3cf0635 K3 warm-start KB: include b512 (Codex + Claude) trials, build via temp dir + rsync so the mounted KB never vanishes mid-trial
+cab1611 K3: prefill profile script takes PROFILE_TAG/EXTRA_FLAGS (v2 tables with the production fidelity flags)
+4855e26 K3 write-up: prefill baselines re-measured clean (KDA 8.8/8.9/8.6 ms, MLA 12.1/8.1/7.8 ms); the 22 ms tables were contention; B12 predictions within 3%; B12b stopped
+29b5cb0 K3: pick_free_gpu excludes GPUs bound to running containers (a thinking agent holds 0 MiB)
+4a4bc2c K3 driver: --flashinfer-autotune uses an on-disk tactic cache in the FlashInfer cache mount (as production does) so judge reps share tactics
+e5f03cb K3 docs + KB: Claude b512 round 2 (MLA tail-split wave fix PASS -1.8%; KDA kernel wins lost to autotune noise)
+aea84e0 K3 docs + KB: Claude MLA-b512 round 3 PASS (campaign 3/3, 976.3 -> 877.8 us at 512)
+9256cd1 K3 docs + KB: Claude KDA-b512 round 3 fails correctness (residual fusion rounding); campaign 1/3 PASS
+52fb826 K3 docs + KB: first prefill PASS (Claude MLA-prefill r1: fused fp8 K/V pack, -4.6% at the 48k-prefix point, bit-exact)
+caae485 K3 docs: stacked KDA-b512 r3 tree also drifts (reduction reorder), nothing salvaged
+6944a2b K3 docs + KB: MLA-prefill r2 PASS (CuTe-DSL prefix attention, -2.7%); KDA-prefill r1 judge OOM (tenant) -> re-judge
+1c4e823 K3 docs + KB: Claude KDA-prefill round 1 PASS (-5.6..-6.3%, copy removal + host-sync drop)
+5981caa K3 docs + KB: MLA-prefill Claude round 3 null (re-judged clean); campaign closed at -7.4%
+f214196 K3 docs + KB: Claude KDA-prefill round 2 (CUDA h-scan kernel, real but below the 3-sigma floor on the primary point)
+2a672ff K3: multi-seed recheck script takes CASES (Claude b512/prefill best trees)
+64c0763 K3 judge: container names get a pid suffix (two judges started in the same second collided on the name)
+4965d1c K3 write-up: multi-seed accuracy hardening of the Claude b512/prefill trees (5/5 PASS so far)
+f29588f K3 write-up: MLA-b512 Claude tree seed-1 recheck PASS (6/6)
+ab1bf94 K3 docs + KB: Claude KDA-prefill round 3 below 3-sigma; campaign closed at the round-1 tree
