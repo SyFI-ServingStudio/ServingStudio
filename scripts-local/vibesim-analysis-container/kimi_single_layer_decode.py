@@ -1031,8 +1031,13 @@ class MLAPrefillState:
         self.backend.init_forward_metadata(fb)
         # A real step builds a fresh ForwardBatch, so the prefix-chunk plan
         # (prepare_chunked_prefix_cache_info: chunking + kv-index gather) runs every step;
-        # clearing num_prefix_chunks before each call keeps that work in the timed step.
-        fb._k3_pre_step = lambda: setattr(fb, "num_prefix_chunks", None)
+        # clearing its two "already prepared" gates before each call keeps that work in the
+        # timed step (prepare returns early while prefix_chunk_len is set, and the chunked
+        # attention asserts num_prefix_chunks is not None).
+        def _pre_step():
+            fb.num_prefix_chunks = None
+            fb.prefix_chunk_len = None
+        fb._k3_pre_step = _pre_step
         return fb
 
     def free(self):
