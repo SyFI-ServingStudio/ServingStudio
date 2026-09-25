@@ -1,0 +1,1246 @@
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/pristine_tree/kernels/jit/csrc/elementwise/set_mla_kv_concat_q.cuh /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/trial_2_tree_judged/kernels/jit/csrc/elementwise/set_mla_kv_concat_q.cuh
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/pristine_tree/kernels/jit/csrc/elementwise/set_mla_kv_concat_q.cuh	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/trial_2_tree_judged/kernels/jit/csrc/elementwise/set_mla_kv_concat_q.cuh	2026-09-24 06:45:33.488169346 -0700
+@@ -297,6 +297,9 @@
+       case 8:
+         launch.template operator()<8>();
+         break;
++      case 16:
++        launch.template operator()<16>();
++        break;
+       default:
+         Panic("Unsupported num_warps_per_block=", num_warps_per_block);
+     }
+@@ -598,6 +601,9 @@
+       case 8:
+         launch.template operator()<8>();
+         break;
++      case 16:
++        launch.template operator()<16>();
++        break;
+       default:
+         Panic("Unsupported num_warps_per_block=", num_warps_per_block);
+     }
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/pristine_tree/kernels/jit/csrc/kimi_k3/attn_res/fused_tma.cuh /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/trial_2_tree_judged/kernels/jit/csrc/kimi_k3/attn_res/fused_tma.cuh
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/pristine_tree/kernels/jit/csrc/kimi_k3/attn_res/fused_tma.cuh	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/trial_2_tree_judged/kernels/jit/csrc/kimi_k3/attn_res/fused_tma.cuh	2026-09-25 05:10:23.900140039 -0700
+@@ -175,6 +175,10 @@
+   // row snapshot, bank row nvb (strided by stride_bm like the read rows).
+   // The kernel never reads row nvb, so the write races with nothing.
+   bf16_t* __restrict__ prefix_dst;
++  // Fused pending residual add (nullptr = off): the prefix row is
++  // bf16(prefix_sum + prefix_addend), materialized into prefix_sum_out.
++  const bf16_t* prefix_addend;
++  bf16_t* prefix_sum_out;
+   // Optional fused NVLS reduce-scatter source. When input_mc is non-null,
+   // the producer warp materializes this rank's reduced token shard plus the
+   // local residual into prefix_sum/prefix_out before TMA consumes it.
+@@ -246,6 +250,7 @@
+     float warp_ssq[kNumConsumerWarps];
+     uint32_t tmem_base;
+     alignas(128) bf16_t buf[kNumStages][kChunkRows][kDim];
++    alignas(128) bf16_t addend[kNumStages][kDim];  // prefix_addend row, per slot
+   };
+ 
+   static SGL_DEVICE void forward(const AttnResTMAParams& params, Smem* smem);
+@@ -304,7 +309,8 @@
+             ptx::mbar_wait_parity(&smem->bar_free[slot], phase ^ 1);
+           }
+           // One pull per chunk; each row still gets its own bulk copy.
+-          ptx::mbar_arrive_expect_tx(&smem->bar_full[slot], an * kRowBytes);
++          const bool has_addend = params.prefix_addend != nullptr && base_row + an == kNumRows + 1;
++          ptx::mbar_arrive_expect_tx(&smem->bar_full[slot], (an + (has_addend ? 1 : 0)) * kRowBytes);
+ #pragma unroll
+           for (uint32_t r = 0; r < an; ++r) {
+             const auto row = base_row + r;
+@@ -315,6 +321,10 @@
+             if (token == blockIdx.x && row == kNumRows) PDLWaitPrimary<true>();
+             ptx::cp_async_bulk_1d_load(&smem->buf[slot][r], src, kRowBytes, &smem->bar_full[slot]);
+           }
++          if (has_addend) {
++            ptx::cp_async_bulk_1d_load(
++                &smem->addend[slot], params.prefix_addend + token * kDim, kRowBytes, &smem->bar_full[slot]);
++          }
+         }
+       }
+       PDLTriggerSecondary<true>();
+@@ -394,6 +404,18 @@
+           for (uint32_t r = 0; r < an; ++r) {
+             rows[si][r].load(&smem->buf[slot][r][offset]);
+           }
++          if (params.prefix_addend != nullptr && base_row + an == kNumRows + 1) {
++            // Same fp32 add + single bf16 rounding as torch's a + b.
++            const uint32_t pr = kNumRows - base_row;
++            row_vec_t addend;
++            addend.load(&smem->addend[slot][offset]);
++#pragma unroll
++            for (uint32_t j = 0; j < kVecElems / 2; ++j) {
++              const auto x = cast<float2>(rows[si][pr][j]);
++              const auto y = cast<float2>(addend[j]);
++              rows[si][pr][j] = cast<bf16x2_t>(make_float2(x.x + y.x, x.y + y.y));
++            }
++          }
+ #pragma unroll
+           for (uint32_t r = 0; r < an; ++r) {
+ #pragma unroll
+@@ -420,6 +442,16 @@
+             rows[si][pr].store(dst, tile * (kTile / kVecElems) + tid_in_group);
+           }
+         }
++        if (params.prefix_sum_out != nullptr && base_row + an == kNumRows + 1) {
++          const uint32_t pr = kNumRows - base_row;
++          auto* dst = params.prefix_sum_out + static_cast<int64_t>(token) * kDim;
++#pragma unroll
++          for (uint32_t si = 0; si < kSlicesPerGroup; ++si) {
++            const auto tile = si * kNumGroups + group;
++            if (tile >= kNumTiles) continue;
++            rows[si][pr].store(dst, tile * (kTile / kVecElems) + tid_in_group);
++          }
++        }
+ 
+         float acc_rms[kChunkRows];
+         float acc_dot[kChunkRows];
+@@ -685,7 +717,9 @@
+       const tvm::ffi::TensorView out,
+       int64_t nvb,
+       double eps,
+-      bool write_prefix) {
++      bool write_prefix,
++      std::optional<tvm::ffi::TensorView> prefix_addend,
++      std::optional<tvm::ffi::TensorView> prefix_sum_out) {
+     using namespace host;
+ 
+     auto T_ = SymbolicSize{"num_tokens"};
+@@ -697,6 +731,16 @@
+     TensorMatcher({T_, H_}).with_dtype<bf16_t>().with_device(device).verify(prefix_sum).verify(out);
+     TensorMatcher({T_, NB_, H_}).with_dtype<bf16_t>().with_device(device).verify(bank);
+     TensorMatcher({H_}).with_dtype<bf16_t>().with_device(device).verify(cw).verify(ow);
++    RuntimeCheck(
++        prefix_addend.has_value() == prefix_sum_out.has_value(),
++        "attn_res_fused_tma: prefix_addend and prefix_sum_out go together");
++    if (prefix_addend.has_value()) {
++      TensorMatcher({T_, H_})
++          .with_dtype<bf16_t>()
++          .with_device(device)
++          .verify(prefix_addend.value())
++          .verify(prefix_sum_out.value());
++    }
+ 
+     const auto num_tokens = static_cast<int64_t>(T_.unwrap());
+     const auto H = static_cast<int64_t>(H_.unwrap());
+@@ -736,6 +780,10 @@
+         .ow = static_cast<const bf16_t*>(ow.data_ptr()),
+         .out = static_cast<bf16_t*>(out.data_ptr()),
+         .prefix_dst = write_prefix ? static_cast<bf16_t*>(bank.data_ptr()) + nvb * H : nullptr,
++        .prefix_addend =
++            prefix_addend.has_value() ? static_cast<const bf16_t*>(prefix_addend.value().data_ptr()) : nullptr,
++        .prefix_sum_out =
++            prefix_sum_out.has_value() ? static_cast<bf16_t*>(prefix_sum_out.value().data_ptr()) : nullptr,
+         .input_mc = nullptr,
+         .residual = nullptr,
+         .prefix_out = nullptr,
+@@ -816,6 +864,8 @@
+         .ow = static_cast<const bf16_t*>(ow.data_ptr()),
+         .out = static_cast<bf16_t*>(out.data_ptr()),
+         .prefix_dst = nullptr,
++        .prefix_addend = nullptr,
++        .prefix_sum_out = nullptr,
+         .input_mc = reinterpret_cast<const uint8_t*>(static_cast<uintptr_t>(input_mc_ptr)) +
+                     pull.rank * local_elems * sizeof(bf16_t),
+         .residual = residual.has_value() ? static_cast<const bf16_t*>(residual.value().data_ptr()) : nullptr,
+@@ -892,6 +942,8 @@
+         .ow = static_cast<const bf16_t*>(ow.data_ptr()),
+         .out = static_cast<bf16_t*>(out.data_ptr()),
+         .prefix_dst = write_prefix ? static_cast<bf16_t*>(bank.data_ptr()) + nvb * H : nullptr,
++        .prefix_addend = nullptr,
++        .prefix_sum_out = nullptr,
+         .input_mc = nullptr,
+         .residual = nullptr,
+         .prefix_out = nullptr,
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/pristine_tree/kernels/jit/csrc/moe/route_quant_fused.cuh /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/trial_2_tree_judged/kernels/jit/csrc/moe/route_quant_fused.cuh
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/pristine_tree/kernels/jit/csrc/moe/route_quant_fused.cuh	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/trial_2_tree_judged/kernels/jit/csrc/moe/route_quant_fused.cuh	2026-09-23 19:25:59.719453784 -0700
+@@ -9,9 +9,9 @@
+ // standalone route_radix body (same TU, same flags — no fast-math, which the
+ // routing bit-exactness contract requires and the quant math tolerates: its
+ // only transcendentals are explicit intrinsics and exact bit manipulation),
+-// and QuantTrait::run is the per_token_group_quant math. Specialized like
+-// route_radix itself: 896 experts, top-16, and a 3584-wide bf16 activation row
+-// (112 ue8m0 groups of 32 = 224 lanes, exactly the routing block width).
++// and QuantTrait::run is the per_token_group_quant math. The JIT exposes the
++// original 896-expert/top-16 shape and the production EP8 local 112/top-2
++// shape; both use the same 3584-wide activation quantization.
+ 
+ #include "../gemm/per_token_group_quant.cuh"
+ #include "route_radix.cuh"
+@@ -41,13 +41,32 @@
+ inline constexpr uint32_t kQuantGroupsPerRow_ = LargeRouterRadixTrait::kBlockSize / RouteQuantTrait::kNumLanes;
+ inline constexpr uint32_t kQuantHidden_ = kQuantGroupsPerRow_ * RouteQuantTrait::kGroupSize;  // 3584
+ 
+-template <bool kUsePDL, typename TScore, typename TX>
+-__global__ __launch_bounds__(LargeRouterRadixTrait::kBlockSize)  //
++struct LocalRouterRadixTrait : moe::radix::RadixSelectBase {
++  static constexpr uint32_t kNumExperts = 112;
++  static constexpr uint32_t kTopK = 2;
++  // The quant half needs one two-lane subwarp for each of the 112 groups.
++  // The router uses the first 112 scalar entries and masks the rest.
++  static constexpr uint32_t kBlockSize = 224;
++  static constexpr uint32_t kVecSize = 1;
++  static constexpr uint32_t kNumWarps = kBlockSize / 32;
++
++  struct Smem {
++    uint32_t warp_sum[3][kNumWarps];
++    MatchBin match[kRadixRounds];
++    uint32_t histogram[kRadixSize];
++    int32_t wid[kTopK];
++    uint32_t wkey[kTopK];
++    fp32_t wact[kTopK];
++  };
++};
++
++template <typename RouterTrait, bool kUsePDL, typename TScore, typename TX>
++__global__ __launch_bounds__(RouterTrait::kBlockSize)  //
+     void route_quant_fused_kernel(const __grid_constant__ RouteQuantFusedParams params) {
+   const auto M = static_cast<uint32_t>(params.route.M);
+   if (blockIdx.x < M) {
+-    __shared__ typename LargeRouterRadixTrait::Smem smem;
+-    route_radix_block<kUsePDL, TScore>(params.route, smem);
++    __shared__ typename RouterTrait::Smem smem;
++    route_radix_block<RouterTrait, kUsePDL, TScore>(params.route, smem);
+   } else {
+     // Quant CTAs read the same primary-kernel output (the fused-front GEMM)
+     // as the routing CTAs, so they carry their own PDL wait/trigger.
+@@ -138,7 +157,7 @@
+ 
+ #define SGL_ROUTE_QUANT_LAUNCH(TS, TX)                                    \
+   LaunchKernel(2 * M, LargeRouterRadixTrait::kBlockSize, device.unwrap()) \
+-      .enable_pdl(kUsePDL)(route_quant_fused_kernel<kUsePDL, TS, TX>, params)
++      .enable_pdl(kUsePDL)(route_quant_fused_kernel<LargeRouterRadixTrait, kUsePDL, TS, TX>, params)
+ 
+     if (score_dtype.is_type<fp32_t>()) {
+       if (x_dtype.is_type<fp32_t>()) {
+@@ -157,4 +176,116 @@
+   }
+ };
+ 
++// The local EP8 shape has different routing constants from the full-model
++// radix kernel. Keep a separate wrapper so the common JIT module can dispatch
++// without compiling a runtime-sized router.
++template <bool kUsePDL>
++struct RouteQuantFusedLocalKernel {
++  static void
++  run(const tvm::ffi::TensorView scores,
++      const tvm::ffi::TensorView bias,
++      const tvm::ffi::TensorView out_w,
++      const tvm::ffi::TensorView out_i,
++      const tvm::ffi::TensorView out_packed,
++      const tvm::ffi::TensorView x,
++      const tvm::ffi::TensorView out_q,
++      const tvm::ffi::TensorView out_s,
++      int64_t topk,
++      double routed_scaling_factor,
++      bool renormalize,
++      bool apply_scale) {
++    using namespace host;
++
++    auto M_ = SymbolicSize{"num_tokens"};
++    auto N_ = SymbolicSize{"num_experts"};
++    auto K_ = SymbolicSize{"topk"};
++    auto device = SymbolicDevice{};
++    device.set_options<kDLCUDA>();
++
++    auto score_dtype = SymbolicDType{};
++    TensorMatcher({M_, N_})
++        .with_dtype<bf16_t, fp32_t>(score_dtype)
++        .with_device(device)
++        .with_strides({-1, 1})
++        .verify(scores);
++    TensorMatcher({N_}).with_dtype<fp32_t>().with_device(device).verify(bias);
++    TensorMatcher({M_, K_}).with_dtype<fp32_t>().with_device(device).verify(out_w);
++    TensorMatcher({M_, K_}).with_dtype<int32_t>().with_device(device).verify(out_i);
++    TensorMatcher({M_, K_})
++        .with_dtype<int32_t>()
++        .with_strides({-1, 1})
++        .with_device(device)
++        .verify(out_packed);
++    auto x_dtype = SymbolicDType{};
++    TensorMatcher({M_, -1})
++        .with_dtype<bf16_t, fp32_t>(x_dtype)
++        .with_device(device)
++        .with_strides({-1, 1})
++        .verify(x);
++
++    RuntimeCheck(
++        N_.unwrap() == LocalRouterRadixTrait::kNumExperts &&
++            K_.unwrap() == LocalRouterRadixTrait::kTopK &&
++            topk == LocalRouterRadixTrait::kTopK,
++        "route_quant_fused local wrapper requires N=112, K=2");
++    RuntimeCheck(
++        scores.stride(0) % 4 == 0,
++        "route_quant_fused: scores row stride must be a multiple of 4");
++
++    // The activation row is shared with the full-model specialization, so its
++    // quantization layout and numerical path stay identical.
++    const auto quant_params =
++        x_dtype.is_type<fp32_t>()
++            ? build_quant_context<RouteQuantTraitT<fp32_t>, /*kMasked=*/false>(x, out_q, out_s).params
++            : build_quant_context<RouteQuantTraitT<bf16_t>, /*kMasked=*/false>(x, out_q, out_s).params;
++    RuntimeCheck(
++        quant_params.hidden_size == kQuantHidden_,
++        "route_quant_fused is specialized for a 3584-wide activation row");
++    RuntimeCheck(
++        quant_params.num_tokens == static_cast<uint32_t>(M_.unwrap()),
++        "route_quant_fused: scores and activations must have the same token count");
++
++    const auto M = static_cast<uint32_t>(M_.unwrap());
++    if (M == 0) return;
++
++    const auto params = RouteQuantFusedParams{
++        .route =
++            {scores.data_ptr(),
++             static_cast<const fp32_t*>(bias.data_ptr()),
++             static_cast<fp32_t*>(out_w.data_ptr()),
++             static_cast<int32_t*>(out_i.data_ptr()),
++             static_cast<int32_t*>(out_packed.data_ptr()),
++             static_cast<int>(M),
++             static_cast<long long>(scores.stride(0)),
++             static_cast<long long>(out_w.stride(0)),
++             static_cast<long long>(out_i.stride(0)),
++             static_cast<long long>(out_packed.stride(0)),
++             static_cast<float>(routed_scaling_factor),
++             renormalize ? 1 : 0,
++             apply_scale ? 1 : 0,
++             /*sorted=*/0},
++        .quant = quant_params,
++    };
++
++#define SGL_ROUTE_QUANT_LOCAL_LAUNCH(TS, TX)                                      \
++  LaunchKernel(2 * M, LocalRouterRadixTrait::kBlockSize, device.unwrap())         \
++      .enable_pdl(kUsePDL)(route_quant_fused_kernel<LocalRouterRadixTrait, kUsePDL, TS, TX>, params)
++
++    if (score_dtype.is_type<fp32_t>()) {
++      if (x_dtype.is_type<fp32_t>()) {
++        SGL_ROUTE_QUANT_LOCAL_LAUNCH(fp32_t, fp32_t);
++      } else {
++        SGL_ROUTE_QUANT_LOCAL_LAUNCH(fp32_t, bf16_t);
++      }
++    } else {
++      if (x_dtype.is_type<fp32_t>()) {
++        SGL_ROUTE_QUANT_LOCAL_LAUNCH(bf16_t, fp32_t);
++      } else {
++        SGL_ROUTE_QUANT_LOCAL_LAUNCH(bf16_t, bf16_t);
++      }
++    }
++#undef SGL_ROUTE_QUANT_LOCAL_LAUNCH
++  }
++};
++
+ }  // namespace sglang
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/pristine_tree/kernels/jit/csrc/moe/route_radix.cuh /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/trial_2_tree_judged/kernels/jit/csrc/moe/route_radix.cuh
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/pristine_tree/kernels/jit/csrc/moe/route_radix.cuh	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/trial_2_tree_judged/kernels/jit/csrc/moe/route_radix.cuh	2026-09-23 18:57:48.116294641 -0700
+@@ -117,10 +117,11 @@
+ // Whole-CTA routing body, callable from other kernels (the fused
+ // route+quant launch runs it on its first M CTAs). Routes row `blockIdx.x`;
+ // every thread of the 224-wide CTA must enter (block barriers inside).
+-template <bool kUsePDL, typename TScore>
+-SGL_DEVICE void route_radix_block(const RouteRadixParams& params, typename LargeRouterRadixTrait::Smem& smem) {
++template <typename RouterTrait, bool kUsePDL, typename TScore>
++SGL_DEVICE void route_radix_block(
++    const RouteRadixParams& params, typename RouterTrait::Smem& smem) {
+   using namespace device;
+-  using T = LargeRouterRadixTrait;
++  using T = RouterTrait;
+   constexpr uint32_t kVecSize = T::kVecSize;
+   constexpr uint32_t kRadixLanes = T::kRadixSize / 2;  // 128: 2 bins per thread
+   enum { BAR_RESERVED = 0, BAR_SUM = 1 };
+@@ -135,33 +136,51 @@
+   // ---- Load + key transform: thread tx owns experts [4*tx, 4*tx+4) ----
+   uint32_t keys[kVecSize];
+   float act[kVecSize];  // raw sigmoid (weight source) — never NaN-sanitized
++  bool active[kVecSize];
+   {
+-    const auto scores = static_cast<const TScore*>(params.scores) + bx * params.scores_stride;
+-    AlignedVector<fp32x2_t, kVecSize / 2> bias_vec;
+-    // bf16: 2x bf16x2 (8B row loads); fp32: 2x fp32x2 (16B row loads). The
+-    // radix math below is fp32 either way — only the load width differs.
+-    AlignedVector<packed_t<TScore>, kVecSize / 2> scores_vec;
+-
+     // Bias may be produced by a preceding cast or fill kernel (the caller
+     // does not guarantee a frozen weight), so wait before loading either input.
+     PDLWaitPrimary<kUsePDL>();
+-    bias_vec.load(params.bias, tx);
+-    scores_vec.load(scores, tx);
++    if constexpr (kVecSize == 1) {
++      // Local EP shards have 112 experts. The 224-thread launch is retained
++      // for the quant half, so inactive threads participate in barriers but do
++      // not read past the score or bias rows.
++      const auto expert = tx;
++      if (expert < T::kNumExperts) {
++        const auto scores = static_cast<const TScore*>(params.scores) + bx * params.scores_stride;
++        const float score = static_cast<float>(scores[expert]);
++        const float sx = moe::radix::sigmoid_match(score);
++        act[0] = sx;
++        keys[0] = moe::radix::biased_to_key(
++            moe::radix::nan_floor(sx + static_cast<float>(params.bias[expert])));
++      } else {
++        act[0] = 0.0f;
++        keys[0] = 0u;
++      }
++    } else {
++      const auto scores = static_cast<const TScore*>(params.scores) + bx * params.scores_stride;
++      AlignedVector<fp32x2_t, kVecSize / 2> bias_vec;
++      // bf16: 2x bf16x2 (8B row loads); fp32: 2x fp32x2 (16B row loads). The
++      // radix math below is fp32 either way — only the load width differs.
++      AlignedVector<packed_t<TScore>, kVecSize / 2> scores_vec;
++      bias_vec.load(params.bias, tx);
++      scores_vec.load(scores, tx);
+ 
+ #pragma unroll
+-    for (uint32_t i = 0; i < kVecSize / 2; ++i) {
+-      fp32x2_t xy;
+-      if constexpr (std::is_same_v<TScore, fp32_t>) {
+-        xy = scores_vec[i];
+-      } else {
+-        xy = cast<fp32x2_t>(scores_vec[i]);
++      for (uint32_t i = 0; i < kVecSize / 2; ++i) {
++        fp32x2_t xy;
++        if constexpr (std::is_same_v<TScore, fp32_t>) {
++          xy = scores_vec[i];
++        } else {
++          xy = cast<fp32x2_t>(scores_vec[i]);
++        }
++        const auto [x, y] = xy;
++        const auto sx = moe::radix::sigmoid_match(x), sy = moe::radix::sigmoid_match(y);
++        keys[2 * i + 0] = moe::radix::biased_to_key(moe::radix::nan_floor(sx + bias_vec[i].x));
++        keys[2 * i + 1] = moe::radix::biased_to_key(moe::radix::nan_floor(sy + bias_vec[i].y));
++        act[2 * i + 0] = sx;
++        act[2 * i + 1] = sy;
+       }
+-      const auto [x, y] = xy;
+-      const auto sx = moe::radix::sigmoid_match(x), sy = moe::radix::sigmoid_match(y);
+-      keys[2 * i + 0] = moe::radix::biased_to_key(moe::radix::nan_floor(sx + bias_vec[i].x));
+-      keys[2 * i + 1] = moe::radix::biased_to_key(moe::radix::nan_floor(sy + bias_vec[i].y));
+-      act[2 * i + 0] = sx;
+-      act[2 * i + 1] = sy;
+     }
+   }
+ 
+@@ -170,10 +189,9 @@
+   //   active[i]      <=> key's top 8r bits == threshold's top 8r bits
+   //   total_active    = size of the active set
+   //   topk            = winners still to take from the active set (1..total_active)
+-  bool active[kVecSize];
+ #pragma unroll
+   for (uint32_t i = 0; i < kVecSize; ++i) {
+-    active[i] = true;
++    active[i] = tx * kVecSize + i < T::kNumExperts;
+   }
+ 
+   uint32_t total_active = T::kNumExperts;
+@@ -255,7 +273,8 @@
+   if (take_all_equals) {
+ #pragma unroll
+     for (uint32_t i = 0; i < kVecSize; ++i) {
+-      selected[i] = active[i] || (keys[i] & examined_mask) > threshold;
++      const bool valid = tx * kVecSize + i < T::kNumExperts;
++      selected[i] = valid && (active[i] || (keys[i] & examined_mask) > threshold);
+     }
+   } else {  // deterministic tie-break
+     uint32_t cnt = 0;
+@@ -268,7 +287,8 @@
+     for (uint32_t i = 0; i < kVecSize; ++i) {
+       const bool eq_win = active[i] && rank < topk;
+       if (active[i]) ++rank;
+-      selected[i] = eq_win || (keys[i] & examined_mask) > threshold;
++      const bool valid = tx * kVecSize + i < T::kNumExperts;
++      selected[i] = valid && (eq_win || (keys[i] & examined_mask) > threshold);
+     }
+   }
+ 
+@@ -324,11 +344,11 @@
+   }
+ }
+ 
+-template <bool kUsePDL, typename TScore>
+-__global__ __launch_bounds__(LargeRouterRadixTrait::kBlockSize)  //
++template <typename RouterTrait, bool kUsePDL, typename TScore>
++__global__ __launch_bounds__(RouterTrait::kBlockSize)  //
+     void route_radix_kernel(const __grid_constant__ RouteRadixParams params) {
+-  __shared__ typename LargeRouterRadixTrait::Smem smem;
+-  route_radix_block<kUsePDL, TScore>(params, smem);
++  __shared__ typename RouterTrait::Smem smem;
++  route_radix_block<RouterTrait, kUsePDL, TScore>(params, smem);
+ }
+ 
+ // ---------------------------------------------------------------------------
+@@ -642,10 +662,10 @@
+ 
+     if (score_dtype.is_type<fp32_t>()) {
+       LaunchKernel(M, LargeRouterRadixTrait::kBlockSize, device.unwrap())
+-          .enable_pdl(kUsePDL)(route_radix_kernel<kUsePDL, fp32_t>, params);
++          .enable_pdl(kUsePDL)(route_radix_kernel<LargeRouterRadixTrait, kUsePDL, fp32_t>, params);
+     } else {
+       LaunchKernel(M, LargeRouterRadixTrait::kBlockSize, device.unwrap())
+-          .enable_pdl(kUsePDL)(route_radix_kernel<kUsePDL, bf16_t>, params);
++          .enable_pdl(kUsePDL)(route_radix_kernel<LargeRouterRadixTrait, kUsePDL, bf16_t>, params);
+     }
+   }
+ };
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/pristine_tree/kernels/ops/attention/cute_dsl_fmha_fp8.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/trial_2_tree_judged/kernels/ops/attention/cute_dsl_fmha_fp8.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/pristine_tree/kernels/ops/attention/cute_dsl_fmha_fp8.py	1969-12-31 16:00:00.000000000 -0800
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/trial_2_tree_judged/kernels/ops/attention/cute_dsl_fmha_fp8.py	2026-09-25 06:01:23.550067962 -0700
+@@ -0,0 +1,120 @@
++"""fp8 ragged prefill FMHA (cute-dsl, SM100) with full softmax correction.
++
++flashinfer's cute-dsl FMHA artifacts are built with ``enable_skip_correction``,
++which also drops the fp8 P pre-scale (P stays in [0, 1] of E4M3) and doubles
++the row error vs the trtllm-gen cubin. Compiling with the correction always
++on restores the 2^8 P pre-scale and trtllm-gen accuracy, and still beats the
++cubin on the 12-head MLA prefill shapes.
++"""
++
++from __future__ import annotations
++
++import functools
++import math
++
++import torch
++
++
++@functools.lru_cache(maxsize=None)
++def is_supported() -> bool:
++    # ex2 emulation below is tuned for CC 10.0; other Blackwell parts untested.
++    return torch.cuda.get_device_capability() == (10, 0)
++
++
++@functools.lru_cache(maxsize=None)
++def _compile(num_heads: int, head_dim: int, head_dim_v: int, is_causal: bool):
++    import cutlass
++    import cutlass.cute as cute
++    from cutlass.cute.runtime import make_fake_compact_tensor, make_fake_stream
++    from cutlass.cute.typing import Int32
++    from flashinfer.cute_dsl.attention.fmha.fmha import (
++        BlackwellFusedMultiHeadAttentionForward,
++    )
++    from flashinfer.cute_dsl.attention.fmha.helpers import fmha_helpers
++
++    fmha = BlackwellFusedMultiHeadAttentionForward(
++        qk_acc_dtype=cutlass.Float32,
++        pv_acc_dtype=cutlass.Float32,
++        mma_tiler=(128, 128),
++        head_dim=head_dim if head_dim == head_dim_v else (head_dim, head_dim_v),
++        is_persistent=False,
++        mask_type=(
++            fmha_helpers.MaskEnum.WINDOW_MASK_INFERENCE
++            if is_causal
++            else fmha_helpers.MaskEnum.RESIDUAL_MASK
++        ),
++        enable_ex2_emulation=True,
++        enable_skip_correction=False,
++        use_tma_store=False,
++    )
++
++    fp8 = cutlass.Float8E4M3FN
++    b, s_q, s_k, h_k, h_r, n_seq = (cute.sym_int() for _ in range(6))
++
++    def fake(dtype, shape, align):
++        order = tuple(range(len(shape) - 1, -1, -1))
++        return make_fake_compact_tensor(
++            dtype, shape, stride_order=order, assumed_align=align
++        )
++
++    scale_softmax = 1.0 / math.sqrt(head_dim)
++    return cute.compile(
++        fmha,
++        fake(fp8, (b, s_q, h_k, h_r, head_dim), 16),
++        fake(fp8, (b, s_k, h_k, 1, head_dim), 16),
++        fake(fp8, (b, s_k, h_k, 1, head_dim_v), 16),
++        fake(cutlass.BFloat16, (b, s_q, h_k, h_r, head_dim_v), 32),
++        (1, 1, 1, 1, num_heads, num_heads, head_dim, head_dim_v),
++        make_fake_compact_tensor(Int32, (n_seq,), assumed_align=16),
++        make_fake_compact_tensor(Int32, (n_seq,), assumed_align=16),
++        fake(cutlass.Float32, (b, s_q, h_k, h_r), 16),
++        None,
++        scale_softmax * math.log2(math.e),
++        scale_softmax,
++        1.0,
++        None,
++        None,
++        Int32(0) if is_causal else None,
++        None,
++        None,
++        make_fake_stream(use_tvm_ffi_env_stream=True),
++        False,
++        options="--enable-tvm-ffi --opt-level 2",
++    )
++
++
++def cute_dsl_fmha_fp8_ragged_prefill(
++    *,
++    q: torch.Tensor,
++    k: torch.Tensor,
++    v: torch.Tensor,
++    out: torch.Tensor,
++    lse: torch.Tensor,
++    cum_seq_lens_q: torch.Tensor,
++    cum_seq_lens_kv: torch.Tensor,
++    max_q_len: int,
++    max_kv_len: int,
++    sm_scale: float,
++    v_scale: float,
++    is_causal: bool,
++) -> None:
++    """q/k: [tokens, heads, d] fp8, v: [tokens, heads, dv] fp8, out bf16 and
++    lse fp32 [tokens_q, heads] written in place."""
++    from flashinfer.attention.cute_dsl.fmha import cute_dsl_fmha_ragged_prefill
++
++    kernel_fn = _compile(q.shape[1], q.shape[2], v.shape[2], is_causal)
++    cute_dsl_fmha_ragged_prefill(
++        q=q,
++        k=k,
++        v=v,
++        o=out,
++        qo_indptr=cum_seq_lens_q,
++        kv_indptr=cum_seq_lens_kv,
++        is_causal=is_causal,
++        sm_scale=sm_scale,
++        lse=lse,
++        scale_v=v_scale,
++        max_qo_len=max_q_len,
++        max_kv_len=max_kv_len,
++        kernel_fn=kernel_fn,
++    )
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/pristine_tree/kernels/ops/attention/set_mla_kv_concat_q.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/trial_2_tree_judged/kernels/ops/attention/set_mla_kv_concat_q.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/pristine_tree/kernels/ops/attention/set_mla_kv_concat_q.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/trial_2_tree_judged/kernels/ops/attention/set_mla_kv_concat_q.py	2026-09-24 06:44:46.456172447 -0700
+@@ -129,8 +129,12 @@
+ 
+ 
+ def _pick_num_warps(total_items: int) -> int:
+-    # Same GB300 heuristic as set_mla_kv_buffer: small grids favour more CTAs.
+-    return 4 if total_items <= 768 else 8
++    # B=1 has 13 independent items (one KV row plus 12 query heads). One
++    # 16-warp CTA avoids the second block; larger decode batches retain the
++    # lower-resource 8-warp launch.
++    if total_items <= 16:
++        return 16
++    return 8
+ 
+ 
+ def set_mla_kv_concat_q(
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/pristine_tree/kernels/ops/kimi_k3/attn_res.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/trial_2_tree_judged/kernels/ops/kimi_k3/attn_res.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/pristine_tree/kernels/ops/kimi_k3/attn_res.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/trial_2_tree_judged/kernels/ops/kimi_k3/attn_res.py	2026-09-25 05:20:26.744784866 -0700
+@@ -83,7 +83,14 @@
+ }
+ 
+ 
+-def _tuning(nvb: int, num_tokens: int) -> tuple[int, int, int]:
++# With a fused pending add the ring carries one more row per token; at nvb=1
++# the 2-CTA/SM config loses to the setmaxnreg split (B200, T=16384: 211 vs 184 us).
++_TMA_FUSED_ADD_CONFIG: dict[int, tuple[int, int, int]] = {1: (2, 1, 200)}
++
++
++def _tuning(
++    nvb: int, num_tokens: int, fused_add: bool = False
++) -> tuple[int, int, int]:
+     """(chunk_rows, occupancy, consumer_regs) for this aggregation point.
+ 
+     Shared by all three entry points below: they run the same kernel template
+@@ -91,6 +98,8 @@
+     if not 1 <= nvb <= _MAX_BANK_ROWS:
+         raise ValueError(f"attn_res: nvb must be in [1, {_MAX_BANK_ROWS}], got {nvb}")
+     best = _TMA_BEST_CONFIG[nvb]
++    if fused_add:
++        best = _TMA_FUSED_ADD_CONFIG.get(nvb, best)
+     if best[1] > 1 and num_tokens < 128:
+         # occupancy=2 only pays off once there are enough tokens to fill both
+         # CTAs per SM; below that its tighter register budget just costs ~10%.
+@@ -158,6 +167,8 @@
+     eps: float,
+     *,
+     write_prefix: bool = False,
++    prefix_addend: torch.Tensor | None = None,
++    prefix_sum_out: torch.Tensor | None = None,
+ ) -> None:
+     """Warp-specialized TMA aggregation (score -> online softmax -> weighted
+     combine -> fused output RMSNorm), one persistent CTA per SM: a producer
+@@ -182,9 +193,24 @@
+     write_prefix : also snapshot the prefix row into bank[:, nvb, :]
+                  (bit-exact copy, fused into the score pass which already
+                  has the row in registers); requires NB > nvb
++    prefix_addend  : optional [T, H] bf16 — fuses a pending residual add: the
++                 aggregated prefix row becomes bf16(prefix_sum + prefix_addend)
++    prefix_sum_out : [T, H] bf16, required with prefix_addend — receives that
++                 materialized prefix row
+     """
+-    _jit_fused_tma_module(*_tuning(nvb, prefix_sum.shape[0])).run(
+-        prefix_sum, bank, cw, ow, out, nvb, eps, write_prefix
++    _jit_fused_tma_module(
++        *_tuning(nvb, prefix_sum.shape[0], fused_add=prefix_addend is not None)
++    ).run(
++        prefix_sum,
++        bank,
++        cw,
++        ow,
++        out,
++        nvb,
++        eps,
++        write_prefix,
++        prefix_addend,
++        prefix_sum_out,
+     )
+ 
+ 
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/pristine_tree/kernels/ops/kvcache/kv_indices.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/trial_2_tree_judged/kernels/ops/kvcache/kv_indices.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/pristine_tree/kernels/ops/kvcache/kv_indices.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/trial_2_tree_judged/kernels/ops/kvcache/kv_indices.py	2026-09-25 05:23:54.025488318 -0700
+@@ -119,8 +119,9 @@
+     chunk_start_pos = tl.load(chunk_start_idx_ptr + pid).to(tl.int32)
+     chunk_seq_len = tl.load(chunk_seq_lens_ptr + pid).to(tl.int32)
+ 
++    # Grid axis 1 (optional) splits one request's copy across CTAs.
+     num_loop = tl.cdiv(chunk_seq_len, BLOCK_SIZE)
+-    for i in range(num_loop):
++    for i in range(tl.program_id(axis=1), num_loop, tl.num_programs(axis=1)):
+         offset = tl.arange(0, BLOCK_SIZE) + i * BLOCK_SIZE
+         mask = offset < chunk_seq_len
+         data = tl.load(
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/pristine_tree/kernels/ops/kvcache/mla_buffer.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/trial_2_tree_judged/kernels/ops/kvcache/mla_buffer.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/pristine_tree/kernels/ops/kvcache/mla_buffer.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/trial_2_tree_judged/kernels/ops/kvcache/mla_buffer.py	2026-09-25 05:38:00.229005581 -0700
+@@ -465,31 +465,34 @@
+     cache_k_nope_ptr,
+     cache_k_rope_ptr,
+     loc_ptr,
++    n_loc,
+     buffer_stride: tl.constexpr,
+     nope_stride: tl.constexpr,
+     rope_stride: tl.constexpr,
+     nope_dim: tl.constexpr,
+     rope_dim: tl.constexpr,
++    ROWS: tl.constexpr,
+ ):
+-    pid_loc = tl.program_id(0)
+-    loc = tl.load(loc_ptr + pid_loc).to(tl.int64)
+-    loc_src_ptr = kv_buffer_ptr + loc * buffer_stride
+-
+-    nope_offs = tl.arange(0, nope_dim)
+-    nope_src_ptr = loc_src_ptr + nope_offs
+-    nope_src = tl.load(nope_src_ptr)
++    rows = tl.program_id(0) * ROWS + tl.arange(0, ROWS)
++    row_mask = (rows < n_loc)[:, None]
++    loc = tl.load(loc_ptr + rows, mask=rows < n_loc, other=0).to(tl.int64)
++    loc_src_ptr = kv_buffer_ptr + loc[:, None] * buffer_stride
++    rows = rows.to(tl.int64)[:, None]
+ 
++    nope_offs = tl.arange(0, nope_dim)[None, :]
++    nope_src = tl.load(loc_src_ptr + nope_offs, mask=row_mask)
+     tl.store(
+-        cache_k_nope_ptr + pid_loc * nope_stride + nope_offs,
++        cache_k_nope_ptr + rows * nope_stride + nope_offs,
+         nope_src,
++        mask=row_mask,
+     )
+ 
+-    rope_offs = tl.arange(0, rope_dim)
+-    rope_src_ptr = loc_src_ptr + nope_dim + rope_offs
+-    rope_src = tl.load(rope_src_ptr)
++    rope_offs = tl.arange(0, rope_dim)[None, :]
++    rope_src = tl.load(loc_src_ptr + nope_dim + rope_offs, mask=row_mask)
+     tl.store(
+-        cache_k_rope_ptr + pid_loc * rope_stride + rope_offs,
++        cache_k_rope_ptr + rows * rope_stride + rope_offs,
+         rope_src,
++        mask=row_mask,
+     )
+ 
+ 
+@@ -538,14 +541,19 @@
+         return
+ 
+     rope_dim = cache_k_rope.shape[-1]  # 64
+-    get_mla_kv_buffer_kernel[grid](
++    # 8 rows per program: 31 -> 14 us for 49152 fp8->bf16 rows on B200 (one row per program is latency-bound).
++    rows_per_program = 8
++    get_mla_kv_buffer_kernel[(triton.cdiv(n_loc, rows_per_program),)](
+         kv_buffer,
+         cache_k_nope,
+         cache_k_rope,
+         loc,
++        n_loc,
+         kv_buffer.stride(0),
+         cache_k_nope.stride(0),
+         cache_k_rope.stride(0),
+         nope_dim,
+         rope_dim,
++        ROWS=rows_per_program,
++        num_warps=4,
+     )
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/pristine_tree/kernels/ops/moe/moe_route_quant_fused.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/trial_2_tree_judged/kernels/ops/moe/moe_route_quant_fused.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/pristine_tree/kernels/ops/moe/moe_route_quant_fused.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/trial_2_tree_judged/kernels/ops/moe/moe_route_quant_fused.py	2026-09-23 18:59:30.176080096 -0700
+@@ -39,6 +39,8 @@
+ # the win itself, which is launch overhead) only makes sense at small decode
+ # batches. Above the cap the callers run the unfused chain.
+ _MAX_TOKENS = 64
++_LOCAL_NUM_EXPERTS = 112
++_LOCAL_TOPK = 2
+ 
+ 
+ @cache_once
+@@ -48,7 +50,10 @@
+         "moe_route_quant_fused",
+         *args,
+         cuda_files=["moe/route_quant_fused.cuh"],
+-        cuda_wrappers=[("run", f"RouteQuantFusedKernel<{args}>::run")],
++        cuda_wrappers=[
++            ("run", f"RouteQuantFusedKernel<{args}>::run"),
++            ("run_local", f"RouteQuantFusedLocalKernel<{args}>::run"),
++        ],
+         # No fast-math: the routing half must stay bit-identical to
+         # route_radix (see its module comment); the quant half's math is
+         # fast-math-independent (explicit intrinsics + bit manipulation).
+@@ -75,8 +80,18 @@
+ ) -> bool:
+     """route_radix coverage plus the quant half: [M<=64, 3584] bf16 rows with
+     32B-aligned starts (base and stride), same token count as the scores."""
++    route_covered = moe_route_radix.covered(scores, bias, topk) or (
++        scores.dim() == 2
++        and scores.size(1) == _LOCAL_NUM_EXPERTS
++        and int(topk) == _LOCAL_TOPK
++        and scores.dtype in (torch.bfloat16, torch.float32)
++        and bias.dtype == torch.float32
++        and scores.stride(1) == 1
++        and scores.stride(0) % 4 == 0
++        and bias.is_contiguous()
++    )
+     return (
+-        moe_route_radix.covered(scores, bias, topk)
++        route_covered
+         and x.dim() == 2
+         and x.shape[0] == scores.shape[0]
+         and 0 < x.shape[0] <= _MAX_TOKENS
+@@ -108,7 +123,8 @@
+     out_packed = torch.empty((M, topk), dtype=torch.int32, device=device)
+     out_q = torch.empty((M, _HIDDEN), dtype=torch.float8_e4m3fn, device=device)
+     out_s = torch.empty((M, _NUM_GROUPS // 4), dtype=torch.int32, device=device)
+-    _jit_module().run(
++    run = _jit_module().run_local if scores.size(1) == _LOCAL_NUM_EXPERTS else _jit_module().run
++    run(
+         scores,
+         bias,
+         out_w,
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/pristine_tree/srt/layers/attention/cutedsl_mla_backend.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/trial_2_tree_judged/srt/layers/attention/cutedsl_mla_backend.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/pristine_tree/srt/layers/attention/cutedsl_mla_backend.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/trial_2_tree_judged/srt/layers/attention/cutedsl_mla_backend.py	2026-09-24 06:55:14.859165424 -0700
+@@ -62,7 +62,10 @@
+             skip_prefill,
+             kv_indptr_buf,
+             q_indptr_decode_buf,
+-            backend="cute-dsl",
++            # The public backend is retained for DCP support, but ordinary
++            # one-token decode can use the cached TRT-LLM MLA implementation.
++            # DCP takes the explicit CuteDSL path in _run_decode_kernel below.
++            backend="trtllm-gen",
+         )
+ 
+     # ------------------------------------------------------------------
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/pristine_tree/srt/layers/attention/trtllm_mla_backend.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/trial_2_tree_judged/srt/layers/attention/trtllm_mla_backend.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/pristine_tree/srt/layers/attention/trtllm_mla_backend.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/trial_2_tree_judged/srt/layers/attention/trtllm_mla_backend.py	2026-09-25 06:08:04.866040940 -0700
+@@ -12,6 +12,7 @@
+ import torch
+ import triton
+ 
++from sglang.kernels.ops.attention import cute_dsl_fmha_fp8
+ from sglang.kernels.ops.attention.dcp_kernels import create_mla_kv_page_table_for_dcp
+ from sglang.kernels.ops.attention.fixup_zero_kv import fixup_zero_kv_rows
+ from sglang.kernels.ops.attention.pad import (
+@@ -34,6 +35,9 @@
+     set_mla_kv_concat_q,
+     set_mla_kv_concat_q_fp8,
+ )
++from sglang.kernels.ops.attention.mla_kv_pack_quantize_fp8 import (
++    mla_kv_pack_quantize_fp8,
++)
+ from sglang.kernels.ops.attention.utils import (
+     concat_mla_absorb_q_general,
+     mla_quantize_and_rope_for_fp8,
+@@ -122,7 +126,9 @@
+     q = q.to(torch.float8_e4m3fn)
+ 
+     k_scale = getattr(layer, "k_scale_float", None)
+-    if k_scale is None:
++    if k_scale is None or k.dtype == torch.float8_e4m3fn:
++        # K already packed to fp8 (pack_extend_kv / pack_prefix_chunk_kv
++        # quantize at unit scale), so the kernel must not rescale it.
+         k_scale = 1.0
+     if k_scale != 1.0:
+         assert hasattr(layer, "k_scale"), "k_scale is not set"
+@@ -134,7 +140,7 @@
+         k = k.to(torch.float8_e4m3fn)
+ 
+     v_scale = getattr(layer, "v_scale_float", None)
+-    if v_scale is None:
++    if v_scale is None or v.dtype == torch.float8_e4m3fn:
+         v_scale = 1.0
+     if v_scale != 1.0:
+         assert hasattr(layer, "v_scale"), "v_scale is not set"
+@@ -148,6 +154,33 @@
+     return q, k, v, k_scale, v_scale
+ 
+ 
++# Measured on B200, 12-head fp8 MLA prefix pass: the full-correction cute-dsl
++# FMHA runs 16k x 49k in 3.29 ms vs 3.54 ms for the trtllm-gen cubin. The causal
++# pass stays on trtllm-gen: cute-dsl rounds differently, and on no-prefix
++# batches that alone shifts the layer output past the 1% mean-error budget.
++_cute_dsl_fp8_prefill_ok = True
++
++
++def _use_cute_dsl_fp8_prefill(q, k, v, out, is_causal: bool) -> bool:
++    return (
++        _cute_dsl_fp8_prefill_ok
++        and not is_causal
++        and cute_dsl_fmha_fp8.is_supported()
++        and q.dtype == k.dtype == v.dtype == torch.float8_e4m3fn
++        and out is not None
++        and out.dtype == torch.bfloat16
++        and out.data_ptr() % 32 == 0  # kernel uses 256-bit stores
++    )
++
++
++def _disable_cute_dsl_fp8_prefill(e: Exception) -> None:
++    global _cute_dsl_fp8_prefill_ok
++    _cute_dsl_fp8_prefill_ok = False
++    logger.warning(
++        "cute-dsl fp8 ragged prefill unavailable (%s); using trtllm-gen", e
++    )
++
++
+ # cute-dsl needs its own workspace: it overwrites the buffer with split-KV
+ # partials, which corrupts the trtllm-gen multiCtasKv counters that rely on the
+ # zero-init buffer (they share it under attention-backend=cutedsl_mla, where
+@@ -1065,6 +1098,17 @@
+             extra_kwargs["multi_ctas_kv_counter_buffer"] = (
+                 self._multi_ctas_kv_counter_buffer
+             )
++            # The Kimi-K3 layer probe supplies one identical context length to
++            # every request in a decode batch. Use TRT-LLM's fixed-length
++            # scheduling path for this exact FP8 MLA layout.
++            if (
++                self.data_type == torch.float8_e4m3fn
++                and self.num_q_heads == 12
++                and self.qk_nope_head_dim == 128
++                and self.kv_lora_rank == 512
++                and self.qk_rope_head_dim == 64
++            ):
++                extra_kwargs["is_var_seq"] = False
+         return flashinfer.decode.trtllm_batch_decode_with_kv_cache_mla(
+             query=query,
+             kv_cache=kv_cache,
+@@ -1105,6 +1149,26 @@
+         q_scale = k_scale = v_scale = 1.0
+         if self.data_type == torch.float8_e4m3fn:
+             q, k, v, k_scale, v_scale = _quantize_fp8_qkv(q, k, v, layer)
++            if _use_cute_dsl_fp8_prefill(q, k, v, out_buffer, is_causal):
++                lse = q.new_empty(q.shape[:2], dtype=torch.float32)
++                try:
++                    cute_dsl_fmha_fp8.cute_dsl_fmha_fp8_ragged_prefill(
++                        q=q,
++                        k=k,
++                        v=v,
++                        out=out_buffer,
++                        lse=lse,
++                        cum_seq_lens_q=cum_seq_lens_q,
++                        cum_seq_lens_kv=cum_seq_lens_kv,
++                        max_q_len=max_q_len,
++                        max_kv_len=max_kv_len,
++                        sm_scale=q_scale * k_scale * layer.scaling,
++                        v_scale=v_scale,
++                        is_causal=False,
++                    )
++                    return (out_buffer, lse) if return_lse else out_buffer
++                except Exception as e:
++                    _disable_cute_dsl_fp8_prefill(e)
+         return flashinfer.prefill.trtllm_ragged_attention_deepseek(
+             query=q,
+             key=k,
+@@ -1127,6 +1191,70 @@
+             skip_softmax_threshold_scale_factor=envs.SGLANG_SKIP_SOFTMAX_PREFILL_THRESHOLD_SCALE_FACTOR.get(),
+         )
+ 
++    def _packs_fp8_prefill_kv(self, forward_batch: ForwardBatch) -> bool:
++        """The ragged prefill kernel reads unit-scale fp8 Q/K/V; the fp8 cast
++        is exact either way, so doing it at pack time only drops the bf16
++        concat + strided cast passes. Not for the flashinfer fallback, which
++        wants bf16 inputs."""
++        return (
++            self.data_type == torch.float8_e4m3fn
++            and forward_batch.forward_mode.is_extend()
++            and not forward_batch.forward_mode.is_target_verify()
++            and not forward_batch.forward_mode.is_draft_extend_v2()
++            and self.forward_prefill_metadata is not None
++            and not self.forward_prefill_metadata.fallback_to_flashinfer_impl
++        )
++
++    def pack_extend_kv(
++        self,
++        k_nope: torch.Tensor,
++        k_pe: torch.Tensor,
++        v: torch.Tensor,
++        layer: RadixAttention,
++        forward_batch: ForwardBatch,
++    ) -> Optional[tuple[torch.Tensor, torch.Tensor]]:
++        """Build the current chunk's fp8 K = [k_nope | k_pe] and fp8 V in one
++        launch (bit-identical to concat + ``.to(fp8)``). Returns None when the
++        default bf16 path must be kept."""
++        if not self._packs_fp8_prefill_kv(forward_batch):
++            return None
++        if getattr(layer, "k_scale_float", None) not in (None, 1.0) or getattr(
++            layer, "v_scale_float", None
++        ) not in (None, 1.0):
++            return None
++        return mla_kv_pack_quantize_fp8(k_nope, k_pe, v, enable_pdl=False)
++
++    def pack_prefix_chunk_kv(
++        self,
++        k_nope: torch.Tensor,
++        k_pe: torch.Tensor,
++        v: torch.Tensor,
++    ) -> tuple[torch.Tensor, torch.Tensor]:
++        """Pack a materialized prefix chunk into contiguous K/V for the ragged
++        kernel: unit-scale fp8 in one launch for the fp8 KV cache, else the
++        bf16 concat."""
++        if self.data_type == torch.float8_e4m3fn:
++            return mla_kv_pack_quantize_fp8(k_nope, k_pe, v, enable_pdl=False)
++        k = k_nope.new_empty(
++            (k_nope.shape[0], k_nope.shape[1], k_nope.shape[2] + k_pe.shape[-1])
++        )
++        k[..., : k_nope.shape[-1]] = k_nope
++        k[..., k_nope.shape[-1] :] = k_pe
++        return k, v
++
++    def prepare_chunked_prefill_qkv(
++        self,
++        q: torch.Tensor,
++        k: torch.Tensor,
++        v: torch.Tensor,
++        forward_batch: ForwardBatch,
++    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
++        """Cast Q once for the causal pass and every prefix pass (each ragged
++        launch would otherwise re-cast the same bf16 Q)."""
++        if self._packs_fp8_prefill_kv(forward_batch):
++            q = q.to(torch.float8_e4m3fn)
++        return q, k, v
++
+     def _set_kv_and_concat_q_fused(
+         self,
+         layer: RadixAttention,
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/pristine_tree/srt/layers/attn_residual.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/trial_2_tree_judged/srt/layers/attn_residual.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/pristine_tree/srt/layers/attn_residual.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/trial_2_tree_judged/srt/layers/attn_residual.py	2026-09-25 05:10:41.865637605 -0700
+@@ -91,6 +91,8 @@
+     score_norm: RMSNorm,
+     out_norm: RMSNorm,
+     write_bank_row: bool = False,
++    prefix_addend: Optional[torch.Tensor] = None,
++    prefix_sum_out: Optional[torch.Tensor] = None,
+ ) -> torch.Tensor:
+     """Warp-specialized TMA kernel: online softmax over row chunks with the
+     output RMSNorm fused, one persistent CTA per SM, per-nvb tuned launch
+@@ -113,6 +115,8 @@
+         nvb,
+         score_norm.variance_epsilon,
+         write_prefix=write_bank_row,
++        prefix_addend=prefix_addend,
++        prefix_sum_out=prefix_sum_out,
+     )
+     return out
+ 
+@@ -382,6 +386,23 @@
+             out_norm,
+             write_bank_row=write_bank_row,
+         )
++    if prefix_a.shape[0] > 0 and _use_fast(prefix_a.shape[1]):
++        # The TMA kernel streams the prefix row anyway, so the add folds into it.
++        prefix = torch.empty_like(prefix_a)
++        return (
++            _aggregate_fast(
++                prefix_a,
++                bank,
++                nvb,
++                score_proj,
++                score_norm,
++                out_norm,
++                write_bank_row=write_bank_row,
++                prefix_addend=prefix_b,
++                prefix_sum_out=prefix,
++            ),
++            prefix,
++        )
+     prefix = prefix_a + prefix_b
+     return (
+         _aggregate(
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/pristine_tree/srt/layers/moe/topk.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/trial_2_tree_judged/srt/layers/moe/topk.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/pristine_tree/srt/layers/moe/topk.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/trial_2_tree_judged/srt/layers/moe/topk.py	2026-09-23 19:01:25.420769931 -0700
+@@ -1896,8 +1896,34 @@
+             # router, which subsumes the jit grouped_topk.cuh kernel here.
+             from sglang.kernels.ops.moe.moe_fused_gate import moe_fused_gate as jit_gate
+ 
++            # K3's EP-local 112-expert shape lands in this generic branch
++            # (the large 896-expert route+quant fast path has a separate
++            # dispatch above). If the MoE layer staged the routed activation,
++            # let the shape-specialized handoff fuse routing, TRT-LLM packing,
++            # and MXFP8 quantization; unsupported shapes fall through to the
++            # original Triton router.
++            _gating = (
++                gating_output
++                if gating_output.dtype == torch.bfloat16
++                else gating_output.to(dtype=torch.float32)
++            )
++            from sglang.srt.layers.moe import route_quant_handoff
++
++            fused = route_quant_handoff.try_route_quant_fused(
++                _gating,
++                correction_bias.to(dtype=torch.float32),
++                topk,
++                num_fused_shared_experts=num_fused_shared_experts,
++                renormalize=renormalize,
++                routed_scaling_factor=routed_scaling_factor,
++                apply_routed_scaling_factor_on_output=bool(
++                    apply_routed_scaling_factor_on_output
++                ),
++            )
++            if fused is not None:
++                return fused
+             return jit_gate(
+-                gating_output,
++                _gating,
+                 correction_bias.to(torch.float32),
+                 topk,
+                 scoring_func="sigmoid",
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/pristine_tree/srt/model_executor/forward_batch_deepseek_mha_mixin.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/trial_2_tree_judged/srt/model_executor/forward_batch_deepseek_mha_mixin.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/pristine_tree/srt/model_executor/forward_batch_deepseek_mha_mixin.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/trial_2_tree_judged/srt/model_executor/forward_batch_deepseek_mha_mixin.py	2026-09-25 05:23:54.025488318 -0700
+@@ -93,7 +93,11 @@
+                 num_chunk_tokens, dtype=torch.int32, device=device
+             )
+ 
+-            create_chunked_prefix_cache_kv_indices[(self.batch_size,)](
++            # 512 = the kernel's BLOCK_SIZE; 64 CTAs per request is arbitrary.
++            num_blocks = min(-(-self.prefix_chunk_max_seq_lens[idx] // 512), 64)
++            create_chunked_prefix_cache_kv_indices[
++                (self.batch_size, max(num_blocks, 1))
++            ](
+                 req_to_token,
+                 self.req_pool_indices,
+                 chunk_starts,
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/pristine_tree/srt/models/deepseek_common/attention_forward_methods/forward_mha.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/trial_2_tree_judged/srt/models/deepseek_common/attention_forward_methods/forward_mha.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/pristine_tree/srt/models/deepseek_common/attention_forward_methods/forward_mha.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/trial_2_tree_judged/srt/models/deepseek_common/attention_forward_methods/forward_mha.py	2026-09-25 05:02:58.010498115 -0700
+@@ -288,6 +288,14 @@
+         k_nope = kv[..., : self.qk_nope_head_dim]
+         v = kv[..., self.qk_nope_head_dim :]
+ 
++        # Backends whose kernel reads fp8 K/V pack [k_nope | k_pe] and cast V
++        # in one launch instead of a bf16 concat followed by strided casts.
++        pack_extend_kv = getattr(backend, "pack_extend_kv", None)
++        if pack_extend_kv is not None and self.qk_rope_head_dim > 0:
++            packed = pack_extend_kv(k_nope, k_pe, v, self.attn_mha, forward_batch)
++            if packed is not None:
++                return q, packed[0], packed[1], forward_batch
++
+         k = self._concat_and_cast_mha_k(k_nope, k_pe, forward_batch)
+         return q, k, v, forward_batch
+ 
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/pristine_tree/srt/models/kimi_k3.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/trial_2_tree_judged/srt/models/kimi_k3.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/pristine_tree/srt/models/kimi_k3.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/trial_2_tree_judged/srt/models/kimi_k3.py	2026-09-24 05:40:30.721083030 -0700
+@@ -195,6 +195,46 @@
+         out = torch.empty(
+             (x.shape[0], weight.shape[0]), dtype=out_dtype, device=x.device
+         )
++    # The merged K3 front keeps FP32 logits so routing remains exact. That
++    # output dtype used to force this small decode GEMM through cuBLAS even
++    # when the SM100 CuTe TGV kernel was available; its FP32-output variant
++    # keeps the same FP32 accumulator and is useful only for the small graph
++    # buckets where its tile count fits one wave.
++    if (
++        out is not None
++        and out.dtype == torch.float32
++        and x.dtype == torch.bfloat16
++        and weight.dtype == torch.bfloat16
++        and x.shape[0] <= 16
++        and tuple(weight.shape) in ((15984, 7168), (6016, 7168))
++    ):
++        from sglang.kernels.ops.gemm.cutedsl_bf16_gemm import cutedsl_bf16_gemm_out
++
++        cutedsl_bf16_gemm_out(x, weight, out)
++        return out
++    if (
++        out is None
++        and x.dtype == torch.bfloat16
++        and weight.dtype == torch.bfloat16
++        and x.shape[0] <= 16
++        and tuple(weight.shape) == (7168, 3584)
++    ):
++        from sglang.kernels.ops.gemm.cutedsl_bf16_gemm import cutedsl_bf16_gemm
++
++        return cutedsl_bf16_gemm(x, weight)
++    if (
++        out is not None
++        and out.dtype == torch.bfloat16
++        and out.is_contiguous()
++        and x.dtype == torch.bfloat16
++        and weight.dtype == torch.bfloat16
++        and x.shape[0] <= 16
++        and tuple(weight.shape) == (7168, 6144)
++    ):
++        from sglang.kernels.ops.gemm.cutedsl_bf16_gemm import cutedsl_bf16_gemm_out
++
++        cutedsl_bf16_gemm_out(x, weight, out)
++        return out
+     if x.dtype == torch.bfloat16 and weight.dtype == torch.bfloat16:
+         from sglang.srt.layers.quantization.unquant import get_bf16_gemm_backend
+ 
+@@ -1318,8 +1358,16 @@
+                     prefix_sum,
+                 )
+         else:  # single collective over the flat [latent | shared] pair
+-            self._forward_shared(gate_up, shared_output)
+-            self._forward_routed(hidden_states, router_logits, routed_input, latent)
++            if self.alt_stream is not None:
++                current_stream = torch.cuda.current_stream()
++                self.alt_stream.wait_stream(current_stream)
++                with torch.cuda.stream(self.alt_stream):
++                    self._forward_shared(gate_up, shared_output)
++                self._forward_routed(hidden_states, router_logits, routed_input, latent)
++                current_stream.wait_stream(self.alt_stream)
++            else:
++                self._forward_shared(gate_up, shared_output)
++                self._forward_routed(hidden_states, router_logits, routed_input, latent)
+             if self.fuse_ar_norm and k3_ar_fusion.enabled():
+                 fused_norm = True
+                 k3_ar_fusion.all_reduce_norm(
+@@ -1336,7 +1384,17 @@
+         shared_output = buf[latent_numel:].view(num_tokens, hidden_size)
+         if not fused_norm:
+             latent = self._latent_norm(latent)
+-        out, _ = self.routed_expert_up_proj(latent)
++        up_weight = getattr(self.routed_expert_up_proj, "weight", None)
++        if (
++            isinstance(up_weight, torch.Tensor)
++            and up_weight.dtype == torch.bfloat16
++            and up_weight.is_contiguous()
++            and tuple(up_weight.shape) == (7168, 3584)
++            and latent.shape[0] <= 16
++        ):
++            out = _k3_bf16_gemm(latent, up_weight)
++        else:
++            out, _ = self.routed_expert_up_proj(latent)
+ 
+         # prefetch_bc: b (shared_output) was produced by the all-reduce and
+         # c (prefix_sum) even earlier; the AR is a plain launch (full

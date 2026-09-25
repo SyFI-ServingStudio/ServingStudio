@@ -905,6 +905,20 @@
   "dir": "trials/kda_b512_claude_3"
  },
  {
+  "case": "kda_prefill_claude",
+  "trial": 1,
+  "verdict": "FAIL",
+  "reason": "judge produced no verdict",
+  "continuous_round": true,
+  "campaign1_unrealistic_routing": false,
+  "points": {},
+  "files": [],
+  "diff_lines": null,
+  "incremental_diff_lines": null,
+  "note": "Claude: KDA prefill copy removal (strided l2norm q/k, strided o_norm gate, strided v in recompute_w_u) + dropped int(query_start_loc[-1]) host sync; 9007->8584 self-measured, bit-exact; first judge OOM'd (tenant on GPU 2), re-judged",
+  "dir": "trials/kda_prefill_claude_1"
+ },
+ {
   "case": "mla",
   "trial": 1,
   "verdict": "FAIL",
@@ -1952,5 +1966,59 @@
   "incremental_diff_lines": 1053,
   "note": "ACCEPTED (Claude): Triton mla_kv_pack_quantize_fp8 (one-pass K/V pack + fp8 quant for chunk+prefix, Q cast once; replaces ~800us elementwise) + residual add fused into attn-res TMA (418->361us @16k): 12128->11573 @pf49152 (-4.6%), -4.0% first chunk, -2.6% 4x4k; bit-exact",
   "dir": "trials/mla_prefill_claude_1"
+ },
+ {
+  "case": "mla_prefill_claude",
+  "trial": 2,
+  "verdict": "PASS",
+  "reason": "all gates passed",
+  "continuous_round": true,
+  "campaign1_unrealistic_routing": false,
+  "points": {
+   "1,16384pf49152": {
+    "before_us": 11538.6,
+    "after_us": 11229.3,
+    "improvement": 0.0268,
+    "check": true,
+    "rel_err": 0.015624999177631622
+   },
+   "1,16384pf": {
+    "before_us": 8368.2,
+    "after_us": 8313.9,
+    "improvement": 0.0065,
+    "check": true,
+    "rel_err": 0.0
+   },
+   "4,4096pf": {
+    "before_us": 7842.9,
+    "after_us": 7740.4,
+    "improvement": 0.0131,
+    "check": true,
+    "rel_err": 0.0
+   }
+  },
+  "files": [
+   "kernels/jit/csrc/elementwise/set_mla_kv_concat_q.cuh",
+   "kernels/jit/csrc/moe/route_quant_fused.cuh",
+   "kernels/jit/csrc/moe/route_radix.cuh",
+   "kernels/jit/csrc/kimi_k3/attn_res/fused_tma.cuh",
+   "kernels/ops/attention/set_mla_kv_concat_q.py",
+   "kernels/ops/attention/cute_dsl_fmha_fp8.py",
+   "kernels/ops/kimi_k3/attn_res.py",
+   "kernels/ops/kvcache/mla_buffer.py",
+   "kernels/ops/kvcache/kv_indices.py",
+   "kernels/ops/moe/moe_route_quant_fused.py",
+   "srt/model_executor/forward_batch_deepseek_mha_mixin.py",
+   "srt/models/kimi_k3.py",
+   "srt/layers/attn_residual.py",
+   "srt/models/deepseek_common/attention_forward_methods/forward_mha.py",
+   "srt/layers/attention/trtllm_mla_backend.py",
+   "srt/layers/attention/cutedsl_mla_backend.py",
+   "srt/layers/moe/topk.py"
+  ],
+  "diff_lines": 1246,
+  "incremental_diff_lines": 196,
+  "note": "ACCEPTED (Claude): non-causal prefix attention TRT-LLM ragged FMHA -> sglang CuTe-DSL JIT FMHA with full softmax correction (fp8 P prescale 2^8): 11539->11229 @pf49152 (-2.7%), rel 0.0156",
+  "dir": "trials/mla_prefill_claude_2"
  }
 ]

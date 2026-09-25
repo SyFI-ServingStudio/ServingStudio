@@ -1,0 +1,196 @@
+diff -ruN -x __pycache__ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/trial_1_tree_judged/kernels/ops/attention/cute_dsl_fmha_fp8.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/trial_2_tree_judged/kernels/ops/attention/cute_dsl_fmha_fp8.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/trial_1_tree_judged/kernels/ops/attention/cute_dsl_fmha_fp8.py	1969-12-31 16:00:00.000000000 -0800
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/trial_2_tree_judged/kernels/ops/attention/cute_dsl_fmha_fp8.py	2026-09-25 06:01:23.550067962 -0700
+@@ -0,0 +1,120 @@
++"""fp8 ragged prefill FMHA (cute-dsl, SM100) with full softmax correction.
++
++flashinfer's cute-dsl FMHA artifacts are built with ``enable_skip_correction``,
++which also drops the fp8 P pre-scale (P stays in [0, 1] of E4M3) and doubles
++the row error vs the trtllm-gen cubin. Compiling with the correction always
++on restores the 2^8 P pre-scale and trtllm-gen accuracy, and still beats the
++cubin on the 12-head MLA prefill shapes.
++"""
++
++from __future__ import annotations
++
++import functools
++import math
++
++import torch
++
++
++@functools.lru_cache(maxsize=None)
++def is_supported() -> bool:
++    # ex2 emulation below is tuned for CC 10.0; other Blackwell parts untested.
++    return torch.cuda.get_device_capability() == (10, 0)
++
++
++@functools.lru_cache(maxsize=None)
++def _compile(num_heads: int, head_dim: int, head_dim_v: int, is_causal: bool):
++    import cutlass
++    import cutlass.cute as cute
++    from cutlass.cute.runtime import make_fake_compact_tensor, make_fake_stream
++    from cutlass.cute.typing import Int32
++    from flashinfer.cute_dsl.attention.fmha.fmha import (
++        BlackwellFusedMultiHeadAttentionForward,
++    )
++    from flashinfer.cute_dsl.attention.fmha.helpers import fmha_helpers
++
++    fmha = BlackwellFusedMultiHeadAttentionForward(
++        qk_acc_dtype=cutlass.Float32,
++        pv_acc_dtype=cutlass.Float32,
++        mma_tiler=(128, 128),
++        head_dim=head_dim if head_dim == head_dim_v else (head_dim, head_dim_v),
++        is_persistent=False,
++        mask_type=(
++            fmha_helpers.MaskEnum.WINDOW_MASK_INFERENCE
++            if is_causal
++            else fmha_helpers.MaskEnum.RESIDUAL_MASK
++        ),
++        enable_ex2_emulation=True,
++        enable_skip_correction=False,
++        use_tma_store=False,
++    )
++
++    fp8 = cutlass.Float8E4M3FN
++    b, s_q, s_k, h_k, h_r, n_seq = (cute.sym_int() for _ in range(6))
++
++    def fake(dtype, shape, align):
++        order = tuple(range(len(shape) - 1, -1, -1))
++        return make_fake_compact_tensor(
++            dtype, shape, stride_order=order, assumed_align=align
++        )
++
++    scale_softmax = 1.0 / math.sqrt(head_dim)
++    return cute.compile(
++        fmha,
++        fake(fp8, (b, s_q, h_k, h_r, head_dim), 16),
++        fake(fp8, (b, s_k, h_k, 1, head_dim), 16),
++        fake(fp8, (b, s_k, h_k, 1, head_dim_v), 16),
++        fake(cutlass.BFloat16, (b, s_q, h_k, h_r, head_dim_v), 32),
++        (1, 1, 1, 1, num_heads, num_heads, head_dim, head_dim_v),
++        make_fake_compact_tensor(Int32, (n_seq,), assumed_align=16),
++        make_fake_compact_tensor(Int32, (n_seq,), assumed_align=16),
++        fake(cutlass.Float32, (b, s_q, h_k, h_r), 16),
++        None,
++        scale_softmax * math.log2(math.e),
++        scale_softmax,
++        1.0,
++        None,
++        None,
++        Int32(0) if is_causal else None,
++        None,
++        None,
++        make_fake_stream(use_tvm_ffi_env_stream=True),
++        False,
++        options="--enable-tvm-ffi --opt-level 2",
++    )
++
++
++def cute_dsl_fmha_fp8_ragged_prefill(
++    *,
++    q: torch.Tensor,
++    k: torch.Tensor,
++    v: torch.Tensor,
++    out: torch.Tensor,
++    lse: torch.Tensor,
++    cum_seq_lens_q: torch.Tensor,
++    cum_seq_lens_kv: torch.Tensor,
++    max_q_len: int,
++    max_kv_len: int,
++    sm_scale: float,
++    v_scale: float,
++    is_causal: bool,
++) -> None:
++    """q/k: [tokens, heads, d] fp8, v: [tokens, heads, dv] fp8, out bf16 and
++    lse fp32 [tokens_q, heads] written in place."""
++    from flashinfer.attention.cute_dsl.fmha import cute_dsl_fmha_ragged_prefill
++
++    kernel_fn = _compile(q.shape[1], q.shape[2], v.shape[2], is_causal)
++    cute_dsl_fmha_ragged_prefill(
++        q=q,
++        k=k,
++        v=v,
++        o=out,
++        qo_indptr=cum_seq_lens_q,
++        kv_indptr=cum_seq_lens_kv,
++        is_causal=is_causal,
++        sm_scale=sm_scale,
++        lse=lse,
++        scale_v=v_scale,
++        max_qo_len=max_q_len,
++        max_kv_len=max_kv_len,
++        kernel_fn=kernel_fn,
++    )
+diff -ruN -x __pycache__ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/trial_1_tree_judged/srt/layers/attention/trtllm_mla_backend.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/trial_2_tree_judged/srt/layers/attention/trtllm_mla_backend.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/trial_1_tree_judged/srt/layers/attention/trtllm_mla_backend.py	2026-09-25 05:37:03.572723692 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_prefill_claude/trial_2_tree_judged/srt/layers/attention/trtllm_mla_backend.py	2026-09-25 06:08:04.866040940 -0700
+@@ -12,6 +12,7 @@
+ import torch
+ import triton
+ 
++from sglang.kernels.ops.attention import cute_dsl_fmha_fp8
+ from sglang.kernels.ops.attention.dcp_kernels import create_mla_kv_page_table_for_dcp
+ from sglang.kernels.ops.attention.fixup_zero_kv import fixup_zero_kv_rows
+ from sglang.kernels.ops.attention.pad import (
+@@ -153,6 +154,33 @@
+     return q, k, v, k_scale, v_scale
+ 
+ 
++# Measured on B200, 12-head fp8 MLA prefix pass: the full-correction cute-dsl
++# FMHA runs 16k x 49k in 3.29 ms vs 3.54 ms for the trtllm-gen cubin. The causal
++# pass stays on trtllm-gen: cute-dsl rounds differently, and on no-prefix
++# batches that alone shifts the layer output past the 1% mean-error budget.
++_cute_dsl_fp8_prefill_ok = True
++
++
++def _use_cute_dsl_fp8_prefill(q, k, v, out, is_causal: bool) -> bool:
++    return (
++        _cute_dsl_fp8_prefill_ok
++        and not is_causal
++        and cute_dsl_fmha_fp8.is_supported()
++        and q.dtype == k.dtype == v.dtype == torch.float8_e4m3fn
++        and out is not None
++        and out.dtype == torch.bfloat16
++        and out.data_ptr() % 32 == 0  # kernel uses 256-bit stores
++    )
++
++
++def _disable_cute_dsl_fp8_prefill(e: Exception) -> None:
++    global _cute_dsl_fp8_prefill_ok
++    _cute_dsl_fp8_prefill_ok = False
++    logger.warning(
++        "cute-dsl fp8 ragged prefill unavailable (%s); using trtllm-gen", e
++    )
++
++
+ # cute-dsl needs its own workspace: it overwrites the buffer with split-KV
+ # partials, which corrupts the trtllm-gen multiCtasKv counters that rely on the
+ # zero-init buffer (they share it under attention-backend=cutedsl_mla, where
+@@ -1121,6 +1149,26 @@
+         q_scale = k_scale = v_scale = 1.0
+         if self.data_type == torch.float8_e4m3fn:
+             q, k, v, k_scale, v_scale = _quantize_fp8_qkv(q, k, v, layer)
++            if _use_cute_dsl_fp8_prefill(q, k, v, out_buffer, is_causal):
++                lse = q.new_empty(q.shape[:2], dtype=torch.float32)
++                try:
++                    cute_dsl_fmha_fp8.cute_dsl_fmha_fp8_ragged_prefill(
++                        q=q,
++                        k=k,
++                        v=v,
++                        out=out_buffer,
++                        lse=lse,
++                        cum_seq_lens_q=cum_seq_lens_q,
++                        cum_seq_lens_kv=cum_seq_lens_kv,
++                        max_q_len=max_q_len,
++                        max_kv_len=max_kv_len,
++                        sm_scale=q_scale * k_scale * layer.scaling,
++                        v_scale=v_scale,
++                        is_causal=False,
++                    )
++                    return (out_buffer, lse) if return_lse else out_buffer
++                except Exception as e:
++                    _disable_cute_dsl_fp8_prefill(e)
+         return flashinfer.prefill.trtllm_ragged_attention_deepseek(
+             query=q,
+             key=k,
