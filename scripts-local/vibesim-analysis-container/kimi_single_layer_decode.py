@@ -1248,6 +1248,7 @@ def _point_path(path, B, L, tag=""):
 
 HIDDEN_SCALE = 0.02   # set from --hidden-scale in main()
 FLASHINFER_AUTOTUNE = False   # set from --flashinfer-autotune in main()
+FLASHINFER_AUTOTUNE_CACHE = ""  # set from --flashinfer-autotune-cache in main()
 
 
 def install_routing_probe(num_experts):
@@ -1514,10 +1515,18 @@ def time_point(cfg, sa, layer, B, seq_len, iters, warmup, split=False,
                 # shape bucket. Without it FlashInfer falls back to a default tactic (tile_N one
                 # below nextPow2(rows/expert)) -- identical at B <= 256, ~9% slower at B=512.
                 from flashinfer.autotuner import autotune
-                with autotune(True):
+                # Production caches the tuned tactics on disk (SGLANG_FLASHINFER_AUTOTUNE_CACHE=1 by
+                # default), so every process picks the same tactic. Without a cache each judge
+                # rep re-profiles and may pick a different near-equal tactic (KDA-b512 Claude r2:
+                # sigma 7.3 us at B=512 -> 3.65% requirement). The cache lives in the FlashInfer
+                # cache mount shared by all containers and trees.
+                cache = FLASHINFER_AUTOTUNE_CACHE or None
+                if cache:
+                    os.makedirs(os.path.dirname(cache), exist_ok=True)
+                with autotune(True, cache=cache):
                     out = call_layer(layer, fb, positions, hidden, ar)
                 torch.cuda.synchronize()
-                log("[autotune] FlashInfer tactics profiled for this point (production warmup)")
+                log(f"[autotune] FlashInfer tactics profiled for this point (production warmup; cache={cache})")
             for _ in range(warmup):
                 out = call_layer(layer, fb, positions, hidden, ar)
             torch.cuda.synchronize()
@@ -1773,6 +1782,10 @@ def main():
                     help="run the first warmup forward of every point under flashinfer.autotuner.autotune(True), "
                          "as the production runner's startup warmup does (tuned MXFP4 MoE tactics per shape "
                          "bucket); default off = FlashInfer's fallback tactics (the legacy driver behaviour)")
+    ap.add_argument("--flashinfer-autotune-cache", type=str,
+                    default=os.path.expanduser("~/.cache/flashinfer/k3_flashinfer_autotune_cache.json"),
+                    help="tactic cache file for --flashinfer-autotune (production keeps one too); '' = "
+                         "re-profile in every process")
     ap.add_argument("--bf16-gemm-backend", type=str, default="",
                     choices=["", "auto", "cutedsl", "torch"],
                     help="override --bf16-gemm-backend passed to ServerArgs (default: sglang's auto)")
@@ -1810,9 +1823,10 @@ def main():
     os.environ["SGLANG_MAMBA_SSM_DTYPE"] = args.mamba_ssm_dtype
     kv_dtype = torch.float8_e4m3fn if args.kv_cache_dtype == "fp8_e4m3" else torch.bfloat16
     sa_kv_dtype = "fp8_e4m3" if args.kv_cache_dtype == "fp8_e4m3" else "auto"
-    global HIDDEN_SCALE, FLASHINFER_AUTOTUNE
+    global HIDDEN_SCALE, FLASHINFER_AUTOTUNE, FLASHINFER_AUTOTUNE_CACHE
     HIDDEN_SCALE = args.hidden_scale
     FLASHINFER_AUTOTUNE = bool(args.flashinfer_autotune)
+    FLASHINFER_AUTOTUNE_CACHE = args.flashinfer_autotune_cache
     if args.dump_routing:
         install_routing_probe(args.experts)
 
