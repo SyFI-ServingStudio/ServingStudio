@@ -1,0 +1,5 @@
+# Agent image variant with Claude Code (Bedrock) instead of Codex: same sglang tree + node runtime.
+ARG BASE_IMAGE=rga-local/sglang-k3:v0520-codex
+FROM ${BASE_IMAGE}
+ENV PATH=/opt/node/bin:$PATH
+RUN npm install -g @anthropic-ai/claude-code@2.1.280 && ln -sf /opt/node/bin/claude /usr/local/bin/claude && claude --version

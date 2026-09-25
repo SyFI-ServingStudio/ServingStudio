@@ -1,0 +1,56 @@
+{
+  "_note": "AGENT = Claude Code (Opus 5.5 via Bedrock) instead of Codex; same workload, goldens and judge as the Codex case. Kimi-K3 open-ended optimizer case: ONE KDA (Kimi Delta Attention, linear-attn) decoder layer of Kimi-K3 on sglang v0.5.20, B200, in the cookbook production shape (attention TP8 rank = 12 heads, EP8 rank = 112 mxfp4 routed experts, bf16 KDA state). LARGE-BATCH variant (B=512/256 decode, the DP-attention regime where the MXFP4 MoE turns compute-bound). Metric = CUDA-graph replay time of the decode step. No PR answer key: the judge scores improvement over the pristine tree with a correctness gate (output + post-step recurrent state vs a seeded golden). Driver runs with --bf16-gemm-init (production scheduler's bf16 GEMM backend init: auto -> cutedsl TGV/split-K dispatch on SM100); the original decode cases keep the legacy cuBLAS-only dispatch (measured effect <= 0.7%).",
+  "case": "k3_kda_b512_claude",
+  "mode": "open_ended",
+  "framework": "sglang",
+  "codex_image": "rga-local/sglang-k3:v0520-claude",
+  "before_image": "lmsysorg/sglang:v0.5.20",
+  "judge": "judge_k3.py",
+  "task_template": "agent_task_k3_opt.md",
+  "driver": "kimi_single_layer_decode.py",
+  "driver_args": "--attn-type kda --moe-backend flashinfer_mxfp4 --attn-heads 12 --mamba-ssm-dtype bfloat16 --experts 112 --ep 8 --local-topk 2 --hidden-scale 1.0 --cuda-graph --iters 40 --warmup 10 --bf16-gemm-init",
+  "points": {
+    "primary": [
+      512,
+      8192
+    ],
+    "secondary": [
+      [
+        256,
+        8192
+      ],
+      [
+        128,
+        8192
+      ]
+    ]
+  },
+  "reps": 5,
+  "min_improvement": 0.0,
+  "rel_err_max": 0.02,
+  "seed": 0,
+  "edit_tree": {
+    "container_path": "/sgl-workspace/sglang/python/sglang"
+  },
+  "mounts": [
+    "/raid/hf/hub:/raid/hf/hub:ro",
+    "/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/k3_opt_history:/workspace/opt_history:ro"
+  ],
+  "shm_size": "32g",
+  "codex_model": "gpt-5.6-luna",
+  "render": {
+    "METRIC": "CUDA-graph decode-step latency of one Kimi-K3 KDA decoder layer",
+    "FRAMEWORK": "sglang",
+    "CHECKOUT": "/sgl-workspace/sglang",
+    "MODEL_NAME": "Kimi-K3 (moonshotai/Kimi-K3): one KDA (linear-attention) decoder layer, as it runs on one B200 of the production TP8/EP8 deployment (12 attention heads, 112 local mxfp4 experts, bf16 recurrent state)",
+    "WORKLOAD": "batched decode, one token per request per step: B=512 requests at context 8192 (primary: the large-batch regime where the routed MXFP4 MoE sees ~1024 local rows and stops being weight-bandwidth-bound), plus B=256 and B=128 at 8192 (must not regress)",
+    "DRIVER_ARGS": "--attn-type kda --moe-backend flashinfer_mxfp4 --attn-heads 12 --mamba-ssm-dtype bfloat16 --experts 112 --ep 8 --local-topk 2 --hidden-scale 1.0 --cuda-graph --iters 40 --warmup 10 --bf16-gemm-init",
+    "POINTS": "512,8192;256,8192;128,8192",
+    "INSTALL_CMD": "true",
+    "REBUILD_CMD": "find /sgl-workspace/sglang/python/sglang -name __pycache__ -prune -exec rm -rf {} + ; cd /tmp && python3 /tmp/kimi_single_layer_decode.py --point 1,8192 --attn-type kda --moe-backend flashinfer_mxfp4 --attn-heads 12 --mamba-ssm-dtype bfloat16 --experts 112 --ep 8 --local-topk 2 --hidden-scale 1.0 --cuda-graph --iters 5 --warmup 2 --bf16-gemm-init && echo LAYER_SMOKE_OK",
+    "ORACLE_URL": "http://172.17.0.1:8803",
+    "OPT_HISTORY": "/workspace/opt_history"
+  },
+  "agent": "claude",
+  "claude_model": "us.anthropic.claude-opus-5-5"
+}

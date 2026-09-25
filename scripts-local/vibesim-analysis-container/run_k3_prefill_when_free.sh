@@ -7,7 +7,7 @@
 # Usage: run_k3_prefill_when_free.sh <first_round_k> <n_rounds_per_case>
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
-K0="$1"; N="$2"
+K0="$1"; N="$2"; SUFFIX="${CASE_SUFFIX:-prefill}"   # prefill | prefill_claude
 export AGENT_TIMEOUT="${AGENT_TIMEOUT:-2700}"
 IDLE_CHECKS="${IDLE_CHECKS:-30}"
 oracles_up () {
@@ -34,12 +34,12 @@ done
 echo "==== $(date +%F_%T) using GPU $GPU_IDX (shared=${K3_SHARED_GPU:-0})"
 export DOCKER_GPU_ARG="\"device=$GPU_IDX\""
 for c in mla kda; do
-  SRC="$HERE/iter_opt_eval_k3_${c}"; OUT="$HERE/iter_opt_eval_k3_${c}_prefill"; mkdir -p "$OUT"
+  SRC="$HERE/iter_opt_eval_k3_${c}"; OUT="$HERE/iter_opt_eval_k3_${c}_${SUFFIX}"; mkdir -p "$OUT"
   [ -d "$OUT/pristine_tree" ] || cp -a "$SRC/pristine_tree" "$OUT/pristine_tree"
   if [ ! -d "$OUT/best_tree" ]; then
-    cp -a "$SRC/best_tree" "$OUT/best_tree"; echo "==== seeded ${c}_prefill best_tree from $SRC/best_tree"
-    echo "==== $(date +%F_%T) transfer check: ${c}_prefill seed tree vs pristine on the prefill points"
-    python3 "$HERE/judge_k3.py" --agent-container transfer_check --config "$HERE/issue_k3_${c}_prefill.json" \
+    cp -a "$SRC/best_tree" "$OUT/best_tree"; echo "==== seeded ${c}_${SUFFIX} best_tree from $SRC/best_tree"
+    echo "==== $(date +%F_%T) transfer check: ${c}_${SUFFIX} seed tree vs pristine on the prefill points"
+    python3 "$HERE/judge_k3.py" --agent-container transfer_check --config "$HERE/issue_k3_${c}_${SUFFIX}.json" \
       --golden-dir /raid/yilegu/eval_goldens --out "$OUT/seed_transfer_verdict.json" \
       --tree-dir "$OUT/best_tree" --pristine-dir "$OUT/pristine_tree" --min-improvement 0 \
       > "$OUT/seed_transfer_judge.log" 2>&1
@@ -57,5 +57,5 @@ if not ok or not d.get("points"):
 PY
   fi
 done
-echo "==== $(date +%F_%T) starting alternate rounds $K0..$((K0+N-1)) for mla_prefill kda_prefill on GPU $GPU_IDX"
-CASES="mla_prefill kda_prefill" exec "$HERE/run_k3_alternate.sh" "$GPU_IDX" "$K0" "$N"
+echo "==== $(date +%F_%T) starting alternate rounds $K0..$((K0+N-1)) for mla_${SUFFIX} kda_${SUFFIX} on GPU $GPU_IDX"
+CASES="mla_${SUFFIX} kda_${SUFFIX}" exec "$HERE/run_k3_alternate.sh" "$GPU_IDX" "$K0" "$N"

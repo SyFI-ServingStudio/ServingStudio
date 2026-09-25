@@ -54,12 +54,15 @@ e("JUDGE", c.get("judge","judge_general.py"))
 e("DRIVER", c.get("driver","extract_and_profile.py"))
 e("CFG_TMPL", c.get("task_template","agent_task_iter_opt.md"))
 e("CFG_MODEL", c.get("codex_model","gpt-5.6-luna"))
+e("AGENT_KIND", c.get("agent","codex"))
+e("CFG_CLAUDE_MODEL", c.get("claude_model","us.anthropic.claude-opus-5-5"))
 e("SHM", c.get("shm_size",""))
 e("EDIT_TREE_PATH", (c.get("edit_tree") or {}).get("container_path",""))
 print("MOUNTS=(" + " ".join(shlex.quote(m) for m in c.get("mounts",[])) + ")")
 PY
 )"
 CODEX_MODEL="${CODEX_MODEL:-$CFG_MODEL}"
+CLAUDE_MODEL="${CLAUDE_MODEL:-$CFG_CLAUDE_MODEL}"
 TASK_TMPL="${TASK_TMPL:-$HERE/$CFG_TMPL}"; [ -f "$TASK_TMPL" ] || TASK_TMPL="$HERE/$CFG_TMPL"
 # Under slurm_gpu.sh the allocation exports DOCKER_GPU_ARG (cgroup-scoped UUID); use it
 # so the trial container binds the slurm-assigned GPU. Standalone falls back to config gpu.
@@ -125,7 +128,12 @@ run_trial () {
     [ -n "${START_TREE:-}" ] && echo "== [$k] seeded agent tree from $START_TREE"
     extra+=(-v "$tree:$EDIT_TREE_PATH")
   fi
-  docker run -d --name "$cname" --gpus "$GPU" \
+  local -a agent_env=()
+  if [ "$AGENT_KIND" = claude ]; then
+    agent_env=(-e CLAUDE_CODE_USE_BEDROCK=1 -e AWS_REGION="${AWS_REGION:-us-east-1}" -e AWS_PROFILE="${AWS_PROFILE:-default}"
+               -e IS_SANDBOX=1 -e DISABLE_AUTOUPDATER=1 -v "$HOME/.aws:/root/.aws:ro")
+  fi
+  docker run -d --name "$cname" --gpus "$GPU" "${agent_env[@]}" \
     -e CUDA_VISIBLE_DEVICES=0 -e HF_HUB_OFFLINE=1 \
     -e SGLANG_OPT_FUSED_KDA_VERIFY=0 -e TOKENIZERS_PARALLELISM=false \
     -e CODEX_HOME=/root/.codex-eval \
@@ -139,12 +147,19 @@ run_trial () {
   [ "$DRIVER" != "extract_and_profile.py" ] || true
   docker exec "$cname" mkdir -p /workspace/opt_run
 
-  echo "== [$k] launching Codex agent ($CODEX_MODEL effort=$EFFORT, timeout ${AGENT_TIMEOUT}s)"
   set +e
-  timeout "$AGENT_TIMEOUT" docker exec -i --workdir "$R_CHECKOUT" "$cname" \
-    codex exec -m "$CODEX_MODEL" -c model_reasoning_effort="$EFFORT" \
-      --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check \
-      "$(cat "$TASK_RUNTIME")" > "${log}_agent.log" 2>&1
+  if [ "$AGENT_KIND" = claude ]; then
+    echo "== [$k] launching Claude Code agent ($CLAUDE_MODEL via Bedrock, timeout ${AGENT_TIMEOUT}s)"
+    timeout "$AGENT_TIMEOUT" docker exec -i --workdir "$R_CHECKOUT" "$cname" \
+      claude -p "$(cat "$TASK_RUNTIME")" --model "$CLAUDE_MODEL" --dangerously-skip-permissions \
+        --output-format stream-json --verbose > "${log}_agent.log" 2>&1
+  else
+    echo "== [$k] launching Codex agent ($CODEX_MODEL effort=$EFFORT, timeout ${AGENT_TIMEOUT}s)"
+    timeout "$AGENT_TIMEOUT" docker exec -i --workdir "$R_CHECKOUT" "$cname" \
+      codex exec -m "$CODEX_MODEL" -c model_reasoning_effort="$EFFORT" \
+        --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check \
+        "$(cat "$TASK_RUNTIME")" > "${log}_agent.log" 2>&1
+  fi
   local acode=$?
   set -e
   echo "== [$k] agent exit=$acode (transcript: ${log}_agent.log)"
