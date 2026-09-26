@@ -507,6 +507,49 @@ and are not shipped here; `UNACCEPTED_*` is exact and real but did not clear the
   and TP8/EP8/PP2 presets incl. b512 and prefill); model.work label + location maps; alignment pack and
   `doc/alignment/kimi_k3_single_layer.md`. The branch profile.db rows are not in the patch.
 
+### 6.6 Was VibeSim actually used? Trajectory evidence
+
+Audit method (`/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/vibesim_usage_audit.py`): for every accepted change, count the oracle API calls in the agent's
+transcript (Codex: `curl … /api/v1/<verb>` lines in `trial_<k>_agent.log`; Claude: tool calls whose input touches
+the oracle host, plus the VibeSim JSON it saved into `iter_NN/`), list the VibeSim nodes named in the agent's
+`analysis.md`, and quote the `hypothesis.md` sentence that ties the change to the analysis. Evidence lives in
+`/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_<case>/trial_<k>_agent.log` and `…/trial_<k>_opt_run/iter_NN/{analysis.md,hypothesis.md}`.
+
+| change | oracle calls in the trial (verbs) | what VibeSim said (from the agent's own analysis.md) | how the change relates | guidance |
+|---|---|---|---|---|
+| M1 MLA r8 (cute-dsl → trtllm-gen decode) | 39 (workspace-info 2, simulate 3, analyze 21, optimality 5, kernels 8) | `kernels` on the MLA decode leaf: `has_cached_alternative` (`sglang_trtllm_mla`); MoE first by headroom but "no cached alternative" | hypothesis iter_01: "cached `trtllm-gen` MLA implementation. VibeSim identifies this as the only …" → the switch | **direct** (VibeSim named the alternative) |
+| M2 MLA r20 (route+quant JIT for 112/top-2) | 37 (1/4/16/7/9) | `optimality?scope=iter` ranked the routed MoE leaf first (R0/R5 44, necessary_share 0.60) | the agent worked on the routing/quant side of that leaf (the cubin itself is closed) | node-level |
+| M3 MLA r21 (fp32-output front GEMM → TGV) | 66 (1/6/21/11/27) | MoE first; `merged_front` `single_gemm` node listed with R0 158.8 vs R5 121.1, R6/R7 30.0 (necessary_share 0.19) | hypothesis iter_02/03: "The top VibeSim node is the TRT-LLM MXFP4 fused MoE. Its short expert GEMMs…", "The VibeSim MoE breakdown leaves shared-down work independent of the routed …"; the accepted edit targets the merged-front GEMM leaf | node-level |
+| M4 MLA r23 (latent_up / shared_down → TGV) | 77 (3/12/32/12/18) | hypothesis iter_05: "VibeSim ranks `unified.mla.moe.latent_up` as an implementation-limited leaf (R0 43.1, R5 26.1, R6/R7 6.4, share 0.149)"; iter_06: "VibeSim ranks `unified.mla.moe.shared_down` … R0 65.4, R5 44.5, R6/R7 11.0, share 0.168" | exactly the two GEMMs the patch changes | **direct** (strongest case: two leaves named, both changed) |
+| M5 MLA r24 (shared/routed alt-stream overlap) | 72 (1/11/27/13/20) | iter_04: "VibeSim's highest-share actionable node is mxfp4_fused_moe"; iter_09: "VibeSim ranks `unified.mla.moe.mxfp4_fused_moe` first by headroom" | the overlap hides the shared-expert work under that node; the overlap idea itself is the agent's | node-level |
+| M6 MLA r25 (persistent schedule, KV-concat warps) | 61 (2/5/25/10/19) | iter_02: "The VibeSim MLA leaf has a cached alternative, and the current …" (attention node second by headroom) | scheduling flag on the attention leaf VibeSim pointed at; the 16-warp CTA came from the per-kernel table | node-level |
+| K1 KDA r8/10/11 (fast path, shared_down GEMM, overlap, warps) | 64 / 80 / 76 (e.g. r10: 2/10/20/23/25) | r10 iter_00: "The profile and VibeSim analysis identify the TRT-LLM MXFP4 …"; r11 analysis: "The recurrent leaf has R0=42.5 us, R5=8.2 us (R0/R5=5.21)"; `shared_down` R0 50 vs R6 16.6 named | fast path + num_warps act on the recurrent leaf, the CuteDSL GEMM on shared_down, the overlap on the MoE node — the three leaves VibeSim ranked after the closed cubin | node-level |
+| K2 KDA r22 (bf16-state fused decode kernel) | 64 (1/6/22/11/24) | MoE first, `has_cached_alternative=false`; the recurrent/fused-decode leaf next; the agent also re-ran `simulate?prediction=.:after` and all verbs post-edit | the kernel port collapses the recurrent leaf VibeSim ranked second (and the KB's trials 7/9 pointed at) | node-level |
+| Claude MLA-b512 r1 (MoE autotune, KV-concat satfinite) | 11 tool calls (4/2/4/5/3), outputs saved as `iter_00/vs_optimality.json` etc. | log: "VibeSim top node mxfp4_fused_moe (r0/r5 16.9)" | autotune acts on that node (harness gap); the KV-concat kernel came from the profiler table | node-level / profiler-led |
+| Claude MLA-b512 r2 (persistent-decode tail split) | 9 (3/1/5/3/3), `iter_00/vibesim/optimality.json` | attention node second by headroom (R0/R5 1.37) | the tail split attacks the attention leaf's wave quantization — an idea from the kernel's grid, not from VibeSim | node-level |
+| Claude MLA-b512 r3 (output-gate into decode tail; attn-res fused add) | 6 (1/1/3/4/3), `vs_optimality.json` re-fetched in iter_02 | analysis: "VibeSim node: unified.mla.attention.output_gate (r0 31.9 / r5 11.1 / r6 7.7 us, necessary_share 0.24)" | the output-gate GEMM is exactly the leaf moved into the decode tail | **direct** |
+| Claude KDA-b512 r1 (MoE autotune, fused-decode vector ld/st, bfa overlap) | 7 (1/1/2/5/1) | log: "VibeSim top node mxfp4_fused_moe (R0/R5 18x)"; `kda_fused_decode` and `qkvbfg` leaves listed; R6 null in this prediction | autotune on the top node; the fused-decode kernel work on the second leaf; overlap limit on qkvbfg's side stream | node-level |
+| Claude MLA-prefill r1 (fp8 K/V pack kernel) | 8 (1/1/4/5/1), `vs_*` saved | log: "VibeSim: front GEMM / attention subtree / MoE top headroom; **attention K/V packing = ~800us of avoidable elementwise**"; analysis: "The attention subtree has the largest R0/R5 (6.4)" | the one-pass pack+quant kernel removes exactly that elementwise glue | **direct** |
+| Claude MLA-prefill r2 (prefix attention → CuTe-DSL FMHA) | 7 (2/2/4/4/2), `iter_0*/vibesim/optimality_scope_iter.json` | analysis: "(attention subtree) has the highest R0/R5 = 6.4 … an in-framework alternative kernel: flashinfer's `backend=\"cute-dsl\"` ragged prefill" | the alternative kernel named in the analysis is the one adopted | **direct** |
+| Claude KDA-prefill r1 (strided chunk kernels, no copies, no host sync) | 7 (2/1/4/2/2), `vs_opt.json` etc. | analysis: optimality ranked by R0−R5 headroom (R6 null); "the run_summary batching bucket attributes the non-hardware gap to kda_chunk_prefill" | the copies removed sit inside the `kda_chunk_prefill` leaf VibeSim flagged; the specific copies came from the profiler's elementwise rows | node-level / profiler-led |
+
+Reading of the evidence:
+
+- **Every accepted change was preceded by VibeSim analysis**, and in every trial the agent ran the ladder before
+  its first edit (Codex trials made 37–80 oracle calls each; Claude rounds 6–11 tool calls that fetched every verb
+  and saved the JSON next to the iteration). The prompt's rule "measure, simulate, then analyze" was followed.
+- **In 5 of 15 accepted changes VibeSim named the exact leaf or alternative that was changed** (M1, M4, Claude
+  MLA-b512 r3, MLA-prefill r1, MLA-prefill r2). In the other 10 it set the target node (the closed MXFP4 cubin
+  first, then the attention / recurrent / GEMM leaves by headroom) and the agent chose the mechanism (stream
+  overlap, kernel port, autotune, copy removal) from the per-kernel profiler table. No accepted change targeted a
+  node VibeSim ranked as already at its floor.
+- **What VibeSim did not do:** because the oracle serves a fixed before-state prediction, post-edit "re-simulate"
+  returned the same numbers (Claude MLA-prefill r2: "byte-identical to iter_00 — VibeSim models the design, not our
+  profile"); verification of each edit came from the driver's replay + per-kernel table, not from VibeSim. For the
+  b512 and prefill oracles R6/R7 (`necessary_share`) was null, so agents ranked by R0−R5 headroom only. And the
+  largest single "gain" of the Claude campaigns (the MoE autotune) was a harness gap that VibeSim's ranking pointed
+  at but could not distinguish from a real kernel deficiency.
+
 ## 7. Reproduce
 
 ```bash
