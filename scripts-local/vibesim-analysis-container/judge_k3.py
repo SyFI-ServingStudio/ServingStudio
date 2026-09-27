@@ -106,7 +106,11 @@ class Container:
                 "--shm-size", cfg.get("shm_size", "32g"),
                 "-e", "CUDA_VISIBLE_DEVICES=0", "-e", "HF_HUB_OFFLINE=1",
                 "-e", "SGLANG_OPT_FUSED_KDA_VERIFY=0", "-e", "TOKENIZERS_PARALLELISM=false",
-                "-v", "/raid/yilegu/flashinfer_cache:/root/.cache/flashinfer:ro"]
+                # rw (was ro until 2026-09-26): with --flashinfer-autotune the FlashInfer autotuner
+                # persists newly tuned shapes into k3_flashinfer_autotune_cache.json inside this
+                # mount; a read-only mount made every point whose shape was not cached yet
+                # (MLA 1x1M: trtllm_batch_decode_mla) fail with EROFS, i.e. a false FAIL.
+                "-v", "/raid/yilegu/flashinfer_cache:/root/.cache/flashinfer"]
         for m in cfg.get("mounts", []):
             argv += ["-v", m]
         if tree_mount is not None:
