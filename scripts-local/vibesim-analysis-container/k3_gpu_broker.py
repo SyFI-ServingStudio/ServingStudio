@@ -108,10 +108,20 @@ def main():
         log(f"[{rid}] {r['kind']}: {' '.join(shlex.quote(x) for x in r['argv'])[:300]}")
         rp.rename(rp.with_suffix(".running"))
         t0 = time.time()
-        rc, job = submit_and_wait(cmd, out, job_f)
-        rc_f.write_text(str(rc))
-        log(f"[{rid}] done rc={rc} in {time.time()-t0:.0f}s (job {job})")
-        rp.with_suffix(".running").rename(rp.with_suffix(".done"))
+        try:
+            rc, job = submit_and_wait(cmd, out, job_f)
+            rc_f.write_text(str(rc))
+            log(f"[{rid}] done rc={rc} in {time.time()-t0:.0f}s (job {job})")
+            rp.with_suffix(".running").rename(rp.with_suffix(".done"))
+        except OSError as e:
+            # 2026-09-27: /raid hit 100% for ~15 min and an ENOSPC on the output file killed the
+            # broker, stranding the agent's call. Never die on I/O: requeue the request and retry.
+            log(f"[{rid}] I/O error ({e}); requeue and retry in 60s")
+            try:
+                rp.with_suffix(".running").rename(rp)
+            except OSError:
+                pass
+            time.sleep(60)
     log("broker stopped (STOP file)")
 
 
