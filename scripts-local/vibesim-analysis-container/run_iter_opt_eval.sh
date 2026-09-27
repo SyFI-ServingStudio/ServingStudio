@@ -22,6 +22,10 @@
 #   START_TREE=<dir>   continuous loop: seed the agent tree from this (current best) tree and
 #                      judge against its latency (K3 judge only; goldens stay pristine)
 #   MIN_IMPROVEMENT=<f> override the judge's min_improvement (0 = any 3-sigma gain)
+#   K3_GPU_MODE=slurm  (user 2026-09-26) the agent container gets NO GPU; its driver is replaced by
+#                      k3_gpu_shim.py and a host broker (k3_gpu_broker.py) runs every measurement as
+#                      its own `sbatch` job on partition main (K3_SLURM_PARTITION); the judge runs as
+#                      one sbatch job too. A GPU is held only while something is actually profiled.
 #
 # Config keys beyond the judge's (all optional unless noted):
 #   codex_image (req), model_snap, gpu, case, judge (script in this dir), driver (file copied
@@ -69,9 +73,27 @@ TASK_TMPL="${TASK_TMPL:-$HERE/$CFG_TMPL}"; [ -f "$TASK_TMPL" ] || TASK_TMPL="$HE
 GPU="${DOCKER_GPU_ARG:-\"device=$GPU_DEV\"}"
 SITE="/opt/venv/lib/python3.12/site-packages/$SITE_FW"
 OUT="$HERE/iter_opt_eval_${CASE}"; mkdir -p "$OUT" "$FICACHE" "$GOLDEN_DIR"
+K3_GPU_MODE="${K3_GPU_MODE:-direct}"; K3_SLURM_PARTITION="${K3_SLURM_PARTITION:-main}"
+BEFORE_IMG="$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('before_image',''))" "$CONFIG")"
+
+# submit a command as one slurm GPU job (slurm_gpu.sh -> k3_slurm_step.sh guards against foreign
+# tenants), wait for it to leave the queue, echo its output file's tail. Returns the step's rc.
+slurm_run () { # $1 job-name $2 output-file $3... command
+  local name="$1" outf="$2"; shift 2
+  local job; job="$(sbatch --parsable --partition="$K3_SLURM_PARTITION" --job-name="$name" --output="$outf" \
+                 "$HERE/slurm_gpu.sh" "$HERE/k3_slurm_step.sh" "$@" | cut -d';' -f1)"
+  [ -n "$job" ] || { echo "!! sbatch failed for $name"; return 1; }
+  echo "== slurm job $job ($name) submitted; output -> $outf"
+  while squeue -h -j "$job" -o %T 2>/dev/null | grep -q .; do sleep 15; done
+  sleep 2
+  local rc; rc="$(grep -a '^\[step\] EXIT_RC=' "$outf" 2>/dev/null | tail -1 | cut -d= -f2)"
+  echo "== slurm job $job finished rc=${rc:-?}"; tail -5 "$outf" 2>/dev/null
+  [ -n "$rc" ] && return "$rc"; return 1
+}
 
 # ---- render the task (python, not sed: REBUILD_CMDs contain '&&' which sed treats specially)
 TASK_RUNTIME="$OUT/agent_task_rendered.md"
+[ "$K3_GPU_MODE" = slurm ] && export GPU_NOTE_FILE="$HERE/gpu_note_slurm.md"
 python3 - "$CONFIG" "$TASK_TMPL" "$TASK_RUNTIME" <<'PY'
 import json,sys
 c=json.load(open(sys.argv[1])); r=dict(c.get("render",{}))
@@ -80,6 +102,9 @@ r.setdefault("CHECKOUT","/workspace/vllm"); r.setdefault("MODEL_NAME","the model
 r.setdefault("WORKLOAD","short-prompt decode"); r.setdefault("TOKENS", c.get("tokens",8))
 r.setdefault("REBUILD_CMD","python3 setup.py build_ext --inplace")
 r["MODEL_SNAP"]=c.get("model_snap","")
+import os
+note=os.environ.get("GPU_NOTE_FILE","")
+r.setdefault("GPU_NOTE", open(note).read().strip() if note and os.path.exists(note) else "")
 t=open(sys.argv[2]).read()
 for k in sorted(r, key=len, reverse=True):   # longest first: $MODEL_SNAP before $MODEL
     t=t.replace("$"+k, str(r[k]))
@@ -133,7 +158,20 @@ run_trial () {
     agent_env=(-e CLAUDE_CODE_USE_BEDROCK=1 -e AWS_REGION="${AWS_REGION:-us-east-1}" -e AWS_PROFILE="${AWS_PROFILE:-default}"
                -e IS_SANDBOX=1 -e DISABLE_AUTOUPDATER=1 -v "$HOME/.aws:/root/.aws:ro")
   fi
-  docker run -d --name "$cname" --gpus "$GPU" "${agent_env[@]}" \
+  local -a gpu_arg=(--gpus "$GPU")
+  local broker_pid=""
+  if [ "$K3_GPU_MODE" = slurm ]; then
+    # no GPU in the agent container; measurements go through the broker (see header)
+    gpu_arg=()
+    mkdir -p "${log}_gpu" "${log}_opt_run_live"
+    extra+=(-v "${log}_gpu:/workspace/.gpu" -v "${log}_opt_run_live:/workspace/opt_run")
+    if [ ! -d "$OUT/jit_cache" ]; then   # sglang's prebuilt JIT kernels from the image, persisted per case
+      tmpj="jitseed_${CASE}_$$"; docker create --name "$tmpj" "$BEFORE_IMG" true >/dev/null
+      docker cp "$tmpj:/root/.cache/sglang/jit" "$OUT/jit_cache" 2>/dev/null || mkdir -p "$OUT/jit_cache"
+      docker rm -f "$tmpj" >/dev/null
+    fi
+  fi
+  docker run -d --name "$cname" "${gpu_arg[@]}" "${agent_env[@]}" \
     -e CUDA_VISIBLE_DEVICES=0 -e HF_HUB_OFFLINE=1 \
     -e SGLANG_OPT_FUSED_KDA_VERIFY=0 -e TOKENIZERS_PARALLELISM=false \
     -e CODEX_HOME=/root/.codex-eval \
@@ -146,6 +184,24 @@ run_trial () {
   docker cp "$HERE/$DRIVER" "$cname:/tmp/$(basename "$DRIVER")"
   [ "$DRIVER" != "extract_and_profile.py" ] || true
   docker exec "$cname" mkdir -p /workspace/opt_run
+  if [ "$K3_GPU_MODE" = slurm ]; then
+    docker exec "$cname" mkdir -p /tmp/k3_driver_src
+    docker exec "$cname" mv "/tmp/$(basename "$DRIVER")" "/tmp/k3_driver_src/$(basename "$DRIVER")"
+    docker exec "$cname" chmod 444 "/tmp/k3_driver_src/$(basename "$DRIVER")"
+    docker cp "$HERE/k3_gpu_shim.py" "$cname:/tmp/k3_gpu_shim.py"
+    docker cp "$HERE/k3_gpu_shim.py" "$cname:/tmp/$(basename "$DRIVER")"
+    docker cp "$HERE/gpu_run.sh" "$cname:/tmp/gpu_run.sh"
+    docker exec "$cname" chmod +x /tmp/gpu_run.sh /tmp/k3_gpu_shim.py
+    local -a bmounts=()
+    for m in "${MOUNTS[@]:-}"; do [ -n "$m" ] && bmounts+=(--mount "$m"); done
+    cp "$HERE/$DRIVER" "${log}_gpu/$(basename "$DRIVER")"   # the tree the agent measures with = this driver
+    nohup python3 "$HERE/k3_gpu_broker.py" --dir "${log}_gpu" --tree "$tree" --edit-path "$EDIT_TREE_PATH" \
+      --driver "${log}_gpu/$(basename "$DRIVER")" --opt-run "${log}_opt_run_live" --jit-cache "$OUT/jit_cache" \
+      --image "$BEFORE_IMG" --shm "${SHM:-32g}" --partition "$K3_SLURM_PARTITION" --job-prefix "k3m_${CASE}_${k}" \
+      "${bmounts[@]}" > "${log}_gpu/broker.log" 2>&1 &
+    broker_pid=$!
+    echo "== [$k] slurm mode: agent container has no GPU; broker pid $broker_pid (${log}_gpu/broker.log)"
+  fi
 
   set +e
   if [ "$AGENT_KIND" = claude ]; then
@@ -184,6 +240,7 @@ run_trial () {
   if ! docker exec --workdir "$R_CHECKOUT" "$cname" \
         bash -lc "$R_REBUILD" > "${log}_build.log" 2>&1; then
     echo "!! [$k] BUILD FAILED -> FAIL"; tail -15 "${log}_build.log"
+    if [ -n "$broker_pid" ]; then touch "${log}_gpu/STOP"; sleep 3; kill "$broker_pid" 2>/dev/null; fi
     echo '{"trial":'"$k"',"verdict":"FAIL","reason":"agent left source non-compiling"}' > "${log}_verdict.json"
     docker rm -f "$cname" >/dev/null 2>&1 || true; return 0
   fi
@@ -197,7 +254,15 @@ run_trial () {
 
   echo "== [$k] judging ($JUDGE)"
   set +e
-  if [ -n "$tree" ]; then
+  if [ -n "$tree" ] && [ "$K3_GPU_MODE" = slurm ]; then
+    if [ -n "$broker_pid" ]; then touch "${log}_gpu/STOP"; sleep 3; kill "$broker_pid" 2>/dev/null; fi
+    slurm_run "k3j_${CASE}_${k}" "${log}_judge_slurm.out" \
+      python3 "$HERE/$JUDGE" --agent-container "$cname" --config "$CONFIG" \
+      --golden-dir "$GOLDEN_DIR" --out "${log}_verdict.json" \
+      --tree-dir "$tree" --pristine-dir "$PRISTINE" \
+      ${START_TREE:+--baseline-tree "$START_TREE"} \
+      ${MIN_IMPROVEMENT:+--min-improvement "$MIN_IMPROVEMENT"}
+  elif [ -n "$tree" ]; then
     python3 "$HERE/$JUDGE" --agent-container "$cname" --config "$CONFIG" \
       --golden-dir "$GOLDEN_DIR" --out "${log}_verdict.json" \
       --tree-dir "$tree" --pristine-dir "$PRISTINE" \

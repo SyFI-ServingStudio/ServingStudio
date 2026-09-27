@@ -58,18 +58,20 @@ weights/state, drives real decode steps through the framework's own attention ba
 MoE kernels, captures the step in a CUDA graph and times replays. Always pass the fixed
 workload flags `$DRIVER_ARGS`.
 
+$GPU_NOTE
+
 ```bash
-cd /tmp
+cd /workspace/opt_run
 ARGS="$DRIVER_ARGS"
 # 1) latency + per-kernel table (what actually launches, how long each kernel takes):
 python3 /tmp/kimi_single_layer_decode.py --point "$POINTS" $ARGS --split \
     --profile-kernels /workspace/opt_run/iter_NN/profile.json --json-out /workspace/opt_run/iter_NN/run.json
 
 # 2) golden BEFORE you edit (reference output + post-step state your change must preserve):
-python3 /tmp/kimi_single_layer_decode.py --point "$POINTS" $ARGS --capture /tmp/golden.pt
+python3 /tmp/kimi_single_layer_decode.py --point "$POINTS" $ARGS --capture /workspace/opt_run/golden.pt
 
 # 3) after editing, replay: speed AND correctness (per point: `JSON {...}` and `CHECK {...}`):
-python3 /tmp/kimi_single_layer_decode.py --point "$POINTS" $ARGS --replay /tmp/golden.pt
+python3 /tmp/kimi_single_layer_decode.py --point "$POINTS" $ARGS --replay /workspace/opt_run/golden.pt
 ```
 - Every point prints a `JSON {"latency_us": ..., "latency_mode": "graph"|"eager", ...}` line; the
   judged number is `latency_us` (graph mode for decode points, eager for prefill points, whose
