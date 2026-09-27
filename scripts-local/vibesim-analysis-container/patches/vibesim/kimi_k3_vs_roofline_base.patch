@@ -44454,6 +44454,92 @@ index 00000000..bebb3e23
 +  "log_dir": "logs/predict_kimi_k3_b200_rank1_layer_kda_fp32state",
 +  "cases_file": "predict_kimi_k3_b200_rank1_layer_kda_cases.json"
 +}
+diff --git a/presets/predict_kimi_k3_b200_rank1_layer_kda_lcprefill.json b/presets/predict_kimi_k3_b200_rank1_layer_kda_lcprefill.json
+new file mode 100644
+index 00000000..0408d26a
+--- /dev/null
++++ b/presets/predict_kimi_k3_b200_rank1_layer_kda_lcprefill.json
+@@ -0,0 +1,22 @@
++{
++  "arch": {
++    "iter": {
++      "type": "kimi_k3_sglang",
++      "model_config": "model/config/kimi_k3.json",
++      "fp8": false,
++      "attn_tp_size": 1,
++      "ep_size": 1,
++      "pp_size": 1,
++      "dcp_size": 1,
++      "heads_per_rank": 12,
++      "local_experts": 112,
++      "local_top_k": 2,
++      "sim_kda_layers": 1,
++      "sim_mla_layers": 0,
++      "kda_state_dtype": "bf16"
++    }
++  },
++  "gpu": "NVIDIA B200",
++  "log_dir": "logs/predict_kimi_k3_b200_rank1_layer_kda_lcprefill",
++  "cases_file": "predict_kimi_k3_b200_rank1_layer_kda_lcprefill_cases.json"
++}
+\ No newline at end of file
+diff --git a/presets/predict_kimi_k3_b200_rank1_layer_kda_lcprefill_cases.json b/presets/predict_kimi_k3_b200_rank1_layer_kda_lcprefill_cases.json
+new file mode 100644
+index 00000000..87d6382e
+--- /dev/null
++++ b/presets/predict_kimi_k3_b200_rank1_layer_kda_lcprefill_cases.json
+@@ -0,0 +1,50 @@
++[
++  {
++    "groups": [
++      {
++        "prefill_chunk_pairs": [
++          [
++            245760,
++            16384
++          ]
++        ]
++      }
++    ]
++  },
++  {
++    "groups": [
++      {
++        "prefill_chunk_pairs": [
++          [
++            229376,
++            32768
++          ]
++        ]
++      }
++    ]
++  },
++  {
++    "groups": [
++      {
++        "prefill_chunk_pairs": [
++          [
++            131072,
++            16384
++          ]
++        ]
++      }
++    ]
++  },
++  {
++    "groups": [
++      {
++        "prefill_chunk_pairs": [
++          [
++            131072,
++            32768
++          ]
++        ]
++      }
++    ]
++  }
++]
+\ No newline at end of file
 diff --git a/presets/predict_kimi_k3_b200_rank1_layer_kda_prefill.json b/presets/predict_kimi_k3_b200_rank1_layer_kda_prefill.json
 new file mode 100644
 index 00000000..21792cb1
@@ -44571,6 +44657,92 @@ index 00000000..9f1d4bea
 +  { "groups": [ { "decode_count": 16, "average_decode_length": 65536 } ] },
 +  { "groups": [ { "decode_count": 1, "average_decode_length": 1048576 } ] }
 +]
+diff --git a/presets/predict_kimi_k3_b200_rank1_layer_mla_lcprefill.json b/presets/predict_kimi_k3_b200_rank1_layer_mla_lcprefill.json
+new file mode 100644
+index 00000000..3554a972
+--- /dev/null
++++ b/presets/predict_kimi_k3_b200_rank1_layer_mla_lcprefill.json
+@@ -0,0 +1,22 @@
++{
++  "arch": {
++    "iter": {
++      "type": "kimi_k3_sglang",
++      "model_config": "model/config/kimi_k3.json",
++      "fp8": false,
++      "attn_tp_size": 1,
++      "ep_size": 1,
++      "pp_size": 1,
++      "dcp_size": 1,
++      "heads_per_rank": 12,
++      "local_experts": 112,
++      "local_top_k": 2,
++      "sim_kda_layers": 0,
++      "sim_mla_layers": 1,
++      "kda_state_dtype": "bf16"
++    }
++  },
++  "gpu": "NVIDIA B200",
++  "log_dir": "logs/predict_kimi_k3_b200_rank1_layer_mla_lcprefill",
++  "cases_file": "predict_kimi_k3_b200_rank1_layer_mla_lcprefill_cases.json"
++}
+\ No newline at end of file
+diff --git a/presets/predict_kimi_k3_b200_rank1_layer_mla_lcprefill_cases.json b/presets/predict_kimi_k3_b200_rank1_layer_mla_lcprefill_cases.json
+new file mode 100644
+index 00000000..87d6382e
+--- /dev/null
++++ b/presets/predict_kimi_k3_b200_rank1_layer_mla_lcprefill_cases.json
+@@ -0,0 +1,50 @@
++[
++  {
++    "groups": [
++      {
++        "prefill_chunk_pairs": [
++          [
++            245760,
++            16384
++          ]
++        ]
++      }
++    ]
++  },
++  {
++    "groups": [
++      {
++        "prefill_chunk_pairs": [
++          [
++            229376,
++            32768
++          ]
++        ]
++      }
++    ]
++  },
++  {
++    "groups": [
++      {
++        "prefill_chunk_pairs": [
++          [
++            131072,
++            16384
++          ]
++        ]
++      }
++    ]
++  },
++  {
++    "groups": [
++      {
++        "prefill_chunk_pairs": [
++          [
++            131072,
++            32768
++          ]
++        ]
++      }
++    ]
++  }
++]
+\ No newline at end of file
 diff --git a/presets/predict_kimi_k3_b200_rank1_layer_mla_prefill.json b/presets/predict_kimi_k3_b200_rank1_layer_mla_prefill.json
 new file mode 100644
 index 00000000..abdaa68b

@@ -73,6 +73,8 @@ tree_diff "$CB/trial_2_tree_judged" "$CB/trial_3_tree_judged" "$OUT/sglang/claud
 validate_chain "$HERE/iter_opt_eval_k3_mla/best_tree" "$CB/best_tree" "$OUT"/sglang/claude/mla_b512_0*.patch
 CB="$HERE/iter_opt_eval_k3_kda_b512_claude"
 tree_diff "$HERE/iter_opt_eval_k3_kda/best_tree" "$CB/trial_1_tree_judged" "$OUT/sglang/claude/kda_b512_01_r1_moe_autotune_fused_decode_vector_ldst_bfa_overlap.patch"
+# r2 was FAIL-by-noise at 5 reps (sigma 7.3 us) and PASSED the 15-rep re-judge on 2026-09-27 (+1.0% @512, follow-up #2)
+[ -d "$CB/rejudge15_trial_2_tree_judged" ] && tree_diff "$CB/trial_1_tree_judged" "$CB/rejudge15_trial_2_tree_judged" "$OUT/sglang/claude/kda_b512_02_r2_fused_decode_prologue_hoist_quad_row_reduction.patch"
 validate_chain "$HERE/iter_opt_eval_k3_kda/best_tree" "$CB/best_tree" "$OUT"/sglang/claude/kda_b512_0*.patch
 CB="$HERE/iter_opt_eval_k3_mla_prefill_claude"
 tree_diff "$HERE/iter_opt_eval_k3_mla/best_tree" "$CB/trial_1_tree_judged" "$OUT/sglang/claude/mla_prefill_01_r1_kv_pack_quantize_fp8_attnres_fused_add.patch"

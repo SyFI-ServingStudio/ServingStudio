@@ -130,3 +130,8 @@ d9fa0fe K3 write-up §6.6: trajectory audit of VibeSim usage behind every accept
 602e7ea K3 loop: long-context chunked-prefill cases (16k/32k chunks at 128k-262k contexts, KDA+MLA same shapes) + generic slurm pair runner
 2459d30 run_iter_opt_eval: slurm mode drops agent requests still queued at timeout (no stray GPU job after the smoke)
 db98548 K3: shape-matched + long-context prefill patch chains (validated), warm-start KB notes for the shape campaign, slurm-capable seed recheck
+a5a097a K3 Campaign 6 write-up (shape-matched decode + long-context prefill, slurm mode), lcprefill patch chains, KB notes
+5f3e209 K3 Campaign 6 write-up: seed-recheck results for the long-context prefill trees (16/16 PASS)
+1e72984 K3: consolidated write-up of every successful technique across all decode and prefill shapes (technique x shape matrix, mechanisms, patch paths, dead ends, transfer rules)
+ab70a30 K3 follow-up #1: long-context prefill oracles (8807/8808) baked from new VibeSim presets; lcprefill cases point at them; B12c Codex task for prefill prediction fidelity (prefix scaling, GEMM/MoE rows)
+c8be24a K3 follow-up #2: re-judge exact-but-below-3-sigma rounds with 15 reps (slurm)

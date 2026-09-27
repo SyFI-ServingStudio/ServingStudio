@@ -69,7 +69,7 @@ NOTES = {
     ("mla_b512", 3): "Codex: null +0.17%; route+quant cap 64->512 (-1.5us kept), TGV at m=512 8%/2% SLOWER (reverted)",
     ("mla_b512", 4): "Codex: null 0.00%; PDL policy regressed, var-seq scheduler neutral",
     ("kda_b512_claude", 1): "ACCEPTED (Claude Opus 5.5): one-shot MXFP4 MoE autotune when rows/expert>8 (= production warmup, HARNESS GAP ~9 pts) + vectorized bf16 state ld/st & launch_bounds in kda_fused_decode.cuh (92.6->83.0us, real) + bfa overlap limit 128->512: 675.2->600.4 @512, exact",
-    ("kda_b512_claude", 2): "Claude: FAIL by noise (+1.4% @512 exact vs 3.65% need, sigma 7.3us): fused-kernel prologue load hoist + quad-row warp reduction (80.4->76.6us) -- real but lost",
+    ("kda_b512_claude", 2): "ACCEPTED on the 15-rep re-judge (2026-09-27, follow-up #2): fused-kernel prologue load hoist + quad-row warp reduction (80.4->76.6us kernel): 599.5->593.5 @512 (+1.0%, sigma 0.3us), +1.1% @256, +0.5% @128, rel 0.017; the original 5-rep judge lost it to noise (sigma 7.3us, 3.65% need)",
     ("mla_b512_claude", 2): "ACCEPTED (Claude): tail split of the persistent MLA decode kernel's last wave (B=148*3+68 -> split 68 trailing requests into 136 half-KV pseudo-requests, LSE merge; mla_decode_tail_split.py): 904.6->888.0 @512, exact",
     ("kda_b512_claude", 3): "Claude: FAIL correctness (rel 0.029/0.022/0.021, 8/1/1 rows over tol) -- attn-res TMA fused residual add (fp32 add + RNE) changes rounding; the r2 kernel port (via the KB) and routed-before-shared capture order were exact (-3.1% total @512)",
     ("mla_prefill_claude", 3): "Claude: null (re-judged clean after a foreign-job-noise verdict): -0.5% @pf49152, +2.0% 4x4k; agent hit its cap without an accepted change",
@@ -90,7 +90,7 @@ NOTES = {
     # long-context chunked prefill (2026-09-27, slurm mode; 16k/32k chunks at 128k/262k contexts; seed = prefill Claude best tree)
     ("kda_lcprefill_claude", 1): "ACCEPTED (Claude): CUDA mma.sync h-scan kernel (kda_chunk_h.cuh, ported from the earlier unaccepted prefill r2 via the KB) + conv1d BLOCK_M=16/nw=2: 8612.9->8471.6 us @16k/pf245760 (-1.6%), -3.1% @16k/pf131072, bit-exact",
     ("kda_lcprefill_claude", 2): "ACCEPTED (Claude): fused SiLU-and-mul JIT kernel for the MoE activation (situ_and_mul.cuh): 8307.9->8193.2 @16k/pf245760 (-1.4%), -4.0% @16k/pf131072, rel 0.007; side-stream in-proj overlap rejected by its own A/B (<=0.3%: persistent GEMMs serialize)",
-    ("kda_lcprefill_claude", 3): "FAIL below 3-sigma (Claude): +0.7% @16k/pf245760 (secondaries -1.6..-3.6%), correct; no iteration log",
+    ("kda_lcprefill_claude", 3): "FAIL below 3-sigma (Claude): +0.7% @16k/pf245760 (secondaries -1.6..-3.6%), correct; no iteration log. Re-judged at 15 reps (2026-09-27): +0.9% vs a 1.31% floor (prefill sigma ~0.4% is intrinsic) -> still not accepted; a real but sub-1% effect",
     ("mla_lcprefill_claude", 1): "ACCEPTED (Claude): 16B-align the prefix-chunk cum_seqlen_k row so the accepted CuTe-DSL prefix FMHA actually engages at long prefixes (it silently fell back to trtllm-gen; prefix FMHA = 66% of the step) + empirical KV-split policy (S=4 <=6 waves else S=2): 25196.8->21998.0 @16k/pf245760 (-12.7%), -7.5/-7.4/-4.4% on the others, bit-exact",
     ("mla_lcprefill_claude", 2): "ACCEPTED (Claude): prefix-FMHA softmax: 40 of 128 exp2 per tile emulated on the FMA pipe with a degree-2 polynomial (MUFU relief): 22001.9->20967.8 @16k/pf245760 (-4.7%), -5.7/-2.1/-3.1%, bit-exact",
     ("mla_lcprefill_claude", 3): "FAIL correctness (Claude): +1.4% @16k/pf245760 but rel 0.30 / row-wise rule failed at 32k/pf229376 (rel 0.25 on the primary, passed by rows) -- a numerics-changing prefix-attention change; rejected",
@@ -204,7 +204,7 @@ def build_case(case, out, hist):
             prev_pass_tree = d / f"trial_{k}_tree_judged"
     # extra judged trees (stacked, seed rechecks, mixed point) -> plain copies of verdicts
     for extra in ("stacked_verdict.json", "best_tree_seed1_verdict.json", "best_tree_seed2_verdict.json",
-                  "best_tree_mixed_verdict.json"):
+                  "best_tree_mixed_verdict.json", "rejudge15_trial_2_verdict.json", "rejudge15_trial_3_verdict.json"):
         if (d / extra).exists():
             (out / "trials" / f"{case}_extra").mkdir(parents=True, exist_ok=True)
             shutil.copy(d / extra, out / "trials" / f"{case}_extra" / extra)

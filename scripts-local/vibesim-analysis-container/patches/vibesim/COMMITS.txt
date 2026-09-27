@@ -160,3 +160,4 @@ ef202ca2 Align K3 MXFP4 MoE runner with layer launch
 51810876 kimi_k3 presets: large-batch decode cases (B=512/256 @8k) for the rank-1 KDA/MLA layer oracles
 83847486 Fix Kimi K3 MLA decode profile coverage
 85eefeb4 kimi_k3: chunked-prefill support (Codex B12, committed by operator at the cap)
+bbb2ae4e kimi_k3: long-context chunked-prefill presets + baked predictions (16k/32k chunks at 128k-262k prefixes) for the lcprefill oracles
