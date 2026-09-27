@@ -423,10 +423,10 @@ index 0000000..7672fdb
 +echo "==== $(date +%F_%T) 8804 restarted"
 diff --git a/scripts-local/vibesim-analysis-container/recheck_best_trees_seeds.sh b/scripts-local/vibesim-analysis-container/recheck_best_trees_seeds.sh
 new file mode 100755
-index 0000000..dd4b4c2
+index 0000000..49fd4b3
 --- /dev/null
 +++ b/scripts-local/vibesim-analysis-container/recheck_best_trees_seeds.sh
-@@ -0,0 +1,33 @@
+@@ -0,0 +1,35 @@
 +#!/usr/bin/env bash
 +# Accuracy hardening: re-judge the final best trees against FRESH pristine goldens under extra
 +# seeds (new weights/state/inputs). The continuous loop only ever checked seed 0. Verdict files:
@@ -435,7 +435,9 @@ index 0000000..dd4b4c2
 +set -uo pipefail
 +HERE="$(cd "$(dirname "$0")" && pwd)"
 +GPU_IDX="$1"; shift; CASES="${CASES:-mla kda}"
-+export DOCKER_GPU_ARG="\"device=$GPU_IDX\""
++# <gpu> = index (direct docker) or `slurm`: keep the DOCKER_GPU_ARG exported by slurm_gpu.sh, i.e. run as
++#   sbatch slurm_gpu.sh k3_slurm_step.sh env CASES="..." ./recheck_best_trees_seeds.sh slurm 1 2
++[ "$GPU_IDX" = slurm ] || export DOCKER_GPU_ARG="\"device=$GPU_IDX\""
 +for seed in "$@"; do
 +  for case_name in $CASES; do
 +    OUT="$HERE/iter_opt_eval_k3_${case_name}"

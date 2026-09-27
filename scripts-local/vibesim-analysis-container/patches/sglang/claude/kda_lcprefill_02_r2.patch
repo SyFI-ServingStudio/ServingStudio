@@ -1,0 +1,160 @@
+diff -ruN -x __pycache__ -x '*.pyc' a/kernels/jit/csrc/kimi_k3/situ_and_mul.cuh b/kernels/jit/csrc/kimi_k3/situ_and_mul.cuh
+--- a/kernels/jit/csrc/kimi_k3/situ_and_mul.cuh	2026-09-18 02:16:55.000000000 -0700
++++ b/kernels/jit/csrc/kimi_k3/situ_and_mul.cuh	2026-09-27 04:21:41.456751562 -0700
+@@ -42,6 +42,30 @@
+   return gate_out * up_out;
+ }
+ 
++/// Approximate SiTU for the plain elementwise kernel, which is ALU-bound on
++/// fp32 input: MUFU tanh (rel err ~2^-11) and approximate reciprocal.
++template <bool kHasLinearBeta>
++SGL_DEVICE float situ_activate_approx(
++    float g, float u, float beta, float inv_beta, float linear_beta, float inv_linear_beta) {
++  const auto tanh_approx = [](float x) {
++#ifdef USE_ROCM
++    return tanhf(x);
++#else
++    float y;
++    asm("tanh.approx.f32 %0, %1;" : "=f"(y) : "f"(x));
++    return y;
++#endif
++  };
++  const float gate_out = beta * tanh_approx(g * inv_beta) * __fdividef(1.0f, 1.0f + __expf(-g));
++  float up_out;
++  if constexpr (kHasLinearBeta) {
++    up_out = linear_beta * tanh_approx(u * inv_linear_beta);
++  } else {
++    up_out = u;
++  }
++  return gate_out * up_out;
++}
++
+ }  // namespace kimi_k3
+ 
+ // SiTU (SoftCap-GLU) activation:
+@@ -102,7 +126,8 @@
+     const float g = cast<fp32_t>(gate[i]);
+     const float u = cast<fp32_t>(up[i]);
+ 
+-    out[i] = cast<TOut>(kimi_k3::situ_activate<kHasLinearBeta>(g, u, beta, inv_beta, linear_beta, inv_linear_beta));
++    out[i] = cast<TOut>(
++        kimi_k3::situ_activate_approx<kHasLinearBeta>(g, u, beta, inv_beta, linear_beta, inv_linear_beta));
+   }
+ 
+   store_as<out_vec_t>(params.out, out, output_offset);
+diff -ruN -x __pycache__ -x '*.pyc' a/srt/models/kimi_k3.py b/srt/models/kimi_k3.py
+--- a/srt/models/kimi_k3.py	2026-09-23 07:07:11.894971186 -0700
++++ b/srt/models/kimi_k3.py	2026-09-27 04:37:35.009261013 -0700
+@@ -411,6 +411,10 @@
+     return add3.add3(a, b, c, prefetch_bc=prefetch_bc)
+ 
+ 
++# Prefill-only; decode keeps the add3 tail. Also keeps both folded GEMMs
++# above use_cutedsl_bf16_gemm's TGV range, so cuBLAS (beta=1) always runs them.
++_K3_FOLD_PREFIX_MIN_TOKENS = 1024
++
+ # One-shot log guard: proves the merged front is live (see _ep_front).
+ _EP_FRONT_LOGGED = False
+ 
+@@ -746,6 +750,7 @@
+         for prop in (
+             "_eligible_for_fused_front",
+             "_front_fp32",
++            "_fold_prefix_eligible",
+             "_routing_contract_ok",
+             "_ep_front_eligible",
+         ):
+@@ -785,6 +790,21 @@
+             and self._front_w.dtype == torch.bfloat16
+         )
+ 
++    @cached_property
++    def _fold_prefix_eligible(self) -> bool:
++        """Whether the fused-front tail may fold +prefix_sum and the shared
++        output into the shared-down / latent-up GEMMs (cuBLAS beta=1 into
++        prefix_sum) instead of the add3 pass: single rank, bf16 weights."""
++        up = self.routed_expert_up_proj
++        return (
++            self.tp_size == 1
++            and self.alt_stream is not None
++            and up is not None
++            and self.shared_experts is not None
++            and up.weight.dtype == torch.bfloat16
++            and self.shared_experts.down_proj.weight.dtype == torch.bfloat16
++        )
++
+     def _forward_mega_experts(
+         self, routed_input: torch.Tensor, topk_output
+     ) -> torch.Tensor:
+@@ -1203,13 +1223,21 @@
+         finally:
+             route_quant_handoff.clear()
+ 
+-    def _forward_shared(self, gate_up, shared_output):
++    def _forward_shared(self, gate_up, shared_output, accumulate_into=None):
+         shared = self.shared_experts
+         if TYPE_CHECKING:
+             assert shared is not None and isinstance(
+                 shared.down_proj.weight, torch.Tensor
+             )
+         assert shared is not None
++        if accumulate_into is not None:
++            torch.addmm(
++                accumulate_into,
++                shared.act_fn(gate_up),
++                shared.down_proj.weight.t(),
++                out=accumulate_into,
++            )
++            return
+         _k3_bf16_gemm(
+             shared.act_fn(gate_up),
+             shared.down_proj.weight,
+@@ -1257,6 +1285,7 @@
+             # contiguous() behind it is free; off a bf16 front it is the copy
+             routed_input = routed_input.to(hidden_states.dtype).contiguous()
+         latent_numel = num_tokens * self.moe_hidden_size
++        fold_prefix = False
+         if k3_ar_fusion.enabled():
+             # the shared-expert AR is pull-only, so its input must be a
+             # symm_buffer slice for every rank to resolve the same offset
+@@ -1342,11 +1371,25 @@
+                 and not k3_ar_fusion.enabled()
+             )
+             shared_event = None
++            # prefix_sum is a fresh per-layer tensor (attn-res output), so the
++            # shared GEMM accumulates into it and latent-up finishes the sum.
++            fold_prefix = (
++                overlap_shared
++                and prefix_sum is not None
++                and num_tokens >= _K3_FOLD_PREFIX_MIN_TOKENS
++                and prefix_sum.is_contiguous()
++                and prefix_sum.dtype == torch.bfloat16
++                and self._fold_prefix_eligible
++            )
+             if overlap_shared:
+                 current_stream = torch.cuda.current_stream()
+                 self.alt_stream.wait_stream(current_stream)
+                 with torch.cuda.stream(self.alt_stream):
+-                    self._forward_shared(gate_up, shared_output)
++                    self._forward_shared(
++                        gate_up,
++                        shared_output,
++                        accumulate_into=prefix_sum if fold_prefix else None,
++                    )
+                     shared_event = self.alt_stream.record_event()
+             else:
+                 self._forward_shared(gate_up, shared_output)
+@@ -1369,6 +1412,13 @@
+         shared_output = buf[latent_numel:].view(num_tokens, hidden_size)
+         if not fused_norm:
+             latent = self._latent_norm(latent)
++        if fold_prefix:
++            return torch.addmm(
++                prefix_sum,
++                latent,
++                self.routed_expert_up_proj.weight.t(),
++                out=prefix_sum,
++            )
+         out, _ = self.routed_expert_up_proj(latent)
+ 
+         # prefetch_bc: b (shared_output) was produced by the all-reduce and

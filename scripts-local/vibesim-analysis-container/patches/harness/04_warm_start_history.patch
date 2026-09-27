@@ -1,9 +1,9 @@
 diff --git a/scripts-local/vibesim-analysis-container/build_opt_history.py b/scripts-local/vibesim-analysis-container/build_opt_history.py
 new file mode 100755
-index 0000000..5dd51f4
+index 0000000..65f1b9a
 --- /dev/null
 +++ b/scripts-local/vibesim-analysis-container/build_opt_history.py
-@@ -0,0 +1,252 @@
+@@ -0,0 +1,260 @@
 +#!/usr/bin/env python3
 +"""Build the Kimi-K3 optimization-history knowledge base (warm start for new workload cases).
 +
@@ -86,6 +86,13 @@ index 0000000..5dd51f4
 +    ("mla_prefill_claude", 1): "ACCEPTED (Claude): Triton mla_kv_pack_quantize_fp8 (one-pass K/V pack + fp8 quant for chunk+prefix, Q cast once; replaces ~800us elementwise) + residual add fused into attn-res TMA (418->361us @16k): 12128->11573 @pf49152 (-4.6%), -4.0% first chunk, -2.6% 4x4k; bit-exact",
 +    ("mla_b512_claude", 3): "ACCEPTED (Claude): output-gate GEMM launched into the MLA decode kernel's tail wave + pending residual add fused into the attn-res TMA kernel (addend in the TMA ring): 887.3->877.8 @512, mixed -3.0%, exact",
 +    ("mla_b512_claude", 1): "ACCEPTED (Claude Opus 5.5): tuned MoE tactic (HARNESS GAP ~6.4 pts) + fp8 set_mla_kv_concat_q satfinite cvt + exact NOSAT fixup (17.8->8.0us, real): 976.3->904.6 @512, exact; merged-front split rejected (slower)",
++    # shape-matched campaign (2026-09-26/27, slurm mode, seed = b512 Claude best tree; same 5 shapes for both layers)
++    ("kda_shapes_claude", 1): "ACCEPTED (Claude, slurm mode): split the merged MoE front at m<=32 (routed rows first, gate_up+shared on the alt stream, latent tail before the join) + fp32 TGV halves: 124.3->109.9 @1x1M (-11.5%), -13.0% @1x8k, -5.4% @32x8k, 128x8k flat; bit-exact at B=1/16",
++    ("kda_shapes_claude", 2): "ACCEPTED (Claude): L2 prefetch JIT kernel (l2_prefetch.cuh) pulling o_proj + routed-front weights into L2 on the alt stream during the KDA recurrence (32 CTAs): 109.9->103.8 @1x1M (-5.6%), -3.5% @16x64k; 1x8k +0.9% (noise floor)",
++    ("kda_shapes_claude", 3): "ACCEPTED (Claude): fused-decode / attn-res kernel tuning on top of r2: 103.8->101.8 @1x1M (-2.0%), -7.2% @1x8k, -2.4% @16x64k; cumulative vs pristine 136.6->101.8 (-25.5%)",
++    ("mla_shapes_claude", 1): "ACCEPTED (Claude, slurm mode): B=1 KV split k=8 + LSE merge for L>=64k (256MB MLA workspace) and set_mla_kv_concat_q_fp8 writing the split q replicas: 241.1->216.6 @1x1M (-10.2%), other 4 shapes flat, rel 0.006",
++    ("mla_shapes_claude", 2): "ACCEPTED (Claude): attn-res cluster_small kernel + fused MoE finalize+RMSNorm: 218.4->216.4 @1x1M (-0.9%, above the 3-sigma floor), -1.6% @1x8k; near the 1x1M plateau",
++    ("mla_shapes_claude", 3): "null (Claude): custom small-m MXFP4 MoE kernel (mxfp4_small_m_moe.cuh) -- correct but +0.4% @1x1M; MLA 1x1M plateau at ~216us",
 +}
 +CAMPAIGN1 = {("kda", k) for k in (4, 5, 6, 7)} | {("mla", k) for k in (4, 5, 6, 7)}
 +
@@ -229,7 +236,8 @@ index 0000000..5dd51f4
 +def main():
 +    ap = argparse.ArgumentParser()
 +    ap.add_argument("--out", default=str(HERE / "k3_opt_history"))
-+    ap.add_argument("--cases", default="kda,mla,kda_b512,mla_b512,kda_b512_claude,mla_b512_claude,kda_prefill,mla_prefill,kda_prefill_claude,mla_prefill_claude")
++    ap.add_argument("--cases", default="kda,mla,kda_b512,mla_b512,kda_b512_claude,mla_b512_claude,kda_prefill,mla_prefill,kda_prefill_claude,mla_prefill_claude,"
++                                       "kda_shapes_claude,mla_shapes_claude,kda_lcprefill_claude,mla_lcprefill_claude")
 +    a = ap.parse_args()
 +    final = pathlib.Path(a.out)
 +    # build into a sibling temp dir and rsync into place: the final dir is bind-mounted read-only into

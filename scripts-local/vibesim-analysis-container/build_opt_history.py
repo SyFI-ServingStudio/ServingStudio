@@ -87,6 +87,13 @@ NOTES = {
     ("mla_shapes_claude", 1): "ACCEPTED (Claude, slurm mode): B=1 KV split k=8 + LSE merge for L>=64k (256MB MLA workspace) and set_mla_kv_concat_q_fp8 writing the split q replicas: 241.1->216.6 @1x1M (-10.2%), other 4 shapes flat, rel 0.006",
     ("mla_shapes_claude", 2): "ACCEPTED (Claude): attn-res cluster_small kernel + fused MoE finalize+RMSNorm: 218.4->216.4 @1x1M (-0.9%, above the 3-sigma floor), -1.6% @1x8k; near the 1x1M plateau",
     ("mla_shapes_claude", 3): "null (Claude): custom small-m MXFP4 MoE kernel (mxfp4_small_m_moe.cuh) -- correct but +0.4% @1x1M; MLA 1x1M plateau at ~216us",
+    # long-context chunked prefill (2026-09-27, slurm mode; 16k/32k chunks at 128k/262k contexts; seed = prefill Claude best tree)
+    ("kda_lcprefill_claude", 1): "ACCEPTED (Claude): CUDA mma.sync h-scan kernel (kda_chunk_h.cuh, ported from the earlier unaccepted prefill r2 via the KB) + conv1d BLOCK_M=16/nw=2: 8612.9->8471.6 us @16k/pf245760 (-1.6%), -3.1% @16k/pf131072, bit-exact",
+    ("kda_lcprefill_claude", 2): "ACCEPTED (Claude): fused SiLU-and-mul JIT kernel for the MoE activation (situ_and_mul.cuh): 8307.9->8193.2 @16k/pf245760 (-1.4%), -4.0% @16k/pf131072, rel 0.007; side-stream in-proj overlap rejected by its own A/B (<=0.3%: persistent GEMMs serialize)",
+    ("kda_lcprefill_claude", 3): "FAIL below 3-sigma (Claude): +0.7% @16k/pf245760 (secondaries -1.6..-3.6%), correct; no iteration log",
+    ("mla_lcprefill_claude", 1): "ACCEPTED (Claude): 16B-align the prefix-chunk cum_seqlen_k row so the accepted CuTe-DSL prefix FMHA actually engages at long prefixes (it silently fell back to trtllm-gen; prefix FMHA = 66% of the step) + empirical KV-split policy (S=4 <=6 waves else S=2): 25196.8->21998.0 @16k/pf245760 (-12.7%), -7.5/-7.4/-4.4% on the others, bit-exact",
+    ("mla_lcprefill_claude", 2): "ACCEPTED (Claude): prefix-FMHA softmax: 40 of 128 exp2 per tile emulated on the FMA pipe with a degree-2 polynomial (MUFU relief): 22001.9->20967.8 @16k/pf245760 (-4.7%), -5.7/-2.1/-3.1%, bit-exact",
+    ("mla_lcprefill_claude", 3): "FAIL correctness (Claude): +1.4% @16k/pf245760 but rel 0.30 / row-wise rule failed at 32k/pf229376 (rel 0.25 on the primary, passed by rows) -- a numerics-changing prefix-attention change; rejected",
 }
 CAMPAIGN1 = {("kda", k) for k in (4, 5, 6, 7)} | {("mla", k) for k in (4, 5, 6, 7)}
 

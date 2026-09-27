@@ -1,0 +1,204 @@
+diff -ruN -x __pycache__ -x '*.pyc' a/kernels/ops/attention/cute_dsl_fmha_fp8.py b/kernels/ops/attention/cute_dsl_fmha_fp8.py
+--- a/kernels/ops/attention/cute_dsl_fmha_fp8.py	2026-09-25 06:01:23.550067962 -0700
++++ b/kernels/ops/attention/cute_dsl_fmha_fp8.py	2026-09-27 03:41:28.632061796 -0700
+@@ -13,6 +13,95 @@
+ import math
+ 
+ import torch
++import triton
++import triton.language as tl
++
++# The kernel runs one 256-row Q tile (two 128-row softmax warpgroups) per CTA,
++# one CTA per SM, and every CTA of a non-causal launch walks the full KV.
++_CTA_Q_ROWS = 256
++_MIN_SPLIT_KV = 16384
++
++
++@functools.lru_cache(maxsize=None)
++def _num_sms(device_index: int) -> int:
++    return torch.cuda.get_device_properties(device_index).multi_processor_count
++
++
++def _num_kv_splits(num_ctas: int, kv_len: int, num_sms: int) -> int:
++    """Split the KV into S batch entries so the grid grows S-fold and the
++    partial last wave is amortized. Measured on B200 (12 heads, kv >= 96k):
++    <= 6 waves (16k q) gains ~8% at S=4 and ~5% at S=2; ~10 waves (32k q)
++    gains ~2% at S=2 only, larger S costs more in extra Q loads than the
++    tail saves. Short KV keeps a single launch."""
++    splits = 4 if num_ctas <= 6 * num_sms else 2
++    while splits > 1 and kv_len < splits * _MIN_SPLIT_KV:
++        splits //= 2
++    return splits
++
++
++@functools.lru_cache(maxsize=64)
++def _split_indptrs(num_q: int, kv_len: int, splits: int, device: torch.device):
++    step = -(-kv_len // (splits * 128)) * 128
++    cu_kv = [min(i * step, kv_len) for i in range(splits)] + [kv_len]
++    cu_q = [i * num_q for i in range(splits + 1)]
++    return (
++        torch.tensor(cu_q, dtype=torch.int32, device=device),
++        torch.tensor(cu_kv, dtype=torch.int32, device=device),
++        step,
++    )
++
++
++@triton.jit
++def _merge_kv_splits_kernel(
++    o_ptr,  # [S * T, H, D] bf16
++    lse_ptr,  # [S * T, H] fp32, log2 domain (as the kernel writes it)
++    out_ptr,  # [T, H, D]
++    out_lse_ptr,  # [T, H]
++    T,
++    out_stride_t,
++    out_stride_h,
++    H: tl.constexpr,
++    D: tl.constexpr,
++    S: tl.constexpr,
++    BLOCK_H: tl.constexpr,
++):
++    t = tl.program_id(0).to(tl.int64)
++    offs_h = tl.arange(0, BLOCK_H)
++    offs_d = tl.arange(0, D)
++    mask_h = offs_h < H
++    m = tl.full([BLOCK_H], float("-inf"), tl.float32)
++    for s in tl.static_range(S):
++        lse = tl.load(
++            lse_ptr + (s * T + t) * H + offs_h, mask=mask_h, other=float("-inf")
++        )
++        m = tl.maximum(m, lse)
++    m_safe = tl.where(m == float("-inf"), 0.0, m)
++    acc = tl.zeros([BLOCK_H, D], dtype=tl.float32)
++    den = tl.zeros([BLOCK_H], dtype=tl.float32)
++    for s in tl.static_range(S):
++        lse = tl.load(
++            lse_ptr + (s * T + t) * H + offs_h, mask=mask_h, other=float("-inf")
++        )
++        w = tl.exp2(lse - m_safe)
++        o = tl.load(
++            o_ptr + ((s * T + t) * H + offs_h[:, None]) * D + offs_d[None, :],
++            mask=mask_h[:, None],
++            other=0.0,
++        )
++        acc += w[:, None] * o.to(tl.float32)
++        den += w
++    has = den > 0
++    out = acc / tl.where(has, den, 1.0)[:, None]
++    tl.store(
++        out_ptr + t * out_stride_t + offs_h[:, None] * out_stride_h + offs_d[None, :],
++        out.to(out_ptr.dtype.element_ty),
++        mask=mask_h[:, None],
++    )
++    tl.store(
++        out_lse_ptr + t * H + offs_h,
++        tl.where(has, m_safe + tl.log2(tl.where(has, den, 1.0)), float("-inf")),
++        mask=mask_h,
++    )
+ 
+ 
+ @functools.lru_cache(maxsize=None)
+@@ -83,6 +172,12 @@
+     )
+ 
+ 
++def _align16(t: torch.Tensor) -> torch.Tensor:
++    # The kernel is compiled for 16B-aligned cum_seqlen tensors; a row of the
++    # [num_prefix_chunks, bs + 1] chunk table (e.g. chunk 1 at bs = 1) is not.
++    return t if t.data_ptr() % 16 == 0 else t.clone()
++
++
+ def cute_dsl_fmha_fp8_ragged_prefill(
+     *,
+     q: torch.Tensor,
+@@ -97,19 +192,77 @@
+     sm_scale: float,
+     v_scale: float,
+     is_causal: bool,
++    batch_size: int = 0,
+ ) -> None:
+     """q/k: [tokens, heads, d] fp8, v: [tokens, heads, dv] fp8, out bf16 and
+-    lse fp32 [tokens_q, heads] written in place."""
++    lse fp32 [tokens_q, heads] written in place. ``batch_size`` (host int)
++    enables the KV-split launch for a single non-causal request."""
+     from flashinfer.attention.cute_dsl.fmha import cute_dsl_fmha_ragged_prefill
+ 
+     kernel_fn = _compile(q.shape[1], q.shape[2], v.shape[2], is_causal)
++    num_q, num_heads = q.shape[0], q.shape[1]
++    splits = 1
++    if (
++        batch_size == 1
++        and not is_causal
++        and num_q == max_q_len
++        and k.shape[0] >= max_kv_len
++        and out.shape[0] == num_q
++        and out.stride(-1) == 1
++        and lse.is_contiguous()
++    ):
++        num_ctas = -(-num_q // _CTA_Q_ROWS) * num_heads
++        splits = _num_kv_splits(num_ctas, max_kv_len, _num_sms(q.device.index))
++    if splits > 1:
++        # Each split is its own batch entry over a replicated Q, so the grid
++        # grows S-fold while K/V stay in place; the partial states are then
++        # merged like chunked-prefix partials (fp32, log2-domain LSE).
++        cu_q, cu_kv, step = _split_indptrs(num_q, max_kv_len, splits, q.device)
++        q_rep = q.new_empty((splits, *q.shape))
++        for i in range(splits):
++            # Contiguous same-dtype copies are plain D2D memcpys; an expanded
++            # fp8 source would take aten's slow non-vectorized copy kernel.
++            q_rep[i].copy_(q)
++        q_rep = q_rep.view(-1, *q.shape[1:])
++        o_rep = out.new_empty((splits * num_q, num_heads, out.shape[-1]))
++        lse_rep = lse.new_empty((splits * num_q, num_heads))
++        cute_dsl_fmha_ragged_prefill(
++            q=q_rep,
++            k=k,
++            v=v,
++            o=o_rep,
++            qo_indptr=cu_q,
++            kv_indptr=cu_kv,
++            is_causal=False,
++            sm_scale=sm_scale,
++            lse=lse_rep,
++            scale_v=v_scale,
++            max_qo_len=num_q,
++            max_kv_len=step,
++            kernel_fn=kernel_fn,
++        )
++        _merge_kv_splits_kernel[(num_q,)](
++            o_rep,
++            lse_rep,
++            out,
++            lse,
++            num_q,
++            out.stride(0),
++            out.stride(1),
++            H=num_heads,
++            D=out.shape[-1],
++            S=splits,
++            BLOCK_H=triton.next_power_of_2(num_heads),
++            num_warps=4,
++        )
++        return
+     cute_dsl_fmha_ragged_prefill(
+         q=q,
+         k=k,
+         v=v,
+         o=out,
+-        qo_indptr=cum_seq_lens_q,
+-        kv_indptr=cum_seq_lens_kv,
++        qo_indptr=_align16(cum_seq_lens_q),
++        kv_indptr=_align16(cum_seq_lens_kv),
+         is_causal=is_causal,
+         sm_scale=sm_scale,
+         lse=lse,
+diff -ruN -x __pycache__ -x '*.pyc' a/srt/layers/attention/trtllm_mla_backend.py b/srt/layers/attention/trtllm_mla_backend.py
+--- a/srt/layers/attention/trtllm_mla_backend.py	2026-09-25 06:08:04.866040940 -0700
++++ b/srt/layers/attention/trtllm_mla_backend.py	2026-09-27 03:30:57.003959116 -0700
+@@ -1165,6 +1165,7 @@
+                         sm_scale=q_scale * k_scale * layer.scaling,
+                         v_scale=v_scale,
+                         is_causal=False,
++                        batch_size=batch_size,
+                     )
+                     return (out_buffer, lse) if return_lse else out_buffer
+                 except Exception as e:

@@ -1,0 +1,260 @@
+diff -ruN -x __pycache__ -x '*.pyc' a/kernels/ops/attention/cute_dsl_fmha_fp8.py b/kernels/ops/attention/cute_dsl_fmha_fp8.py
+--- a/kernels/ops/attention/cute_dsl_fmha_fp8.py	2026-09-27 03:41:28.632061796 -0700
++++ b/kernels/ops/attention/cute_dsl_fmha_fp8.py	2026-09-27 05:30:25.778007709 -0700
+@@ -110,18 +110,252 @@
+     return torch.cuda.get_device_capability() == (10, 0)
+ 
+ 
++# Softmax exp split of the fp8 kernel, swept on B200 at 16k q x 128k kv, 12 heads
++# (flashinfer's default is 20 emulated, degree 3): 7.79 -> 7.55 ms; 32 and 48 are slower.
++# A rescale threshold > 0 is another -1.4% but raises the worst-row error on peaked
++# scores from 0.031 to 0.041, so the correction stays exact.
++_EX2_EMULATION_COUNT = 40
++# 2^f ~= 1 + f * (c1 + c2 * f) on [0, 1), minimax with p(1) = 2: max rel err
++# 2.7e-3, well below the e4m3 half-ulp (6.25%) that P is rounded to next.
++_EX2_DEG2_C1 = 0.6602345839457641
++_EX2_DEG2_C2 = 0.33976541605423594
++
++
+ @functools.lru_cache(maxsize=None)
+-def _compile(num_heads: int, head_dim: int, head_dim_v: int, is_causal: bool):
++def _fmha_class():
++    """flashinfer's Blackwell FMHA with the softmax exp split re-balanced from
++    MUFU towards the FMA pipe (the fp8 prefill is MUFU/issue bound)."""
+     import cutlass
+     import cutlass.cute as cute
+-    from cutlass.cute.runtime import make_fake_compact_tensor, make_fake_stream
+-    from cutlass.cute.typing import Int32
++    from cutlass._mlir.dialects import llvm
++    from cutlass.cute.typing import Float32
++    from cutlass.cutlass_dsl import T, dsl_user_op
+     from flashinfer.cute_dsl.attention.fmha.fmha import (
+         BlackwellFusedMultiHeadAttentionForward,
+     )
+     from flashinfer.cute_dsl.attention.fmha.helpers import fmha_helpers
+ 
+-    fmha = BlackwellFusedMultiHeadAttentionForward(
++    @dsl_user_op
++    def ex2_deg2_packed_f32x2(x, y, *, loc=None, ip=None):
++        # Same range reduction as fmha_helpers.ex2_emulation_packed_f32x2,
++        # with a degree-2 instead of degree-3 polynomial on the fraction.
++        xy = (cute.arch.fmax(x, -127.0), cute.arch.fmax(y, -127.0))
++        round_int = float(2**23 + 2**22)
++        xy_rounded = cute.arch.add_packed_f32x2(
++            xy, (round_int, round_int), rnd="rm"
++        )
++        xy_floor = cute.arch.sub_packed_f32x2(xy_rounded, (round_int, round_int))
++        frac = cute.arch.sub_packed_f32x2(xy, xy_floor)
++        poly = cute.arch.fma_packed_f32x2(
++            (_EX2_DEG2_C2, _EX2_DEG2_C2),
++            frac,
++            (_EX2_DEG2_C1, _EX2_DEG2_C1),
++            loc=loc,
++            ip=ip,
++        )
++        poly = cute.arch.fma_packed_f32x2(poly, frac, (1.0, 1.0), loc=loc, ip=ip)
++
++        def add_exponent(rounded, mantissa):
++            return Float32(
++                llvm.inline_asm(
++                    T.f32(),
++                    [
++                        Float32(rounded).ir_value(loc=loc, ip=ip),
++                        Float32(mantissa).ir_value(loc=loc, ip=ip),
++                    ],
++                    "{\n\t.reg .s32 r, m, e, o;\n\tmov.b32 r, $1;\n\t"
++                    "mov.b32 m, $2;\n\tshl.b32 e, r, 23;\n\tadd.s32 o, e, m;\n\t"
++                    "mov.b32 $0, o;\n\t}\n",
++                    "=f,f,f",
++                    has_side_effects=False,
++                    is_align_stack=False,
++                    asm_dialect=llvm.AsmDialect.AD_ATT,
++                )
++            )
++
++        return (
++            add_exponent(xy_rounded[0], poly[0]),
++            add_exponent(xy_rounded[1], poly[1]),
++        )
++
++    class Fp8PrefillFmha(BlackwellFusedMultiHeadAttentionForward):
++        @cute.jit
++        def apply_exp_and_cvt(
++            self,
++            tTMEM_LOADrS,
++            tTMEM_LOADrS_cvt,
++            tTMEM_STORErS_x4_e_cvt,
++            stage,
++            scale,
++            minus_row_max_scale,
++            local_row_sum,
++            inplace_consumer,
++            EXP2_EMULATION_OFFSET,
++            EXP2_EMULATION_COUNT,
++            CVT_COUNT,
++            CVT_PER_STEP,
++            FMA_COUNT,
++            ARV_COUNT,
++        ):
++            # The caller (softmax_step) row-sums [OFFSET, OFFSET + COUNT) after
++            # this returns; the extra emulated elements are summed here.
++            if cutlass.const_expr(EXP2_EMULATION_COUNT == 0):
++                local_row_sum, inplace_consumer = (
++                    BlackwellFusedMultiHeadAttentionForward.apply_exp_and_cvt(
++                        self,
++                        tTMEM_LOADrS,
++                        tTMEM_LOADrS_cvt,
++                        tTMEM_STORErS_x4_e_cvt,
++                        stage,
++                        scale,
++                        minus_row_max_scale,
++                        local_row_sum,
++                        inplace_consumer,
++                        EXP2_EMULATION_OFFSET,
++                        EXP2_EMULATION_COUNT,
++                        CVT_COUNT,
++                        CVT_PER_STEP,
++                        FMA_COUNT,
++                        ARV_COUNT,
++                    )
++                )
++            else:
++                local_row_sum, inplace_consumer = self._exp_and_cvt_rebalanced(
++                    tTMEM_LOADrS,
++                    tTMEM_LOADrS_cvt,
++                    tTMEM_STORErS_x4_e_cvt,
++                    scale,
++                    minus_row_max_scale,
++                    local_row_sum,
++                    inplace_consumer,
++                    EXP2_EMULATION_OFFSET + EXP2_EMULATION_COUNT - _EX2_EMULATION_COUNT,
++                    EXP2_EMULATION_OFFSET,
++                    CVT_COUNT,
++                    CVT_PER_STEP,
++                    FMA_COUNT,
++                )
++            return local_row_sum, inplace_consumer
++
++        @cute.jit
++        def _exp_and_cvt_rebalanced(
++            self,
++            tTMEM_LOADrS,
++            tTMEM_LOADrS_cvt,
++            tTMEM_STORErS_x4_e_cvt,
++            scale,
++            minus_row_max_scale,
++            local_row_sum,
++            inplace_consumer,
++            emu_offset,
++            caller_offset,
++            CVT_COUNT,
++            CVT_PER_STEP,
++            FMA_COUNT,
++        ):
++            # Mirrors the parent's schedule: MUFU exp2 on [0, emu_offset) with
++            # the scale FMA and fp8 cvt interleaved, then the emulated tail.
++            for i in cutlass.range_constexpr(0, emu_offset, 2):
++                if cutlass.const_expr(i >= CVT_COUNT):
++                    if cutlass.const_expr(i % CVT_PER_STEP == 0):
++                        fmha_helpers.cvt_f32x4_to_f8x4(
++                            tTMEM_LOADrS_cvt[None, (i - CVT_COUNT) // CVT_PER_STEP],
++                            tTMEM_STORErS_x4_e_cvt[
++                                None, (i - CVT_COUNT) // CVT_PER_STEP
++                            ],
++                        )
++                    local_row_sum = cute.arch.add_packed_f32x2(
++                        local_row_sum,
++                        (tTMEM_LOADrS[i - CVT_COUNT], tTMEM_LOADrS[i - CVT_COUNT + 1]),
++                    )
++                tTMEM_LOADrS[i] = cute.math.exp2(tTMEM_LOADrS[i], fastmath=True)
++                if cutlass.const_expr(i + FMA_COUNT < emu_offset):
++                    (
++                        tTMEM_LOADrS[i + FMA_COUNT],
++                        tTMEM_LOADrS[i + FMA_COUNT + 1],
++                    ) = cute.arch.fma_packed_f32x2(
++                        (tTMEM_LOADrS[i + FMA_COUNT], tTMEM_LOADrS[i + FMA_COUNT + 1]),
++                        (scale, scale),
++                        (minus_row_max_scale, minus_row_max_scale),
++                    )
++                tTMEM_LOADrS[i + 1] = cute.math.exp2(
++                    tTMEM_LOADrS[i + 1], fastmath=True
++                )
++            for i in cutlass.range_constexpr(emu_offset - CVT_COUNT, emu_offset, 2):
++                if cutlass.const_expr(i % CVT_PER_STEP == 0):
++                    fmha_helpers.cvt_f32x4_to_f8x4(
++                        tTMEM_LOADrS_cvt[None, i // CVT_PER_STEP],
++                        tTMEM_STORErS_x4_e_cvt[None, i // CVT_PER_STEP],
++                    )
++                local_row_sum = cute.arch.add_packed_f32x2(
++                    local_row_sum, (tTMEM_LOADrS[i], tTMEM_LOADrS[i + 1])
++                )
++            emu_mid = emu_offset + _EX2_EMULATION_COUNT // 2
++            emu_end = emu_offset + _EX2_EMULATION_COUNT
++            for i in cutlass.range_constexpr(emu_offset, emu_mid, 2):
++                self._exp2_emulated_step(
++                    tTMEM_LOADrS,
++                    tTMEM_LOADrS_cvt,
++                    tTMEM_STORErS_x4_e_cvt,
++                    scale,
++                    minus_row_max_scale,
++                    i,
++                    CVT_PER_STEP,
++                )
++            inplace_peek_status = inplace_consumer.try_wait()
++            for i in cutlass.range_constexpr(emu_mid, emu_end, 2):
++                self._exp2_emulated_step(
++                    tTMEM_LOADrS,
++                    tTMEM_LOADrS_cvt,
++                    tTMEM_STORErS_x4_e_cvt,
++                    scale,
++                    minus_row_max_scale,
++                    i,
++                    CVT_PER_STEP,
++                )
++            inplace_consumer.wait_and_advance(inplace_peek_status)
++            for j in cutlass.range_constexpr(emu_offset, caller_offset, 2):
++                local_row_sum = cute.arch.add_packed_f32x2(
++                    (tTMEM_LOADrS[j], tTMEM_LOADrS[j + 1]), local_row_sum
++                )
++            return local_row_sum, inplace_consumer
++
++        @cute.jit
++        def _exp2_emulated_step(
++            self,
++            tTMEM_LOADrS,
++            tTMEM_LOADrS_cvt,
++            tTMEM_STORErS_x4_e_cvt,
++            scale,
++            minus_row_max_scale,
++            i,
++            CVT_PER_STEP,
++        ):
++            tTMEM_LOADrS[i], tTMEM_LOADrS[i + 1] = cute.arch.fma_packed_f32x2(
++                (tTMEM_LOADrS[i], tTMEM_LOADrS[i + 1]),
++                (scale, scale),
++                (minus_row_max_scale, minus_row_max_scale),
++            )
++            tTMEM_LOADrS[i], tTMEM_LOADrS[i + 1] = ex2_deg2_packed_f32x2(
++                tTMEM_LOADrS[i], tTMEM_LOADrS[i + 1]
++            )
++            if cutlass.const_expr((i + 2) % CVT_PER_STEP == 0):
++                fmha_helpers.cvt_f32x4_to_f8x4(
++                    tTMEM_LOADrS_cvt[None, i // CVT_PER_STEP],
++                    tTMEM_STORErS_x4_e_cvt[None, i // CVT_PER_STEP],
++                )
++
++    return Fp8PrefillFmha
++
++
++@functools.lru_cache(maxsize=None)
++def _compile(num_heads: int, head_dim: int, head_dim_v: int, is_causal: bool):
++    import cutlass
++    import cutlass.cute as cute
++    from cutlass.cute.runtime import make_fake_compact_tensor, make_fake_stream
++    from cutlass.cute.typing import Int32
++    from flashinfer.cute_dsl.attention.fmha.helpers import fmha_helpers
++
++    fmha = _fmha_class()(
+         qk_acc_dtype=cutlass.Float32,
+         pv_acc_dtype=cutlass.Float32,
+         mma_tiler=(128, 128),
