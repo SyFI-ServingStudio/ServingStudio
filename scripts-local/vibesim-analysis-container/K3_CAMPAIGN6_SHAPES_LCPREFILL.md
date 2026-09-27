@@ -192,6 +192,20 @@ through small Python scripts). What the analysis contributed:
   reformatted) — not my edit; left untouched. This file is separate so nothing of yours is overwritten. Say which version should
   carry Campaign 6 and I will merge it.
 
-## 8. Seed rechecks of the long-context prefill trees
+## 8. Seed rechecks of the long-context prefill trees (slurm job 1880, fresh pristine goldens per seed)
 
-(pending — slurm job 1880; appended when done)
+All 16 points PASS (4 points × 2 seeds × 2 layers); MLA bit-exact on every point, KDA max rel 0.0074.
+
+| layer | point | seed 1: pristine → best (Δ) | seed 2: pristine → best (Δ) |
+|---|---|---|---|
+| KDA | 16k @ 245,760 | 8.91 → 8.16 ms (−8.4%) | 8.90 → 8.21 ms (−7.7%) |
+| KDA | 32k @ 229,376 | 17.68 → 16.36 (−7.4%) | 17.65 → 16.31 (−7.6%) |
+| KDA | 16k @ 131,072 | 9.12 → 8.23 (−9.8%) | 9.03 → 8.18 (−9.4%) |
+| KDA | 32k @ 131,072 | 17.63 → 16.34 (−7.3%) | 17.72 → 16.28 (−8.1%) |
+| MLA | 16k @ 245,760 | 27.51 → 20.76 (−24.5%) | 27.49 → 20.67 (−24.8%) |
+| MLA | 32k @ 229,376 | 47.95 → 39.97 (−16.6%) | 47.87 → 39.95 (−16.6%) |
+| MLA | 16k @ 131,072 | 18.18 → 15.11 (−16.9%) | 18.16 → 15.07 (−17.1%) |
+| MLA | 32k @ 131,072 | 34.68 → 30.38 (−12.4%) | 34.62 → 30.50 (−11.9%) |
+
+Verdict files: `iter_opt_eval_k3_{kda,mla}_lcprefill_claude/best_tree_seed{1,2}_verdict.json`; shape-matched trees:
+`iter_opt_eval_k3_{kda,mla}_shapes_claude/best_tree_seed{1,2}_verdict.json` (§3).
