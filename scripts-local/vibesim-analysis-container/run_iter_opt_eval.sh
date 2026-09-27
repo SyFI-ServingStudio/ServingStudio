@@ -219,6 +219,9 @@ run_trial () {
   local acode=$?
   set -e
   echo "== [$k] agent exit=$acode (transcript: ${log}_agent.log)"
+  # slurm mode: a request the agent filed just before its timeout would otherwise become a stray
+  # GPU job after the smoke; drop anything still queued (the broker only serves *.json).
+  [ "$K3_GPU_MODE" = slurm ] && rm -f "${log}_gpu"/req/*.json 2>/dev/null
 
   docker cp "$cname:/workspace/opt_run" "${log}_opt_run" >/dev/null 2>&1 \
     && echo "== [$k] saved iteration workspace -> ${log}_opt_run" \
