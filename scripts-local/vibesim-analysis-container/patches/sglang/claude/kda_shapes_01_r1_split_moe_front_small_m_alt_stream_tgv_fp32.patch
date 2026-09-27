@@ -1,0 +1,384 @@
+diff -ruN -x __pycache__ -x '*.pyc' a/kernels/jit/csrc/kimi_k3/attn_res/fused_tma.cuh b/kernels/jit/csrc/kimi_k3/attn_res/fused_tma.cuh
+--- a/kernels/jit/csrc/kimi_k3/attn_res/fused_tma.cuh	2026-09-18 02:16:55.000000000 -0700
++++ b/kernels/jit/csrc/kimi_k3/attn_res/fused_tma.cuh	2026-09-26 23:12:06.739706143 -0700
+@@ -181,6 +181,9 @@
+   const uint8_t* input_mc;
+   const bf16_t* residual;
+   bf16_t* prefix_out;
++  // Fused local add (nullptr = off): prefix_out = residual + addend, rounded
++  // like the unfused bf16 add, then aggregated in place of prefix_sum.
++  const bf16_t* addend;
+   device::distributed::Semaphore* sem_local;
+   device::distributed::Semaphore* sem_mc;
+   uint8_t* output_mc;
+@@ -624,6 +627,56 @@
+   device::distributed::McBarrier::arrive_at<true>(params.sem_local, params.sem_mc, params.world_size, exit_base);
+ }
+ 
++// Local pending add + attention-residual aggregation: the whole CTA
++// materializes prefix_out = residual + addend for its tokens, then the TMA
++// pipeline aggregates that row. Each CTA only reads back rows it wrote.
++template <typename Trait, uint32_t kOccupancy>
++__global__ void __launch_bounds__(Trait::kNumThreads, kOccupancy)
++    attn_res_fused_add_kernel(const __grid_constant__ AttnResTMAParams params) {
++  using vec_t = device::AlignedVector<bf16x2_t, 4>;
++  constexpr uint32_t kRowVecs = Trait::kDim * sizeof(bf16_t) / sizeof(vec_t);
++  constexpr uint32_t kVecsPerThread = (kRowVecs + Trait::kNumThreads - 1) / Trait::kNumThreads;
++  device::PDLWaitPrimary<true>();
++  for (auto token = blockIdx.x; token < params.num_tokens; token += gridDim.x) {
++    const auto row = static_cast<int64_t>(token) * Trait::kDim;
++    vec_t va[kVecsPerThread];
++    vec_t vb[kVecsPerThread];
++#pragma unroll
++    for (uint32_t i = 0; i < kVecsPerThread; ++i) {
++      const uint32_t vid = threadIdx.x + i * Trait::kNumThreads;
++      if (vid < kRowVecs) {
++        va[i].load(params.residual + row, vid);
++        vb[i].load(params.addend + row, vid);
++      }
++    }
++#pragma unroll
++    for (uint32_t i = 0; i < kVecsPerThread; ++i) {
++      const uint32_t vid = threadIdx.x + i * Trait::kNumThreads;
++      if (vid < kRowVecs) {
++        vec_t sum;
++#pragma unroll
++        for (uint32_t j = 0; j < 4; ++j) {
++          const auto fa = device::cast<float2>(va[i][j]);
++          const auto fb = device::cast<float2>(vb[i][j]);
++          float2 fs;
++          // Explicit non-ftz fp32 add: the module builds with --use_fast_math,
++          // and torch's bf16 add (fp32 sum, one RN cast) keeps denormals.
++          asm("add.rn.f32 %0, %1, %2;" : "=f"(fs.x) : "f"(fa.x), "f"(fb.x));
++          asm("add.rn.f32 %0, %1, %2;" : "=f"(fs.y) : "f"(fa.y), "f"(fb.y));
++          sum[j] = __float22bfloat162_rn(fs);
++        }
++        sum.store(params.prefix_out + row, vid);
++      }
++    }
++  }
++  // Generic-proxy stores above are read back by the producer's bulk copies.
++  asm volatile("fence.proxy.async.global;" ::: "memory");
++  __syncthreads();
++
++  extern __shared__ char smem_raw[];
++  Trait::forward(params, reinterpret_cast<typename Trait::Smem*>(smem_raw));
++}
++
+ // Local attention-residual aggregation + direct AG epilogue. The consumer
+ // threads already hold each normalized 16B output vector in registers, so
+ // Trait::forward multicast-stores those vectors into every peer's symmetric
+@@ -676,6 +729,81 @@
+         nullptr, attn_res_fused_direct_ag_kernel<Trait<I + 1>, kOccupancy>...};
+   }
+   static constexpr auto kAgTable = make_ag_table(std::make_index_sequence<kMaxBankRows>{});
++  template <std::size_t... I>
++  static constexpr auto make_add_table(std::index_sequence<I...>) {
++    return std::array<KernelFn, kMaxBankRows + 1>{nullptr, attn_res_fused_add_kernel<Trait<I + 1>, kOccupancy>...};
++  }
++  static constexpr auto kAddTable = make_add_table(std::make_index_sequence<kMaxBankRows>{});
++
++  static void run_add(
++      const tvm::ffi::TensorView prefix_a,
++      const tvm::ffi::TensorView prefix_b,
++      const tvm::ffi::TensorView bank,
++      const tvm::ffi::TensorView cw,
++      const tvm::ffi::TensorView ow,
++      const tvm::ffi::TensorView out,
++      const tvm::ffi::TensorView prefix_out,
++      int64_t nvb,
++      double eps,
++      bool write_prefix) {
++    using namespace host;
++
++    auto T_ = SymbolicSize{"num_tokens"};
++    auto H_ = SymbolicSize{"hidden_size"};
++    auto NB_ = SymbolicSize{"num_bank_slots"};
++    auto device = SymbolicDevice{};
++    device.set_options<kDLCUDA>();
++
++    TensorMatcher({T_, H_})
++        .with_dtype<bf16_t>()
++        .with_device(device)
++        .verify(prefix_a)
++        .verify(prefix_b)
++        .verify(out)
++        .verify(prefix_out);
++    TensorMatcher({T_, NB_, H_}).with_dtype<bf16_t>().with_device(device).verify(bank);
++    TensorMatcher({H_}).with_dtype<bf16_t>().with_device(device).verify(cw).verify(ow);
++
++    const auto num_tokens = static_cast<int64_t>(T_.unwrap());
++    const auto H = static_cast<int64_t>(H_.unwrap());
++    const auto NB = static_cast<int64_t>(NB_.unwrap());
++    RuntimeCheck(H == kDim, "attn_res_fused_add: H must be ", kDim, ", got ", H);
++    RuntimeCheck(1 <= nvb && nvb <= kMaxBankRows && nvb <= NB, "attn_res_fused_add: invalid nvb=", nvb, " NB=", NB);
++    RuntimeCheck(!write_prefix || nvb < NB, "attn_res_fused_add: write_prefix targets bank row nvb, needs nvb < NB");
++    if (num_tokens == 0) return;
++
++    [[maybe_unused]] static const bool attrs_set = [] {
++      for (uint32_t i = 1; i <= kMaxBankRows; ++i) {
++        RuntimeDeviceCheck(
++            cudaFuncSetAttribute(kAddTable[i], cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemBytes));
++      }
++      return true;
++    }();
++
++    const auto num_sm = runtime::get_sm_count(device.unwrap().device_id);
++    const auto grid = std::min<int64_t>((int64_t)num_sm * kOccupancy, num_tokens);
++    const auto params = AttnResTMAParams{
++        .prefix_sum = static_cast<const bf16_t*>(prefix_out.data_ptr()),
++        .bank = static_cast<const bf16_t*>(bank.data_ptr()),
++        .cw = static_cast<const bf16_t*>(cw.data_ptr()),
++        .ow = static_cast<const bf16_t*>(ow.data_ptr()),
++        .out = static_cast<bf16_t*>(out.data_ptr()),
++        .prefix_dst = write_prefix ? static_cast<bf16_t*>(bank.data_ptr()) + nvb * H : nullptr,
++        .input_mc = nullptr,
++        .residual = static_cast<const bf16_t*>(prefix_a.data_ptr()),
++        .prefix_out = static_cast<bf16_t*>(prefix_out.data_ptr()),
++        .addend = static_cast<const bf16_t*>(prefix_b.data_ptr()),
++        .sem_local = nullptr,
++        .sem_mc = nullptr,
++        .output_mc = nullptr,
++        .world_size = 0,
++        .rank = 0,
++        .stride_bm = NB * H,
++        .eps = static_cast<float>(eps),
++        .num_tokens = static_cast<uint32_t>(num_tokens),
++    };
++    LaunchKernel(grid, kNumThreads, device.unwrap(), kSmemBytes).enable_pdl(true)(kAddTable[nvb], params);
++  }
+ 
+   static void
+   run(const tvm::ffi::TensorView prefix_sum,
+@@ -739,6 +867,7 @@
+         .input_mc = nullptr,
+         .residual = nullptr,
+         .prefix_out = nullptr,
++        .addend = nullptr,
+         .sem_local = nullptr,
+         .sem_mc = nullptr,
+         .output_mc = nullptr,
+@@ -820,6 +949,7 @@
+                     pull.rank * local_elems * sizeof(bf16_t),
+         .residual = residual.has_value() ? static_cast<const bf16_t*>(residual.value().data_ptr()) : nullptr,
+         .prefix_out = static_cast<bf16_t*>(prefix_out.data_ptr()),
++        .addend = nullptr,
+         .sem_local = pull.semaphores[pull.rank],
+         .sem_mc = pull.mc_semaphore,
+         .output_mc = nullptr,
+@@ -895,6 +1025,7 @@
+         .input_mc = nullptr,
+         .residual = nullptr,
+         .prefix_out = nullptr,
++        .addend = nullptr,
+         .sem_local = pull.semaphores[pull.rank],
+         .sem_mc = pull.mc_semaphore,
+         .output_mc = reinterpret_cast<uint8_t*>(static_cast<uintptr_t>(output_mc_ptr)),
+diff -ruN -x __pycache__ -x '*.pyc' a/kernels/ops/kimi_k3/attn_res.py b/kernels/ops/kimi_k3/attn_res.py
+--- a/kernels/ops/kimi_k3/attn_res.py	2026-09-18 02:16:55.000000000 -0700
++++ b/kernels/ops/kimi_k3/attn_res.py	2026-09-26 23:12:23.280327161 -0700
+@@ -57,6 +57,7 @@
+                 ("run", f"AttnResFusedTmaKernel<{args}>::run"),
+                 ("run_pull_rs", f"AttnResFusedTmaKernel<{args}>::run_pull_rs"),
+                 ("run_direct_ag", f"AttnResFusedTmaKernel<{args}>::run_direct_ag"),
++                ("run_add", f"AttnResFusedTmaKernel<{args}>::run_add"),
+             ],
+             extra_cuda_cflags=["-O3", "--use_fast_math"],
+         )
+@@ -188,6 +189,27 @@
+     )
+ 
+ 
++def attn_res_fused_tma_add(
++    prefix_a: torch.Tensor,
++    prefix_b: torch.Tensor,
++    bank: torch.Tensor,
++    cw: torch.Tensor,
++    ow: torch.Tensor,
++    out: torch.Tensor,
++    prefix_out: torch.Tensor,
++    nvb: int,
++    eps: float,
++    *,
++    write_prefix: bool = False,
++) -> None:
++    """attn_res_fused_tma with the pending residual add folded in: writes
++    prefix_out = prefix_a + prefix_b (bit-identical to the bf16 torch add) and
++    aggregates it. prefix_out must not alias prefix_a / prefix_b."""
++    _jit_fused_tma_module(*_tuning(nvb, prefix_a.shape[0])).run_add(
++        prefix_a, prefix_b, bank, cw, ow, out, prefix_out, nvb, eps, write_prefix
++    )
++
++
+ @register_custom_op(mutates_args=["bank", "out"])
+ def _attn_res_fused_direct_ag_op(
+     world_size: int,
+diff -ruN -x __pycache__ -x '*.pyc' a/srt/layers/attn_residual.py b/srt/layers/attn_residual.py
+--- a/srt/layers/attn_residual.py	2026-09-18 02:16:55.000000000 -0700
++++ b/srt/layers/attn_residual.py	2026-09-26 23:12:23.280327161 -0700
+@@ -117,6 +117,39 @@
+     return out
+ 
+ 
++def _aggregate_fast_add(
++    prefix_a: torch.Tensor,
++    prefix_b: torch.Tensor,
++    bank: torch.Tensor,
++    nvb: int,
++    score_proj: ReplicatedLinear,
++    score_norm: RMSNorm,
++    out_norm: RMSNorm,
++    write_bank_row: bool = False,
++) -> tuple[torch.Tensor, torch.Tensor]:
++    """_aggregate_fast with the pending prefix add done in the same kernel."""
++    from sglang.kernels.ops.kimi_k3.attn_res import attn_res_fused_tma_add
++
++    assert score_norm.variance_epsilon == out_norm.variance_epsilon
++
++    cw = get_cw(score_proj, score_norm, dtype=torch.bfloat16)
++    out = torch.empty_like(prefix_a)
++    prefix = torch.empty_like(prefix_a)
++    attn_res_fused_tma_add(
++        prefix_a,
++        prefix_b,
++        bank,
++        cw,
++        out_norm.weight,
++        out,
++        prefix,
++        nvb,
++        score_norm.variance_epsilon,
++        write_prefix=write_bank_row,
++    )
++    return out, prefix
++
++
+ @triton.jit
+ def _score_kernel(
+     prefix_ptr,  # [T, H]
+@@ -376,6 +409,22 @@
+             prefix_a,
+             prefix_b,
+             bank,
++            nvb,
++            score_proj,
++            score_norm,
++            out_norm,
++            write_bank_row=write_bank_row,
++        )
++    if (
++        _use_fast(prefix_a.shape[1])
++        and prefix_a.shape[0] > 0
++        and prefix_a.is_contiguous()
++        and prefix_b.is_contiguous()
++    ):
++        return _aggregate_fast_add(
++            prefix_a,
++            prefix_b,
++            bank,
+             nvb,
+             score_proj,
+             score_norm,
+diff -ruN -x __pycache__ -x '*.pyc' a/srt/models/kimi_k3.py b/srt/models/kimi_k3.py
+--- a/srt/models/kimi_k3.py	2026-09-25 03:37:14.516674397 -0700
++++ b/srt/models/kimi_k3.py	2026-09-26 23:20:54.449737493 -0700
+@@ -785,6 +785,23 @@
+             and self._front_w.dtype == torch.bfloat16
+         )
+ 
++    @cached_property
++    def _split_front_eligible(self) -> bool:
++        """Whether small decode batches may issue the merged front as two TGV
++        GEMMs ([router | latent down] first, shared gate_up on the side
++        stream). Single-rank schedule only: the multi-rank and AR-fusion
++        tails keep the merged GEMM."""
++        from sglang.srt.utils import is_sm100_supported
++
++        return (
++            self._front_fp32
++            and self.alt_stream is not None
++            and self.tp_size == 1
++            and not k3_ar_fusion.enabled()
++            and len(self._front_sizes) == 3
++            and is_sm100_supported()
++        )
++
+     def _forward_mega_experts(
+         self, routed_input: torch.Tensor, topk_output
+     ) -> torch.Tensor:
+@@ -1242,14 +1259,43 @@
+             )
+ 
+         num_tokens, hidden_size = hidden_states.shape
+-        fused = _k3_bf16_gemm(
+-            hidden_states,
+-            self._front_w,
+-            out_dtype=torch.float32 if self._front_fp32 else None,
+-        )
+-        gate_up, router_logits, routed_input = torch.split(
+-            fused, self._front_sizes, dim=-1
+-        )
++        split_front = (
++            self._split_front_eligible
++            and num_tokens <= 32
++            and not k3_ar_fusion.enabled()
++        )
++        if split_front:
++            # Small-batch decode: the routed chain (router, quant, MXFP4
++            # GEMMs, finalize) is launch-latency bound and only needs the
++            # [router | latent down] rows, so issue that slice alone and let
++            # the shared gate_up rows run on the side stream alongside the
++            # routed experts. Both are row views of the merged weight, and
++            # the TGV kernel keeps the full-K fp32 reduction per output, so
++            # the logits and activations are bit-identical to the merged GEMM.
++            from sglang.kernels.ops.gemm.cutedsl_bf16_gemm import (
++                cutedsl_bf16_gemm_out,
++            )
++
++            n_gu = self._front_sizes[0]
++            routed_front = hidden_states.new_empty(
++                (num_tokens, self._front_w.shape[0] - n_gu), dtype=torch.float32
++            )
++            current_stream = torch.cuda.current_stream()
++            self.alt_stream.wait_stream(current_stream)
++            cutedsl_bf16_gemm_out(hidden_states, self._front_w[n_gu:], routed_front)
++            router_logits, routed_input = torch.split(
++                routed_front, self._front_sizes[1:], dim=-1
++            )
++            gate_up = None
++        else:
++            fused = _k3_bf16_gemm(
++                hidden_states,
++                self._front_w,
++                out_dtype=torch.float32 if self._front_fp32 else None,
++            )
++            gate_up, router_logits, routed_input = torch.split(
++                fused, self._front_sizes, dim=-1
++            )
+         if num_tokens > 1 and _is_hip and not _aiter_k3_opt:
+             router_logits = router_logits.contiguous()
+         if self._moe_front_needs_dense_bf16:
+@@ -1342,6 +1388,23 @@
+                 and not k3_ar_fusion.enabled()
+             )
+             shared_event = None
++            if split_front:
++                # alt_stream already forked ahead of the routed front GEMM
++                with torch.cuda.stream(self.alt_stream):
++                    gate_up = hidden_states.new_empty(
++                        (num_tokens, n_gu), dtype=torch.float32
++                    )
++                    cutedsl_bf16_gemm_out(
++                        hidden_states, self._front_w[:n_gu], gate_up
++                    )
++                    self._forward_shared(gate_up, shared_output)
++                    shared_event = self.alt_stream.record_event()
++                self._forward_routed(hidden_states, router_logits, routed_input, latent)
++                # tp_size == 1: no collective; run the latent tail before the
++                # join so it also overlaps the shared experts.
++                out, _ = self.routed_expert_up_proj(self._latent_norm(latent))
++                current_stream.wait_event(shared_event)
++                return _add3(out, shared_output, prefix_sum, prefetch_bc=True)
+             if overlap_shared:
+                 current_stream = torch.cuda.current_stream()
+                 self.alt_stream.wait_stream(current_stream)

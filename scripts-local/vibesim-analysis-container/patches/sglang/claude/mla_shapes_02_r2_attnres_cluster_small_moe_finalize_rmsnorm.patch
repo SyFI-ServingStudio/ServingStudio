@@ -1,0 +1,523 @@
+diff -ruN -x __pycache__ -x '*.pyc' a/kernels/jit/csrc/kimi_k3/attn_res/cluster_small.cuh b/kernels/jit/csrc/kimi_k3/attn_res/cluster_small.cuh
+--- a/kernels/jit/csrc/kimi_k3/attn_res/cluster_small.cuh	1969-12-31 16:00:00.000000000 -0800
++++ b/kernels/jit/csrc/kimi_k3/attn_res/cluster_small.cuh	2026-09-27 01:47:17.717024114 -0700
+@@ -0,0 +1,317 @@
++#include <sgl_kernel/tensor.h>
++#include <sgl_kernel/utils.h>
++
++#include <sgl_kernel/math.cuh>
++#include <sgl_kernel/runtime.cuh>
++#include <sgl_kernel/type.cuh>
++#include <sgl_kernel/utils.cuh>
++#include <sgl_kernel/vec.cuh>
++#include <sgl_kernel/warp.cuh>
++
++#include <tvm/ffi/container/tensor.h>
++
++#include <array>
++#include <cfloat>
++#include <cooperative_groups.h>
++#include <cstdint>
++#include <utility>
++
++// Small-T attention-residual aggregation: one thread-block cluster per token,
++// each CTA owning a kDim / kCluster column slice. Same math as
++// fused_tma.cuh (score -> softmax -> weighted combine -> output RMSNorm, with
++// the optional fused residual add and prefix snapshot); the row reductions
++// cross the cluster through DSMEM instead of running on one SM per token.
++
++namespace sglang {
++
++struct AttnResClusterParams {
++  const bf16_t* __restrict__ prefix_sum;  // [T, H]
++  const bf16_t* __restrict__ bank;        // [T, NB, H]
++  const bf16_t* __restrict__ cw;          // [H] score norm * proj weight
++  const bf16_t* __restrict__ ow;          // [H] out norm weight
++  bf16_t* __restrict__ out;               // [T, H]
++  bf16_t* __restrict__ prefix_dst;        // bank row nvb, nullptr = off
++  const bf16_t* __restrict__ residual;    // fused add only
++  bf16_t* __restrict__ prefix_out;        // fused add only
++  int64_t stride_bm;                      // bank stride along T (elements)
++  float eps;
++};
++
++template <int64_t kDim, uint32_t kCluster, uint32_t kNvb, bool kFuseAdd>
++__global__ void __launch_bounds__(128, 1)
++    attn_res_cluster_kernel(const __grid_constant__ AttnResClusterParams params) {
++  using namespace device;
++  namespace cg = cooperative_groups;
++  using row_vec_t = AlignedVector<bf16x2_t, 4>;  // 8 bf16 = 16 bytes
++  constexpr uint32_t kVecElems = 8;
++  constexpr int64_t kSlice = kDim / kCluster;
++  constexpr uint32_t kActive = kSlice / kVecElems;
++  constexpr uint32_t kNumWarps = 4;
++  constexpr uint32_t kRows = kNvb + 1;  // bank rows, then the prefix row
++  static_assert(kDim % (kCluster * kVecElems) == 0 && kActive <= kNumWarps * kWarpThreads);
++
++  __shared__ float s_warp[kNumWarps][2 * kRows];
++  __shared__ float s_part[2 * kRows];  // read by every CTA of the cluster
++  __shared__ float s_total[2 * kRows];
++  __shared__ float s_warp_sq[kNumWarps];
++  __shared__ float s_part_sq;  // read by every CTA of the cluster
++
++  auto cluster = cg::this_cluster();
++  const uint32_t rank = cluster.block_rank();
++  const int64_t token = blockIdx.y;
++  const uint32_t tx = threadIdx.x;
++  const uint32_t warp_id = tx / kWarpThreads;
++  const uint32_t lane_id = tx % kWarpThreads;
++  const bool active = tx < kActive;
++  const int64_t vid = (rank * kSlice) / kVecElems + tx;  // 16B vector index in the row
++
++  row_vec_t rows[kRows];
++  row_vec_t cw_vec, ow_vec;
++  if (active) {
++    cw_vec.load(params.cw, vid);
++    ow_vec.load(params.ow, vid);
++#pragma unroll
++    for (uint32_t r = 0; r < kNvb; ++r) {
++      rows[r].load(params.bank + token * params.stride_bm + r * kDim, vid);
++    }
++  }
++  // Only the prefix row (and the addend) come from the immediately-preceding
++  // kernel; see the matching wait in fused_tma.cuh.
++  PDLWaitPrimary<true>();
++  if (active) {
++    rows[kNvb].load(params.prefix_sum + token * kDim, vid);
++    if constexpr (kFuseAdd) {
++      row_vec_t addend;
++      addend.load(params.residual + token * kDim, vid);
++#pragma unroll
++      for (uint32_t j = 0; j < kVecElems / 2; ++j) {
++        const auto x = cast<float2>(rows[kNvb][j]);
++        const auto y = cast<float2>(addend[j]);
++        rows[kNvb][j] = cast<bf16x2_t>(make_float2(x.x + y.x, x.y + y.y));
++      }
++    }
++  }
++  PDLTriggerSecondary<true>();
++
++  float rms[kRows] = {};
++  float dot[kRows] = {};
++  if (active) {
++#pragma unroll
++    for (uint32_t j = 0; j < kVecElems / 2; ++j) {
++      const auto q = cast<float2>(cw_vec[j]);
++#pragma unroll
++      for (uint32_t r = 0; r < kRows; ++r) {
++        const auto f = cast<float2>(rows[r][j]);
++        rms[r] = fmaf(f.x, f.x, fmaf(f.y, f.y, rms[r]));
++        dot[r] = fmaf(f.x, q.x, fmaf(f.y, q.y, dot[r]));
++      }
++    }
++  }
++#pragma unroll
++  for (uint32_t r = 0; r < kRows; ++r) {
++    rms[r] = warp::reduce_sum(rms[r]);
++    dot[r] = warp::reduce_sum(dot[r]);
++  }
++  if (lane_id == 0) {
++#pragma unroll
++    for (uint32_t r = 0; r < kRows; ++r) {
++      s_warp[warp_id][r] = rms[r];
++      s_warp[warp_id][kRows + r] = dot[r];
++    }
++  }
++  __syncthreads();
++  if (tx < 2 * kRows) {
++    float v = 0.f;
++#pragma unroll
++    for (uint32_t w = 0; w < kNumWarps; ++w) v += s_warp[w][tx];
++    s_part[tx] = v;
++  }
++  cluster.sync();
++  // Fixed rank order: every CTA of the cluster sees bit-identical totals.
++  if (tx < 2 * kRows) {
++    float v = 0.f;
++#pragma unroll
++    for (uint32_t c = 0; c < kCluster; ++c) v += cluster.map_shared_rank(s_part, c)[tx];
++    s_total[tx] = v;
++  }
++  __syncthreads();
++
++  float logit[kRows];
++  float max_logit = -FLT_MAX;
++#pragma unroll
++  for (uint32_t r = 0; r < kRows; ++r) {
++    constexpr float kScale = 1.f / static_cast<float>(kDim);
++    logit[r] = s_total[kRows + r] * rsqrtf(s_total[r] * kScale + params.eps);
++    max_logit = fmaxf(max_logit, logit[r]);
++  }
++  float weight[kRows];
++  float weight_sum = 0.f;
++#pragma unroll
++  for (uint32_t r = 0; r < kRows; ++r) {
++    weight[r] = exp2f((logit[r] - max_logit) * math::log2e);
++    weight_sum += weight[r];
++  }
++
++  float mixed[kVecElems] = {};
++  float sq = 0.f;
++  if (active) {
++#pragma unroll
++    for (uint32_t j = 0; j < kVecElems / 2; ++j) {
++      float2 a = make_float2(0.f, 0.f);
++#pragma unroll
++      for (uint32_t r = 0; r < kRows; ++r) {
++        const auto f = cast<float2>(rows[r][j]);
++        a.x = fmaf(weight[r], f.x, a.x);
++        a.y = fmaf(weight[r], f.y, a.y);
++      }
++      mixed[2 * j] = a.x;
++      mixed[2 * j + 1] = a.y;
++      sq = fmaf(a.x, a.x, fmaf(a.y, a.y, sq));
++    }
++  }
++  sq = warp::reduce_sum(sq);
++  if (lane_id == 0) s_warp_sq[warp_id] = sq;
++  __syncthreads();
++  if (tx == 0) {
++    float v = 0.f;
++#pragma unroll
++    for (uint32_t w = 0; w < kNumWarps; ++w) v += s_warp_sq[w];
++    s_part_sq = v;
++  }
++  cluster.sync();
++  float total_sq = 0.f;
++#pragma unroll
++  for (uint32_t c = 0; c < kCluster; ++c) total_sq += *cluster.map_shared_rank(&s_part_sq, c);
++
++  if (active) {
++    const float inv_sum = 1.f / weight_sum;
++    const float scale = inv_sum * rsqrtf(total_sq * inv_sum * inv_sum / static_cast<float>(kDim) + params.eps);
++    row_vec_t out_vec;
++#pragma unroll
++    for (uint32_t j = 0; j < kVecElems / 2; ++j) {
++      const auto w = cast<float2>(ow_vec[j]);
++      out_vec[j] = cast<bf16x2_t>(make_float2(mixed[2 * j] * scale * w.x, mixed[2 * j + 1] * scale * w.y));
++    }
++    out_vec.store(params.out + token * kDim, vid);
++    if constexpr (kFuseAdd) {
++      rows[kNvb].store(params.prefix_out + token * kDim, vid);
++    }
++    if (params.prefix_dst != nullptr) {
++      rows[kNvb].store(params.prefix_dst + token * params.stride_bm, vid);
++    }
++  }
++  // Keep this CTA's shared partials alive until every peer has read them.
++  cluster.sync();
++}
++
++template <int64_t kDim, uint32_t kMaxBankRows, uint32_t kCluster>
++struct AttnResClusterKernel {
++  using KernelFn = void (*)(const AttnResClusterParams);
++  static constexpr uint32_t kNumThreads = 128;
++
++  template <bool kFuseAdd, std::size_t... I>
++  static constexpr auto make_table(std::index_sequence<I...>) {
++    return std::array<KernelFn, kMaxBankRows + 1>{
++        nullptr, attn_res_cluster_kernel<kDim, kCluster, I + 1, kFuseAdd>...};
++  }
++  static constexpr auto kTable = make_table<false>(std::make_index_sequence<kMaxBankRows>{});
++  static constexpr auto kAddTable = make_table<true>(std::make_index_sequence<kMaxBankRows>{});
++
++  static void launch(
++      const tvm::ffi::TensorView prefix_sum,
++      const tvm::ffi::TensorView bank,
++      const tvm::ffi::TensorView cw,
++      const tvm::ffi::TensorView ow,
++      const tvm::ffi::TensorView out,
++      const bf16_t* residual,
++      bf16_t* prefix_out,
++      int64_t nvb,
++      double eps,
++      bool write_prefix) {
++    using namespace host;
++
++    auto T_ = SymbolicSize{"num_tokens"};
++    auto H_ = SymbolicSize{"hidden_size"};
++    auto NB_ = SymbolicSize{"num_bank_slots"};
++    auto device = SymbolicDevice{};
++    device.set_options<kDLCUDA>();
++
++    TensorMatcher({T_, H_}).with_dtype<bf16_t>().with_device(device).verify(prefix_sum).verify(out);
++    TensorMatcher({T_, NB_, H_}).with_dtype<bf16_t>().with_device(device).verify(bank);
++    TensorMatcher({H_}).with_dtype<bf16_t>().with_device(device).verify(cw).verify(ow);
++
++    const auto num_tokens = static_cast<int64_t>(T_.unwrap());
++    const auto H = static_cast<int64_t>(H_.unwrap());
++    const auto NB = static_cast<int64_t>(NB_.unwrap());
++    RuntimeCheck(H == kDim, "attn_res_cluster: H must be ", kDim, ", got ", H);
++    RuntimeCheck(1 <= nvb && nvb <= kMaxBankRows && nvb <= NB, "attn_res_cluster: invalid nvb=", nvb, " NB=", NB);
++    RuntimeCheck(!write_prefix || nvb < NB, "attn_res_cluster: write_prefix targets bank row nvb, needs nvb < NB");
++    if (num_tokens == 0) return;
++
++    const auto params = AttnResClusterParams{
++        .prefix_sum = static_cast<const bf16_t*>(prefix_sum.data_ptr()),
++        .bank = static_cast<const bf16_t*>(bank.data_ptr()),
++        .cw = static_cast<const bf16_t*>(cw.data_ptr()),
++        .ow = static_cast<const bf16_t*>(ow.data_ptr()),
++        .out = static_cast<bf16_t*>(out.data_ptr()),
++        .prefix_dst = write_prefix ? static_cast<bf16_t*>(bank.data_ptr()) + nvb * H : nullptr,
++        .residual = residual,
++        .prefix_out = prefix_out,
++        .stride_bm = NB * H,
++        .eps = static_cast<float>(eps),
++    };
++    const auto kernel = residual != nullptr ? kAddTable[nvb] : kTable[nvb];
++    LaunchKernel(dim3(kCluster, num_tokens), kNumThreads, device.unwrap())
++        .config({.use_pdl = true, .cluster_dim = dim3(kCluster, 1, 1)})(kernel, params);
++  }
++
++  static void
++  run(const tvm::ffi::TensorView prefix_sum,
++      const tvm::ffi::TensorView bank,
++      const tvm::ffi::TensorView cw,
++      const tvm::ffi::TensorView ow,
++      const tvm::ffi::TensorView out,
++      int64_t nvb,
++      double eps,
++      bool write_prefix) {
++    launch(prefix_sum, bank, cw, ow, out, nullptr, nullptr, nvb, eps, write_prefix);
++  }
++
++  static void run_add(
++      const tvm::ffi::TensorView input,
++      const tvm::ffi::TensorView residual,
++      const tvm::ffi::TensorView bank,
++      const tvm::ffi::TensorView cw,
++      const tvm::ffi::TensorView ow,
++      const tvm::ffi::TensorView out,
++      const tvm::ffi::TensorView prefix_out,
++      int64_t nvb,
++      double eps,
++      bool write_prefix) {
++    using namespace host;
++    auto T_ = SymbolicSize{"num_tokens"};
++    auto H_ = SymbolicSize{"hidden_size"};
++    auto device = SymbolicDevice{};
++    device.set_options<kDLCUDA>();
++    TensorMatcher({T_, H_})
++        .with_dtype<bf16_t>()
++        .with_device(device)
++        .verify(input)
++        .verify(residual)
++        .verify(out)
++        .verify(prefix_out);
++    launch(
++        input,
++        bank,
++        cw,
++        ow,
++        out,
++        static_cast<const bf16_t*>(residual.data_ptr()),
++        static_cast<bf16_t*>(prefix_out.data_ptr()),
++        nvb,
++        eps,
++        write_prefix);
++  }
++};
++
++}  // namespace sglang
+diff -ruN -x __pycache__ -x '*.pyc' a/kernels/ops/kimi_k3/attn_res.py b/kernels/ops/kimi_k3/attn_res.py
+--- a/kernels/ops/kimi_k3/attn_res.py	2026-09-25 05:05:19.561620928 -0700
++++ b/kernels/ops/kimi_k3/attn_res.py	2026-09-27 01:50:21.524736910 -0700
+@@ -99,6 +99,30 @@
+     return best
+ 
+ 
++# Up to this many tokens the one-CTA-per-token TMA kernel leaves most SMs idle
++# and is latency-bound; the cluster kernel splits each row over 8 SMs instead.
++# Measured on B200 decode: slower than the TMA kernel from T = 16 on.
++_CLUSTER_MAX_TOKENS: int = 1
++_CLUSTER_SIZE: int = 8
++
++
++@cache_once
++def _jit_cluster_module() -> Module:
++    major, minor = torch.cuda.get_device_capability()
++    args = make_cpp_args(_DIM, _MAX_BANK_ROWS, _CLUSTER_SIZE)
++    with override_jit_cuda_arch(major, minor, suffix="a"):
++        return load_jit(
++            _make_name("cluster_small"),
++            *args,
++            cuda_files=["kimi_k3/attn_res/cluster_small.cuh"],
++            cuda_wrappers=[
++                ("run", f"AttnResClusterKernel<{args}>::run"),
++                ("run_add", f"AttnResClusterKernel<{args}>::run_add"),
++            ],
++            extra_cuda_cflags=["-O3", "--use_fast_math"],
++        )
++
++
+ _COMM_MAP: dict[int, Communicator] = {}
+ 
+ 
+@@ -184,6 +208,11 @@
+                  (bit-exact copy, fused into the score pass which already
+                  has the row in registers); requires NB > nvb
+     """
++    if prefix_sum.shape[0] <= _CLUSTER_MAX_TOKENS:
++        _jit_cluster_module().run(
++            prefix_sum, bank, cw, ow, out, nvb, eps, write_prefix
++        )
++        return
+     _jit_fused_tma_module(*_tuning(nvb, prefix_sum.shape[0])).run(
+         prefix_sum, bank, cw, ow, out, nvb, eps, write_prefix
+     )
+@@ -207,6 +236,11 @@
+     with the unfused torch add), which each CTA materializes for its own
+     tokens before its aggregation pass. Same restrictions as
+     attn_res_fused_tma; input / residual / prefix_out are [T, H] bf16."""
++    if input.shape[0] <= _CLUSTER_MAX_TOKENS:
++        _jit_cluster_module().run_add(
++            input, residual, bank, cw, ow, out, prefix_out, nvb, eps, write_prefix
++        )
++        return
+     _jit_fused_tma_module(*_tuning(nvb, input.shape[0])).run_add(
+         input, residual, bank, cw, ow, out, prefix_out, nvb, eps, write_prefix
+     )
+diff -ruN -x __pycache__ -x '*.pyc' a/kernels/ops/moe/moe_finalize_rmsnorm.py b/kernels/ops/moe/moe_finalize_rmsnorm.py
+--- a/kernels/ops/moe/moe_finalize_rmsnorm.py	1969-12-31 16:00:00.000000000 -0800
++++ b/kernels/ops/moe/moe_finalize_rmsnorm.py	2026-09-27 01:39:13.180314734 -0700
+@@ -0,0 +1,74 @@
++"""Deferred trtllm-gen MoE finalize fused with the following RMSNorm.
++
++Consumes the ``do_finalize=False`` triple of the trtllm-gen routed MoE and
++writes ``rmsnorm(bf16(sum_k w[t, k] * gemm2_out[idx[t * K + k]]))``: the
++finalize is accumulated in fp32 over k in order and rounded to bf16 exactly as
++FlashInfer's finalizeKernel does, so only the norm's reduction order differs
++from the unfused finalize + RMSNorm chain.
++"""
++
++from __future__ import annotations
++
++import torch
++import triton
++import triton.language as tl
++
++
++@triton.jit
++def _moe_finalize_rmsnorm_kernel(
++    out_ptr,  # [T, H] bf16
++    g2_ptr,  # [P, H] bf16, permuted gemm2 rows
++    idx_ptr,  # [T * K] int32, -1 for experts not on this rank
++    w_ptr,  # [T, K] fp32 or bf16
++    norm_w_ptr,  # [H] bf16
++    eps,
++    H: tl.constexpr,
++    K: tl.constexpr,
++    BLOCK: tl.constexpr,
++):
++    t = tl.program_id(0)
++    offs = tl.arange(0, BLOCK)
++    mask = offs < H
++    acc = tl.zeros([BLOCK], dtype=tl.float32)
++    for k in tl.static_range(K):
++        row = tl.load(idx_ptr + t * K + k)
++        scale = tl.load(w_ptr + t * K + k).to(tl.float32)
++        g = tl.load(
++            g2_ptr + row.to(tl.int64) * H + offs, mask=mask & (row >= 0), other=0.0
++        )
++        acc += g.to(tl.float32) * scale
++    x = acc.to(tl.bfloat16).to(tl.float32)
++    rstd = tl.rsqrt(tl.sum(x * x, axis=0) / H + eps)
++    nw = tl.load(norm_w_ptr + offs, mask=mask, other=0.0).to(tl.float32)
++    tl.store(out_ptr + t * H + offs, (x * rstd * nw).to(tl.bfloat16), mask=mask)
++
++
++def moe_finalize_rmsnorm(
++    *,
++    gemm2_out: torch.Tensor,
++    expanded_idx_to_permuted_idx: torch.Tensor,
++    expert_weights: torch.Tensor,
++    norm_weight: torch.Tensor,
++    eps: float,
++) -> torch.Tensor:
++    assert gemm2_out.dtype == torch.bfloat16 and gemm2_out.is_contiguous()
++    assert expanded_idx_to_permuted_idx.dtype == torch.int32
++    assert expert_weights.dtype in (torch.float32, torch.bfloat16)
++    num_tokens, top_k = expert_weights.shape
++    hidden = gemm2_out.shape[1]
++    assert expanded_idx_to_permuted_idx.numel() == num_tokens * top_k
++    assert norm_weight.shape == (hidden,)
++    out = gemm2_out.new_empty((num_tokens, hidden))
++    _moe_finalize_rmsnorm_kernel[(num_tokens,)](
++        out,
++        gemm2_out,
++        expanded_idx_to_permuted_idx.contiguous(),
++        expert_weights.contiguous(),
++        norm_weight,
++        eps,
++        H=hidden,
++        K=top_k,
++        BLOCK=triton.next_power_of_2(hidden),
++        num_warps=8,
++    )
++    return out
+diff -ruN -x __pycache__ -x '*.pyc' a/srt/models/kimi_k3.py b/srt/models/kimi_k3.py
+--- a/srt/models/kimi_k3.py	2026-09-25 05:02:42.660787379 -0700
++++ b/srt/models/kimi_k3.py	2026-09-27 01:39:46.091578619 -0700
+@@ -17,6 +17,7 @@
+ from torch import nn
+ 
+ from sglang.kernels.ops.attention.fla.fused_norm_gate import FusedRMSNormGated
++from sglang.kernels.ops.moe.moe_finalize_rmsnorm import moe_finalize_rmsnorm
+ from sglang.srt.configs.kimi_k3 import KimiK3Config
+ from sglang.srt.configs.kimi_linear import KimiLinearConfig
+ from sglang.srt.distributed import (
+@@ -695,6 +696,13 @@
+             self.routed_expert_down_proj = None
+             self.routed_expert_norm = None
+             self.routed_expert_up_proj = None
++        # Without a collective after the MoE, the deferred finalize fuses
++        # with the latent RMSNorm instead (moe_finalize_rmsnorm).
++        self._local_finalize_norm = (
++            self._defer_moe_finalize
++            and self.tp_size == 1
++            and self.routed_expert_norm is not None
++        )
+ 
+         # Static eligibility for fusing the fused-front latent all-reduce with
+         # the RMSNorm epilogue (SGLANG_K3_AR_FUSION). The kernel views the flat
+@@ -1357,6 +1365,28 @@
+                     shared_output,
+                     prefix_sum,
+                 )
++        elif self.alt_stream is not None and self._local_finalize_norm:
++            # No collective: finalize + latent norm run as one kernel off the
++            # deferred trtllm-gen triple instead of the in-op finalize.
++            current_stream = torch.cuda.current_stream()
++            self.alt_stream.wait_stream(current_stream)
++            with torch.cuda.stream(self.alt_stream):
++                self._forward_shared(gate_up, shared_output)
++            deferred = self._forward_routed_deferred(
++                hidden_states, router_logits, routed_input
++            )
++            norm = self.routed_expert_norm
++            assert norm is not None
++            buf = None
++            latent = moe_finalize_rmsnorm(
++                gemm2_out=deferred.gemm2_out,
++                expanded_idx_to_permuted_idx=deferred.expanded_idx_to_permuted_idx,
++                expert_weights=deferred.expert_weights,
++                norm_weight=norm.weight,
++                eps=norm.variance_epsilon,
++            )
++            fused_norm = True
++            current_stream.wait_stream(self.alt_stream)
+         else:  # single collective over the flat [latent | shared] pair
+             if self.alt_stream is not None:
+                 current_stream = torch.cuda.current_stream()
+@@ -1380,8 +1410,9 @@
+             else:
+                 buf = tensor_model_parallel_all_reduce(buf)
+ 
+-        latent = buf[:latent_numel].view(num_tokens, self.moe_hidden_size)
+-        shared_output = buf[latent_numel:].view(num_tokens, hidden_size)
++        if buf is not None:
++            latent = buf[:latent_numel].view(num_tokens, self.moe_hidden_size)
++            shared_output = buf[latent_numel:].view(num_tokens, hidden_size)
+         if not fused_norm:
+             latent = self._latent_norm(latent)
+         up_weight = getattr(self.routed_expert_up_proj, "weight", None)

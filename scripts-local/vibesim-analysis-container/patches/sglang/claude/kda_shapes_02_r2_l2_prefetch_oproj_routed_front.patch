@@ -1,0 +1,217 @@
+diff -ruN -x __pycache__ -x '*.pyc' a/kernels/jit/csrc/elementwise/l2_prefetch.cuh b/kernels/jit/csrc/elementwise/l2_prefetch.cuh
+--- a/kernels/jit/csrc/elementwise/l2_prefetch.cuh	1969-12-31 16:00:00.000000000 -0800
++++ b/kernels/jit/csrc/elementwise/l2_prefetch.cuh	2026-09-27 00:50:56.631296257 -0700
+@@ -0,0 +1,64 @@
++#include <sgl_kernel/tensor.h>
++#include <sgl_kernel/utils.h>
++
++#include <sgl_kernel/type.cuh>
++#include <sgl_kernel/utils.cuh>
++
++#include <tvm/ffi/container/tensor.h>
++
++#include <cstdint>
++
++namespace sglang {
++
++// Fire-and-forget L2 warm-up of a strided 2-D byte range (rows of row_bytes,
++// row_stride_bytes apart): every thread issues per-line prefetch.global.L2
++// hints in a grid-stride loop. Nothing is read
++// into the SM and nothing is written, so it cannot change any result. Meant
++// to run on a side stream while the main stream is latency-bound, so that a
++// later weight-streaming GEMM finds its operand already in L2.
++struct L2PrefetchParams {
++  const char* __restrict__ ptr;
++  int64_t row_stride_bytes;
++  int64_t lines_per_row;
++  int64_t num_lines;
++};
++
++constexpr int64_t kL2LineBytes = 128;
++
++__global__ void l2_prefetch_kernel(const __grid_constant__ L2PrefetchParams params) {
++  const int64_t stride = static_cast<int64_t>(gridDim.x) * blockDim.x;
++  for (int64_t line = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x; line < params.num_lines;
++       line += stride) {
++    const int64_t row = line / params.lines_per_row;
++    const int64_t col = line - row * params.lines_per_row;
++    const char* addr = params.ptr + row * params.row_stride_bytes + col * kL2LineBytes;
++    asm volatile("prefetch.global.L2::evict_normal [%0];" ::"l"(addr) : "memory");
++  }
++}
++
++struct L2PrefetchKernel {
++  static constexpr int kThreads = 128;
++
++  static void launch(const tvm::ffi::TensorView x, const int64_t num_blocks) {
++    using namespace host;
++    auto R = SymbolicSize{"rows"};
++    auto C = SymbolicSize{"cols"};
++    auto S = SymbolicSize{"row_stride"};
++    auto device = SymbolicDevice{};
++    device.set_options<kDLCUDA>();
++    TensorMatcher({R, C}).with_strides({S, 1}).with_dtype<bf16_t>().with_device(device).verify(x);
++    const int64_t row_bytes = C.unwrap() * static_cast<int64_t>(sizeof(bf16_t));
++    const int64_t lines_per_row = (row_bytes + kL2LineBytes - 1) / kL2LineBytes;
++    const int64_t num_lines = R.unwrap() * lines_per_row;
++    if (num_lines == 0) return;
++    const auto params = L2PrefetchParams{
++        .ptr = static_cast<const char*>(x.data_ptr()),
++        .row_stride_bytes = S.unwrap() * static_cast<int64_t>(sizeof(bf16_t)),
++        .lines_per_row = lines_per_row,
++        .num_lines = num_lines,
++    };
++    LaunchKernel(num_blocks, kThreads, device.unwrap())(l2_prefetch_kernel, params);
++  }
++};
++
++}  // namespace sglang
+diff -ruN -x __pycache__ -x '*.pyc' a/kernels/ops/elementwise/l2_prefetch.py b/kernels/ops/elementwise/l2_prefetch.py
+--- a/kernels/ops/elementwise/l2_prefetch.py	1969-12-31 16:00:00.000000000 -0800
++++ b/kernels/ops/elementwise/l2_prefetch.py	2026-09-27 00:50:56.631296257 -0700
+@@ -0,0 +1,31 @@
++"""CUDA JIT L2 warm-up: prefetch a bf16 tensor (or row-strided 2-D view) into L2."""
++
++from __future__ import annotations
++
++from typing import TYPE_CHECKING
++
++import torch
++
++from sglang.kernels.jit.utils import cache_once, load_jit
++
++if TYPE_CHECKING:
++    from tvm_ffi.module import Module
++
++
++@cache_once
++def _jit_l2_prefetch_module() -> Module:
++    return load_jit(
++        "l2_prefetch_bf16",
++        cuda_files=["elementwise/l2_prefetch.cuh"],
++        cuda_wrappers=[("run", "L2PrefetchKernel::launch")],
++        extra_cuda_cflags=["-O3"],
++    )
++
++
++def l2_prefetch(x: torch.Tensor, num_blocks: int = 148) -> None:
++    """Hint the bytes of bf16 ``x`` into L2 (no reads into SMs, no writes;
++    completion is not tracked). ``x`` is contiguous, or a 2-D view with unit
++    column stride (e.g. a K-prefix ``w[:, :k]`` of a weight). Results of
++    later kernels are unaffected -- only where their loads are served from."""
++    x = x.view(1, -1) if x.is_contiguous() else x
++    _jit_l2_prefetch_module().run(x, num_blocks)
+diff -ruN -x __pycache__ -x '*.pyc' a/srt/models/kimi_k3.py b/srt/models/kimi_k3.py
+--- a/srt/models/kimi_k3.py	2026-09-26 23:20:54.449737493 -0700
++++ b/srt/models/kimi_k3.py	2026-09-27 00:51:22.363142884 -0700
+@@ -802,6 +802,43 @@
+             and is_sm100_supported()
+         )
+ 
++    def l2_prefetch_ahead(
++        self, num_tokens: int, tensors: Tuple[torch.Tensor, ...]
++    ) -> None:
++        """Warm L2 with ``tensors`` (weights read later in the layer) on
++        alt_stream while the main stream is latency-bound and HBM mostly
++        idle, so the weight-streaming GEMMs that follow find part of their
++        operand in L2. Prefetch writes nothing, so every result is unchanged.
++        Only on the split-front schedule, which forks alt_stream from the
++        current stream again and joins it back (shared_event) before the
++        layer returns."""
++        if not (
++            get_is_capture_mode()
++            and not self._dp_attention
++            and self._eligible_for_fused_front
++            and self._split_front_eligible
++            and 0 < num_tokens <= self._l2_prefetch_bs_limit
++        ):
++            return
++        from sglang.kernels.ops.elementwise.l2_prefetch import l2_prefetch
++
++        cur = torch.cuda.current_stream()
++        self.alt_stream.wait_stream(cur)
++        with torch.cuda.stream(self.alt_stream):
++            for t in tensors:
++                l2_prefetch(t, self._l2_prefetch_blocks)
++
++    @property
++    def routed_front_weight(self) -> torch.Tensor:
++        """[router | latent down] rows of the merged front weight."""
++        return self._front_w[self._front_sizes[0] :]
++
++    # split_front covers <= 32 tokens. 32 prefetch CTAs keep the hint stream
++    # off most SMs: a full 148-CTA grid slows the 12-CTA KDA recurrence it
++    # overlaps by ~3us (measured on B200, one KDA layer).
++    _l2_prefetch_bs_limit = 32
++    _l2_prefetch_blocks = 32
++
+     def _forward_mega_experts(
+         self, routed_input: torch.Tensor, topk_output
+     ) -> torch.Tensor:
+@@ -1505,6 +1542,9 @@
+         # Same SM bound rationale as the MLA gate stream; on B200 the overlap
+         # still wins at 256/512 tokens (measured, single KDA layer decode).
+         self._bfa_alt_stream = bfa_alt_stream
++        # Set by the decoder layer: called right after the wide [q,k,v,g]
++        # GEMM is issued (graphed decode), to warm L2 on a side stream.
++        self._post_front_hook = None
+         self._bfa_bs_limit = (
+             (512 if get_platform().is_blackwell else 64)
+             if bfa_alt_stream is not None
+@@ -2057,6 +2097,8 @@
+                         )
+                         beta = bfa[..., n_fa : n_fa + n_b]
+                     fused_states, _ = self.fused_qkvg_proj(hidden_states)
++                    if self._post_front_hook is not None:
++                        self._post_front_hook(hidden_states.shape[0])
+                     qkv, g_proj_states = torch.split(
+                         fused_states, self.split_sizes, dim=-1
+                     )
+@@ -2517,6 +2559,11 @@
+                 activation_situ_beta=config.activation_situ_beta,
+                 activation_situ_linear_beta=config.activation_situ_linear_beta,
+             )
++        if isinstance(self.self_attn, KimiK3DeltaAttention) and isinstance(
++            self.mlp, KimiK3MoE
++        ):
++            self.self_attn._post_front_hook = self._l2_prefetch_after_attn_front
++            self._l2_prefetch_start = True
+         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+         self.post_attention_layernorm = RMSNorm(
+             config.hidden_size, eps=config.rms_norm_eps
+@@ -2607,6 +2654,26 @@
+             return out, group.rank_in_group * shard, False
+         return group.all_reduce(attn_out), -1, False
+ 
++    _l2_prefetch_start = False
++    import json as _j, os as _o  # TEMP_KNOB
++    _TK = _j.load(open("/workspace/opt_run/knob.json")) if _o.path.exists("/workspace/opt_run/knob.json") else {}  # TEMP_KNOB
++    _TEMP_KP_NUM, _TEMP_KP_DEN = _TK.get("kp", [1, 3])  # TEMP_KNOB
++
++    def _l2_prefetch_layer_start(self, num_tokens: int) -> None:
++        if self._TK.get("off"): return  # TEMP_KNOB
++        # During the attention-side aggregation (one CTA): a K-prefix of the
++        # [q,k,v,g] weight, since every TGV CTA streams its rows along K.
++        w = self.self_attn.fused_qkvg_proj.weight
++        if w.dtype == torch.bfloat16 and w.dim() == 2 and w.is_contiguous():
++            k = w.shape[1] * self._TEMP_KP_NUM // self._TEMP_KP_DEN // 64 * 64
++            self.mlp.l2_prefetch_ahead(num_tokens, (w[:, :k],))
++
++    def _l2_prefetch_after_attn_front(self, num_tokens: int) -> None:
++        # During the KDA recurrence: o_proj, then the routed MoE front.
++        o_w = self.self_attn.o_proj.weight
++        head = (o_w,) if o_w.dtype == torch.bfloat16 and o_w.is_contiguous() else ()
++        self.mlp.l2_prefetch_ahead(num_tokens, (*head, self.mlp.routed_front_weight))
++
+     def _run_self_attn(
+         self,
+         hidden_states: torch.Tensor,
+@@ -2775,6 +2842,8 @@
+                 # gather the normalized tensor consumed by attention.
+                 hidden_states = _sp_all_gather_rows(hidden_states)
+         else:
++            if self._l2_prefetch_start:
++                self._l2_prefetch_layer_start(hidden_states.shape[0])
+             hidden_states, prefix_sum = attn_res.forward(
+                 hidden_states,
+                 prefix_sum,

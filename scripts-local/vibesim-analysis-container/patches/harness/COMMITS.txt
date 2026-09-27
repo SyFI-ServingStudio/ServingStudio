@@ -120,3 +120,12 @@ f214196 K3 docs + KB: Claude KDA-prefill round 2 (CUDA h-scan kernel, real but b
 4965d1c K3 write-up: multi-seed accuracy hardening of the Claude b512/prefill trees (5/5 PASS so far)
 f29588f K3 write-up: MLA-b512 Claude tree seed-1 recheck PASS (6/6)
 ab1bf94 K3 docs + KB: Claude KDA-prefill round 3 below 3-sigma; campaign closed at the round-1 tree
+53a5678 K3: Claude campaign patch chains (validated) + write-up §6.5 and Campaign 5 (Codex vs Claude) summary
+7c6dde8 K3 write-up: KDA-prefill Claude tree seed rechecks (bit-exact); hardening 8/8
+f4cc9cd K3 write-up §6: every patch reference is an absolute path
+d9fa0fe K3 write-up §6.6: trajectory audit of VibeSim usage behind every accepted change (audit script + per-change evidence)
+13ad803 K3 loop: slurm GPU mode (GPU-free agent + per-measurement sbatch jobs) and shape-matched Claude cases
+0a7ef56 judge_k3: mount the FlashInfer cache rw (autotune writes new shapes; ro made MLA 1x1M a false FAIL); reseed_shapes_case.sh retry
+8d9b03d k3_gpu_broker: survive I/O errors (ENOSPC on a full /raid stranded an agent call); requeue and retry
+602e7ea K3 loop: long-context chunked-prefill cases (16k/32k chunks at 128k-262k contexts, KDA+MLA same shapes) + generic slurm pair runner
+2459d30 run_iter_opt_eval: slurm mode drops agent requests still queued at timeout (no stray GPU job after the smoke)

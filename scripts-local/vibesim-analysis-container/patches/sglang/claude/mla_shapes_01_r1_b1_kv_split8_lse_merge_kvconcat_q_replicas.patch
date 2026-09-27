@@ -1,0 +1,461 @@
+diff -ruN -x __pycache__ -x '*.pyc' a/kernels/jit/csrc/elementwise/set_mla_kv_concat_q.cuh b/kernels/jit/csrc/elementwise/set_mla_kv_concat_q.cuh
+--- a/kernels/jit/csrc/elementwise/set_mla_kv_concat_q.cuh	2026-09-25 03:34:30.289429119 -0700
++++ b/kernels/jit/csrc/elementwise/set_mla_kv_concat_q.cuh	2026-09-26 23:54:34.590727215 -0700
+@@ -343,6 +343,10 @@
+   int32_t qr_stride_1;
+   int64_t qo_stride_0;  // elements (== bytes for fp8)
+   int32_t qo_stride_1;
++  // Each query row is also stored at +r * q_replica_stride for r < q_replicas
++  // (KV-split pseudo-batch replicas); 1 = no replication.
++  uint32_t q_replicas;
++  int64_t q_replica_stride;  // elements
+ };
+ 
+ // NOSAT e4m3 code for a value outside +-464: NaN -> 0x7F (sign dropped), overflow -> sign | 0x7F.
+@@ -437,16 +441,16 @@
+     const bf16_t* b_row = params.q_rope + idx_0 * params.qr_stride_0 + idx_1 * params.qr_stride_1;
+     uint8_t* o_row = params.q_out + idx_0 * params.qo_stride_0 + idx_1 * params.qo_stride_1;
+ 
+-    {
+-      const int4* src = reinterpret_cast<const int4*>(a_row);
+-      uint2 lo = bf16x8_to_fp8x8(src[lane_id * 2]);
+-      uint2 hi = bf16x8_to_fp8x8(src[lane_id * 2 + 1]);
+-      reinterpret_cast<int4*>(o_row)[lane_id] =
+-          make_int4(static_cast<int>(lo.x), static_cast<int>(lo.y), static_cast<int>(hi.x), static_cast<int>(hi.y));
+-    }
+-    {
+-      const bf16x2_t v = reinterpret_cast<const bf16x2_t*>(b_row)[lane_id];
+-      reinterpret_cast<uint16_t*>(o_row + kFp8NopeDim)[lane_id] = bf16x2_to_fp8x2(v);
++    const int4* src = reinterpret_cast<const int4*>(a_row);
++    const uint2 lo = bf16x8_to_fp8x8(src[lane_id * 2]);
++    const uint2 hi = bf16x8_to_fp8x8(src[lane_id * 2 + 1]);
++    const int4 nope =
++        make_int4(static_cast<int>(lo.x), static_cast<int>(lo.y), static_cast<int>(hi.x), static_cast<int>(hi.y));
++    const uint16_t rope = bf16x2_to_fp8x2(reinterpret_cast<const bf16x2_t*>(b_row)[lane_id]);
++    for (uint32_t r = 0; r < params.q_replicas; ++r) {
++      uint8_t* dst = o_row + r * params.q_replica_stride;
++      reinterpret_cast<int4*>(dst)[lane_id] = nope;
++      reinterpret_cast<uint16_t*>(dst + kFp8NopeDim)[lane_id] = rope;
+     }
+   }
+ 
+@@ -468,7 +472,8 @@
+       tvm::ffi::TensorView q_out,
+       int64_t num_warps_per_block,
+       int64_t dcp_world_size,
+-      int64_t dcp_rank) {
++      int64_t dcp_rank,
++      int64_t q_replicas) {
+     using namespace host;
+ 
+     auto B = SymbolicSize{"batch_size"};
+@@ -538,6 +543,7 @@
+     CHECK_HOST(D_buf.unwrap() >= kFp8RowBytes) << "kv_buffer last dim too small";
+     CHECK_HOST(dcp_world_size >= 1 && dcp_rank >= 0 && dcp_rank < dcp_world_size)
+         << "invalid dcp world/rank: " << dcp_world_size << "/" << dcp_rank;
++    CHECK_HOST(q_replicas >= 1) << "invalid q_replicas: " << q_replicas;
+     CHECK_HOST(S_loc.unwrap() == 1) << "loc must be contiguous; got stride " << S_loc.unwrap();
+ 
+     // Alignment tripwires (mirrored by python covered() so uncovered layouts
+@@ -585,6 +591,8 @@
+         .qr_stride_1 = static_cast<int32_t>(S1_qr.unwrap()),
+         .qo_stride_0 = S0_qo.unwrap(),
+         .qo_stride_1 = static_cast<int32_t>(S1_qo.unwrap()),
++        .q_replicas = static_cast<uint32_t>(q_replicas),
++        .q_replica_stride = B.unwrap() * S0_qo.unwrap(),
+     };
+ 
+     const auto use_int32 = loc_dtype.is_type<int32_t>();
+diff -ruN -x __pycache__ -x '*.pyc' a/kernels/ops/attention/mla_decode_tail_split.py b/kernels/ops/attention/mla_decode_tail_split.py
+--- a/kernels/ops/attention/mla_decode_tail_split.py	2026-09-25 04:30:28.554135839 -0700
++++ b/kernels/ops/attention/mla_decode_tail_split.py	2026-09-26 23:57:22.220783770 -0700
+@@ -151,3 +151,171 @@
+         num_warps=4,
+     )
+     return out[:bs]
++
++
++# ---------------------------------------------------------------------------
++# KV split for single-request decode.
++#
++# At batch size 1 the TRT-LLM MLA launcher takes its DeepSeek min-latency
++# branch and halves headDimPerCtaV, so two CTAs stream every KV tile. With few
++# heads (Kimi-K3: 12 per rank) that path is bandwidth-bound on the duplicate
++# read. Presenting the request as ``k`` page-aligned KV chunks (a pseudo-batch
++# of ``k * bs`` rows) keeps the full-V kernel; the chunks are merged back
++# through their LSE.
++#
++# Pseudo-batch layout: row ``c * bs + i`` holds KV chunk ``c`` of request
++# ``i``; each chunk covers ceil(pages_i / k) pages (the last ones may be
++# shorter or empty).
++# ---------------------------------------------------------------------------
++
++# Chunks per request; measured on B200 at 1M context (k = 2: 118 us,
++# 4: 108, 16: 104 vs 131 us unsplit).
++KV_SPLIT_FACTOR = 8
++# Below this the replicate/merge/LSE overhead outweighs the bandwidth gain.
++KV_SPLIT_MIN_SEQ_LEN = 65536
++
++
++def kv_split_factor(batch_size: int, max_seq_len: int) -> int:
++    """Number of KV chunks per request; 0 disables the split."""
++    if batch_size == 1 and max_seq_len >= KV_SPLIT_MIN_SEQ_LEN:
++        return KV_SPLIT_FACTOR
++    return 0
++
++
++def kv_split_table_width(ncols: int, k: int) -> int:
++    # The kernel wants an even page count per row at page size 64.
++    w = -(-ncols // k)
++    return w + (w & 1)
++
++
++@triton.jit
++def _kv_split_tables_kernel(
++    bt_ptr,  # [bs, stride_bt] int32
++    bt2_ptr,  # [k * bs, ncols2] int32
++    sl_ptr,  # [bs] int32
++    sl2_ptr,  # [k * bs] int32
++    bs,
++    k,
++    ncols,
++    ncols2,
++    stride_bt,
++    PAGE: tl.constexpr,
++    COL_BLOCK: tl.constexpr,
++):
++    row = tl.program_id(0)
++    c = row // bs
++    src = row - c * bs
++    seq_len = tl.load(sl_ptr + src)
++    pages = (seq_len + PAGE - 1) // PAGE
++    pc = (pages + k - 1) // k
++    start = c * pc
++    new_len = tl.minimum(tl.maximum(seq_len - start * PAGE, 0), pc * PAGE)
++    tl.store(sl2_ptr + row, new_len)
++    for c0 in range(0, ncols2, COL_BLOCK):
++        cols = c0 + tl.arange(0, COL_BLOCK)
++        src_cols = cols + start
++        v = tl.load(
++            bt_ptr + src.to(tl.int64) * stride_bt + src_cols,
++            mask=(src_cols < ncols) & (cols < pc),
++            other=0,
++        )
++        tl.store(bt2_ptr + row.to(tl.int64) * ncols2 + cols, v, mask=cols < ncols2)
++
++
++@triton.jit
++def _kv_split_merge_kernel(
++    o_ptr,  # [k * bs, H, DV]; rows [0, bs) receive the merged output
++    lse_ptr,  # [k * bs, H] fp32, base 2
++    sl2_ptr,  # [k * bs] int32
++    bs,
++    K: tl.constexpr,
++    H: tl.constexpr,
++    DV: tl.constexpr,
++):
++    i = tl.program_id(0)
++    h = tl.program_id(1)
++    offs = tl.arange(0, DV)
++    m = -float("inf")
++    for c in tl.static_range(K):
++        row = c * bs + i
++        # The kernel skips an empty chunk: its output and LSE are stale.
++        valid = tl.load(sl2_ptr + row) > 0
++        la = tl.load(lse_ptr + row.to(tl.int64) * H + h)
++        m = tl.where(valid, tl.maximum(m, la), m)
++    acc = tl.zeros([DV], dtype=tl.float32)
++    den = 0.0
++    for c in tl.static_range(K):
++        row = c * bs + i
++        valid = tl.load(sl2_ptr + row) > 0
++        la = tl.load(lse_ptr + row.to(tl.int64) * H + h)
++        w = tl.where(valid, tl.exp2(la - m), 0.0)
++        v = tl.load(o_ptr + (row.to(tl.int64) * H + h) * DV + offs).to(tl.float32)
++        acc += tl.where(valid, v * w, 0.0)
++        den += w
++    base = (i.to(tl.int64) * H + h) * DV
++    v0 = tl.load(o_ptr + base + offs).to(tl.float32)
++    # Empty request (all chunks empty): keep row 0 as the kernel left it.
++    merged = tl.where(den > 0, acc / den, v0)
++    tl.store(o_ptr + base + offs, merged.to(o_ptr.dtype.element_ty))
++
++
++def build_kv_split_tables(
++    block_tables: torch.Tensor,
++    seq_lens: torch.Tensor,
++    out_block_tables: torch.Tensor,
++    out_seq_lens: torch.Tensor,
++    page_size: int,
++) -> None:
++    """Fill the (k * bs)-row pseudo-batch block table and seq_lens."""
++    bs = seq_lens.shape[0]
++    k = out_seq_lens.shape[0] // bs
++    ncols2 = out_block_tables.shape[1]
++    assert block_tables.dtype == torch.int32 and block_tables.stride(1) == 1
++    assert out_block_tables.is_contiguous() and k * bs == out_seq_lens.shape[0]
++    _kv_split_tables_kernel[(k * bs,)](
++        block_tables,
++        out_block_tables,
++        seq_lens,
++        out_seq_lens,
++        bs,
++        k,
++        block_tables.shape[1],
++        ncols2,
++        block_tables.stride(0),
++        PAGE=page_size,
++        COL_BLOCK=min(1024, triton.next_power_of_2(ncols2)),
++        num_warps=4,
++    )
++
++
++def expand_kv_split_query(query: torch.Tensor, k: int, bs: int) -> torch.Tensor:
++    """Return the (k * bs)-row pseudo-batch query (chunk-major replicas).
++
++    ``query`` holds either ``bs`` rows or ``k * bs`` rows whose first ``bs``
++    are filled; the latter is completed in place.
++    """
++    if query.shape[0] == bs:
++        return query.repeat((k,) + (1,) * (query.dim() - 1))
++    assert query.shape[0] == k * bs
++    rest = query[bs:].view((k - 1, bs) + tuple(query.shape[1:]))
++    rest.copy_(query[:bs].unsqueeze(0).expand_as(rest))
++    return query
++
++
++def merge_kv_split(
++    out: torch.Tensor, lse: torch.Tensor, seq_lens: torch.Tensor, bs: int
++) -> torch.Tensor:
++    """Merge the KV chunks into rows [0, bs) in place; return that view."""
++    k = out.shape[0] // bs
++    num_heads, head_dim_v = out.shape[-2], out.shape[-1]
++    _kv_split_merge_kernel[(bs, num_heads)](
++        out,
++        lse,
++        seq_lens,
++        bs,
++        K=k,
++        H=num_heads,
++        DV=head_dim_v,
++        num_warps=4,
++    )
++    return out[:bs]
+diff -ruN -x __pycache__ -x '*.pyc' a/kernels/ops/attention/set_mla_kv_concat_q.py b/kernels/ops/attention/set_mla_kv_concat_q.py
+--- a/kernels/ops/attention/set_mla_kv_concat_q.py	2026-09-25 04:30:39.848196903 -0700
++++ b/kernels/ops/attention/set_mla_kv_concat_q.py	2026-09-26 23:54:34.591727131 -0700
+@@ -275,6 +275,7 @@
+     dcp_world_size: int = 1,
+     dcp_rank: int = 0,
+     q_out: Optional[torch.Tensor] = None,
++    q_replicas: int = 1,
+ ) -> torch.Tensor:
+     """Quantize bf16 [k_nope | k_rope] rows to fp8-e4m3 and scatter them into
+     ``kv_buffer`` at ``loc``, and return the fp8 concatenated query
+@@ -292,6 +293,9 @@
+         cache_k_nope: [n_loc, 512] bf16   cache_k_rope: [n_loc, 64] bf16
+         q_nope:       [n_loc, H, 512] bf16   q_rope: [n_loc, H, 64] bf16
+         q_out:        optional [n_loc, H, 576] fp8_e4m3 destination
++    ``q_replicas`` > 1 also writes the query rows to the ``q_replicas - 1``
++    blocks of ``n_loc`` rows that follow ``q_out`` in memory; the caller owns
++    that storage (``q_out`` a leading slice of a contiguous buffer).
+     Returns:
+         query: [n_loc, H, 576] float8_e4m3fn (``q_out`` if given, else a new
+         contiguous tensor)
+@@ -322,5 +326,6 @@
+         num_warps,
+         dcp_world_size,
+         dcp_rank,
++        q_replicas,
+     )
+     return q_out
+diff -ruN -x __pycache__ -x '*.pyc' a/srt/layers/attention/trtllm_mla_backend.py b/srt/layers/attention/trtllm_mla_backend.py
+--- a/srt/layers/attention/trtllm_mla_backend.py	2026-09-25 04:53:04.899417605 -0700
++++ b/srt/layers/attention/trtllm_mla_backend.py	2026-09-26 23:54:48.082605009 -0700
+@@ -15,8 +15,13 @@
+ from sglang.kernels.ops.attention.dcp_kernels import create_mla_kv_page_table_for_dcp
+ from sglang.kernels.ops.attention.fixup_zero_kv import fixup_zero_kv_rows
+ from sglang.kernels.ops.attention.mla_decode_tail_split import (
++    build_kv_split_tables,
+     build_tail_split_tables,
++    expand_kv_split_query,
+     expand_tail_split_query,
++    kv_split_factor,
++    kv_split_table_width,
++    merge_kv_split,
+     merge_tail_split,
+     tail_split_rows,
+ )
+@@ -84,7 +89,10 @@
+ logger = logging.getLogger(__name__)
+ 
+ # Constants
+-DEFAULT_WORKSPACE_SIZE_MB = 150  # Memory workspace size in MB
++# Memory workspace size in MB. Sized so the LSE-returning trtllm-gen decode
++# (bs=1 KV split) fits FlashInfer autotune profiling at batch bucket 8192:
++# softmax stats ~193 MB + counters.
++DEFAULT_WORKSPACE_SIZE_MB = 256
+ 
+ # Block constraint from flashinfer requirements
+ # From flashinfer.decode._check_trtllm_gen_mla_shape:
+@@ -194,8 +202,11 @@
+     seq_lens_k: Optional[torch.Tensor] = None
+     global_seq_lens_k: Optional[torch.Tensor] = None
+     # Plain-decode tail split (see mla_decode_tail_split): the pseudo-batch
+-    # has tail_split_rows extra rows; 0 disables it.
++    # has tail_split_rows extra rows; 0 disables it. With kv_split_factor
++    # k > 0 the rows are instead k KV chunks per request (single-request
++    # decode), tail_split_rows = (k - 1) * bs.
+     tail_split_rows: int = 0
++    kv_split_factor: int = 0
+     tail_block_kv_indices: Optional[torch.Tensor] = None
+     tail_seq_lens_k: Optional[torch.Tensor] = None
+ 
+@@ -692,14 +703,17 @@
+         if forward_mode.is_decode_or_idle():
+             self._fill_tail_split(metadata)
+ 
+-    def _tail_split_rows(self, bs: int, max_seq_len: int) -> int:
+-        if (
++    def _tail_split_rows_allowed(self, max_seq_len: int) -> bool:
++        return not (
+             not self._fixed_len_decode
+             or get_parallel().dcp_enabled
+             or max_seq_len < _TAIL_SPLIT_MIN_SEQ_LEN
+             or envs.SGLANG_SKIP_SOFTMAX_DECODE_THRESHOLD_SCALE_FACTOR.get()
+             is not None
+-        ):
++        )
++
++    def _tail_split_rows(self, bs: int, max_seq_len: int) -> int:
++        if not self._tail_split_rows_allowed(max_seq_len):
+             return 0
+         return tail_split_rows(bs, self._num_sms)
+ 
+@@ -707,11 +721,19 @@
+         self, metadata: TRTLLMMLADecodeMetadata, bs: int, device: torch.device
+     ):
+         r = self._tail_split_rows(bs, metadata.max_seq_len_k)
++        width = metadata.block_kv_indices.shape[1]
++        k = 0
++        if r == 0 and self._tail_split_rows_allowed(metadata.max_seq_len_k):
++            k = kv_split_factor(bs, metadata.max_seq_len_k)
++        if k > 1:
++            r = (k - 1) * bs
++            width = kv_split_table_width(width, k)
++            metadata.kv_split_factor = k
+         if r == 0:
+             return
+         metadata.tail_split_rows = r
+         metadata.tail_block_kv_indices = torch.empty(
+-            (bs + r, metadata.block_kv_indices.shape[1]),
++            (bs + r, width),
+             dtype=torch.int32,
+             device=device,
+         )
+@@ -720,7 +742,15 @@
+         )
+ 
+     def _fill_tail_split(self, metadata: TRTLLMMLADecodeMetadata):
+-        if metadata.tail_split_rows > 0:
++        if metadata.kv_split_factor > 1:
++            build_kv_split_tables(
++                block_tables=metadata.block_kv_indices,
++                seq_lens=metadata.seq_lens_k,
++                out_block_tables=metadata.tail_block_kv_indices,
++                out_seq_lens=metadata.tail_seq_lens_k,
++                page_size=self.page_size,
++            )
++        elif metadata.tail_split_rows > 0:
+             build_tail_split_tables(
+                 block_tables=metadata.block_kv_indices,
+                 seq_lens=metadata.seq_lens_k,
+@@ -1268,13 +1298,15 @@
+         k: torch.Tensor,
+         k_rope: torch.Tensor,
+         extra_q_rows: int = 0,
++        q_replicas: int = 1,
+     ) -> Optional[torch.Tensor]:
+         """fp8-KV decode: quantize + scatter the KV row at ``loc`` (already
+         physical) and build the fp8 [q_nope | q_rope] query in one launch.
+ 
+         Returns the fp8 query, or None when the fused kernel does not cover
+         the inputs (caller falls back to the aten quantize chain). The query
+-        gets ``extra_q_rows`` trailing rows left unwritten.
++        gets ``extra_q_rows`` trailing rows, left unwritten unless
++        ``q_replicas`` > 1 fills them with copies (KV split).
+         """
+         k_nope_2d = k.view(k.shape[0], -1)
+         k_rope_2d = k_rope.view(k_rope.shape[0], -1)
+@@ -1317,6 +1349,7 @@
+             dcp_world_size=parallel.attn_dcp_size,
+             dcp_rank=parallel.attn_dcp_rank,
+             q_out=q_out[: q_nope.shape[0]],
++            q_replicas=q_replicas,
+         )
+         return q_out
+ 
+@@ -1326,9 +1359,27 @@
+         kv_cache: torch.Tensor,
+         metadata: TRTLLMMLADecodeMetadata,
+         layer: RadixAttention,
++        query_replicated: bool = False,
+     ) -> torch.Tensor:
+         r = metadata.tail_split_rows
+         bs = metadata.tail_seq_lens_k.shape[0] - r
++        k = metadata.kv_split_factor
++        if k > 1:
++            raw_out, lse = self._run_decode_kernel(
++                query=(
++                    query
++                    if query_replicated
++                    else expand_kv_split_query(query, k=k, bs=bs)
++                ),
++                kv_cache=kv_cache,
++                block_tables=metadata.tail_block_kv_indices,
++                seq_lens=metadata.tail_seq_lens_k,
++                max_seq_len=metadata.tail_block_kv_indices.shape[1] * self.page_size,
++                layer=layer,
++                return_lse=True,
++            )
++            out = merge_kv_split(raw_out, lse, metadata.tail_seq_lens_k, bs)
++            return out.view(-1, layer.tp_q_head_num * layer.v_head_dim)
+         raw_out, lse = self._run_decode_kernel(
+             query=expand_tail_split_query(query, r=r, bs=bs),
+             kv_cache=kv_cache,
+@@ -1398,6 +1449,13 @@
+ 
+         merge_query = q_rope is not None
+         fused_fp8_query = None
++        # KV split: the fused fp8 kernel writes the chunk replicas itself.
++        q_replicas = (
++            metadata.kv_split_factor
++            if metadata.kv_split_factor > 1 and llama_4_scaling is None
++            else 1
++        )
++        query_replicated = False
+         if self.data_type == torch.float8_e4m3fn:
+             assert q_rope is not None and k_rope is not None
+             if cos_sin_cache is None:
+@@ -1418,6 +1476,10 @@
+                                 if llama_4_scaling is None
+                                 else 0
+                             ),
++                            q_replicas=q_replicas,
++                        )
++                        query_replicated = (
++                            fused_fp8_query is not None and q_replicas > 1
+                         )
+                 if fused_fp8_query is None:
+                     q, k, k_rope = mla_quantize_without_rope_for_fp8(
+@@ -1512,7 +1574,9 @@
+                 query, kv_cache, metadata, layer, forward_batch
+             )
+         if metadata.tail_split_rows > 0:
+-            return self._forward_decode_tail_split(query, kv_cache, metadata, layer)
++            return self._forward_decode_tail_split(
++                query, kv_cache, metadata, layer, query_replicated
++            )
+ 
+         raw_out = self._run_decode_kernel(
+             query=query,

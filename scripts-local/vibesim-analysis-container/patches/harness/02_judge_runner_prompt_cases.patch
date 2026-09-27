@@ -1,9 +1,9 @@
 diff --git a/scripts-local/vibesim-analysis-container/agent_task_k3_opt.md b/scripts-local/vibesim-analysis-container/agent_task_k3_opt.md
 new file mode 100644
-index 0000000..05cc100
+index 0000000..15963c2
 --- /dev/null
 +++ b/scripts-local/vibesim-analysis-container/agent_task_k3_opt.md
-@@ -0,0 +1,137 @@
+@@ -0,0 +1,139 @@
 +# Task: minimize $METRIC
 +
 +You are optimizing a **real $FRAMEWORK checkout** at `$CHECKOUT` (the Python package is
@@ -64,18 +64,20 @@ index 0000000..05cc100
 +MoE kernels, captures the step in a CUDA graph and times replays. Always pass the fixed
 +workload flags `$DRIVER_ARGS`.
 +
++$GPU_NOTE
++
 +```bash
-+cd /tmp
++cd /workspace/opt_run
 +ARGS="$DRIVER_ARGS"
 +# 1) latency + per-kernel table (what actually launches, how long each kernel takes):
 +python3 /tmp/kimi_single_layer_decode.py --point "$POINTS" $ARGS --split \
 +    --profile-kernels /workspace/opt_run/iter_NN/profile.json --json-out /workspace/opt_run/iter_NN/run.json
 +
 +# 2) golden BEFORE you edit (reference output + post-step state your change must preserve):
-+python3 /tmp/kimi_single_layer_decode.py --point "$POINTS" $ARGS --capture /tmp/golden.pt
++python3 /tmp/kimi_single_layer_decode.py --point "$POINTS" $ARGS --capture /workspace/opt_run/golden.pt
 +
 +# 3) after editing, replay: speed AND correctness (per point: `JSON {...}` and `CHECK {...}`):
-+python3 /tmp/kimi_single_layer_decode.py --point "$POINTS" $ARGS --replay /tmp/golden.pt
++python3 /tmp/kimi_single_layer_decode.py --point "$POINTS" $ARGS --replay /workspace/opt_run/golden.pt
 +```
 +- Every point prints a `JSON {"latency_us": ..., "latency_mode": "graph"|"eager", ...}` line; the
 +  judged number is `latency_us` (graph mode for decode points, eager for prefill points, whose
@@ -323,6 +325,54 @@ index 0000000..d01394e
 +  "agent": "claude",
 +  "claude_model": "us.anthropic.claude-opus-5-5"
 +}
+diff --git a/scripts-local/vibesim-analysis-container/issue_k3_kda_lcprefill_claude.json b/scripts-local/vibesim-analysis-container/issue_k3_kda_lcprefill_claude.json
+new file mode 100644
+index 0000000..1a42918
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/issue_k3_kda_lcprefill_claude.json
+@@ -0,0 +1,42 @@
++{
++  "_note": "LONG-CONTEXT CHUNKED PREFILL campaign (user 2026-09-27: chunked prefill, 16k/32k per chunk, contexts >= 128k up to 262k, for both MLA and KDA on the SAME shapes). AGENT = Claude Code (Opus 5.5 via Bedrock). ONE KDA decoder layer of Kimi-K3 on sglang v0.5.20, B200, cookbook production shape (12 KDA heads/rank, bf16 recurrent state, EP8 rank = 112 mxfp4 experts, local top-2). Points are prefill chunks (ForwardMode.EXTEND) `B,L,pf<prefix>`: 1 request x L NEW tokens on a <prefix>-token context. Primary: the 16,384-token chunk that completes a 262,144-token prompt (prefix 245,760); secondaries: a 32,768-token chunk completing 262,144 (prefix 229,376), and 16k / 32k chunks at a 131,072-token prefix. For KDA the prefix enters only through the carried-in conv + recurrent state, so the 128k and 256k-context points cost the same; the chunk length is what matters (chunk_kda scan + MoE over 16k/32k rows). Metric = eager step time (sglang does not graph-capture prefill). Correctness = output + post-chunk conv/recurrent state vs a seeded golden from the pristine tree, row-wise prefill rule. Production-fidelity driver flags --bf16-gemm-init --flashinfer-autotune. GPU mode: slurm (K3_GPU_MODE=slurm).",
++  "case": "k3_kda_lcprefill_claude",
++  "mode": "open_ended",
++  "framework": "sglang",
++  "judge": "judge_k3.py",
++  "task_template": "agent_task_k3_opt.md",
++  "driver": "kimi_single_layer_decode.py",
++  "codex_image": "rga-local/sglang-k3:v0520-claude",
++  "before_image": "lmsysorg/sglang:v0.5.20",
++  "driver_args": "--attn-type kda --moe-backend flashinfer_mxfp4 --attn-heads 12 --mamba-ssm-dtype bfloat16 --experts 112 --ep 8 --local-topk 2 --hidden-scale 1.0 --cuda-graph --iters 40 --warmup 10 --bf16-gemm-init --flashinfer-autotune",
++  "points": {
++    "primary": [1, 16384, "pf245760"],
++    "secondary": [[1, 32768, "pf229376"], [1, 16384, "pf131072"], [1, 32768, "pf131072"]]
++  },
++  "reps": 5,
++  "min_improvement": 0.0,
++  "rel_err_max": 0.02,
++  "seed": 0,
++  "edit_tree": {"container_path": "/sgl-workspace/sglang/python/sglang"},
++  "mounts": [
++    "/raid/hf/hub:/raid/hf/hub:ro",
++    "/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/k3_opt_history:/workspace/opt_history:ro"
++  ],
++  "shm_size": "32g",
++  "codex_model": "gpt-5.6-luna",
++  "agent": "claude",
++  "claude_model": "us.anthropic.claude-opus-5-5",
++  "render": {
++    "METRIC": "eager chunked-prefill step latency of one Kimi-K3 KDA decoder layer on long-context prompts",
++    "FRAMEWORK": "sglang",
++    "CHECKOUT": "/sgl-workspace/sglang",
++    "MODEL_NAME": "Kimi-K3 (moonshotai/Kimi-K3): one KDA (linear-attention) decoder layer, as it runs on one B200 of the production TP8/EP8 deployment (12 attention heads, 112 local mxfp4 experts, bf16 recurrent state)",
++    "WORKLOAD": "long-context chunked prefill (ForwardMode.EXTEND), one chunk per step, 1 request: a 16,384-token chunk that completes a 262,144-token prompt (primary; prefix 245,760 tokens already processed, their conv + recurrent state carried in; the routed MXFP4 MoE sees ~32k local rows and KDA runs the chunked scan chunk_kda), plus a 32,768-token chunk completing 262,144 (prefix 229,376; ~64k local MoE rows), and 16k and 32k chunks at a 131,072-token prefix (must not regress). For this layer the prefix only enters through the carried-in state, so the chunk length, not the context length, sets the cost.",
++    "DRIVER_ARGS": "--attn-type kda --moe-backend flashinfer_mxfp4 --attn-heads 12 --mamba-ssm-dtype bfloat16 --experts 112 --ep 8 --local-topk 2 --hidden-scale 1.0 --cuda-graph --iters 40 --warmup 10 --bf16-gemm-init --flashinfer-autotune",
++    "POINTS": "1,16384,pf245760;1,32768,pf229376;1,16384,pf131072;1,32768,pf131072",
++    "INSTALL_CMD": "true",
++    "REBUILD_CMD": "find /sgl-workspace/sglang/python/sglang -name __pycache__ -prune -exec rm -rf {} + ; cd /workspace/opt_run && python3 /tmp/kimi_single_layer_decode.py --point 1,2048,pf --attn-type kda --moe-backend flashinfer_mxfp4 --attn-heads 12 --mamba-ssm-dtype bfloat16 --experts 112 --ep 8 --local-topk 2 --hidden-scale 1.0 --cuda-graph --iters 5 --warmup 2 --bf16-gemm-init --flashinfer-autotune && echo LAYER_SMOKE_OK",
++    "ORACLE_URL": "http://172.17.0.1:8805",
++    "OPT_HISTORY": "/workspace/opt_history"
++  }
++}
 diff --git a/scripts-local/vibesim-analysis-container/issue_k3_kda_prefill.json b/scripts-local/vibesim-analysis-container/issue_k3_kda_prefill.json
 new file mode 100644
 index 0000000..f152676
@@ -450,6 +500,54 @@ index 0000000..e2147cd
 +  },
 +  "agent": "claude",
 +  "claude_model": "us.anthropic.claude-opus-5-5"
++}
+diff --git a/scripts-local/vibesim-analysis-container/issue_k3_kda_shapes_claude.json b/scripts-local/vibesim-analysis-container/issue_k3_kda_shapes_claude.json
+new file mode 100644
+index 0000000..fabb5fd
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/issue_k3_kda_shapes_claude.json
+@@ -0,0 +1,42 @@
++{
++  "_note": "SHAPE-MATCHED campaign (user 2026-09-26: KDA and MLA must be judged on the SAME input shapes; e.g. MLA had 1x1M but KDA did not). AGENT = Claude Code (Opus 5.5 via Bedrock). ONE KDA (Kimi Delta Attention, linear-attn) decoder layer of Kimi-K3 on sglang v0.5.20, B200, cookbook production shape (attention TP8 rank = 12 heads, EP8 rank = 112 mxfp4 routed experts, bf16 KDA state). Points = the union of the decode shapes used so far for either layer: 1x1M (primary, as in the MLA decode case), 16x64k, 128x8k, 32x8k, 1x8k. KDA's recurrent state makes its step independent of the context length, so 1x1M and 16x64k are B=1 / B=16 launch-bound decode steps for this layer (the MLA twin's `mix` tag has no meaning for KDA and is omitted). Metric = CUDA-graph replay time. Correctness = output + post-step conv/recurrent state vs a seeded golden from the pristine tree. Driver runs with the production-fidelity flags --bf16-gemm-init (scheduler bf16 GEMM backend init) and --flashinfer-autotune (FlashInfer autotune warmup; effect 0 at B<=128, kept for parity with the prefill/large-batch cases). GPU mode: slurm (K3_GPU_MODE=slurm; agent container has no GPU, every measurement is one sbatch job on partition main).",
++  "case": "k3_kda_shapes_claude",
++  "mode": "open_ended",
++  "framework": "sglang",
++  "judge": "judge_k3.py",
++  "task_template": "agent_task_k3_opt.md",
++  "driver": "kimi_single_layer_decode.py",
++  "codex_image": "rga-local/sglang-k3:v0520-claude",
++  "before_image": "lmsysorg/sglang:v0.5.20",
++  "driver_args": "--attn-type kda --moe-backend flashinfer_mxfp4 --attn-heads 12 --mamba-ssm-dtype bfloat16 --experts 112 --ep 8 --local-topk 2 --hidden-scale 1.0 --cuda-graph --iters 40 --warmup 10 --bf16-gemm-init --flashinfer-autotune",
++  "points": {
++    "primary": [1, 1048576],
++    "secondary": [[16, 65536], [128, 8192], [32, 8192], [1, 8192]]
++  },
++  "reps": 5,
++  "min_improvement": 0.0,
++  "rel_err_max": 0.02,
++  "seed": 0,
++  "edit_tree": {"container_path": "/sgl-workspace/sglang/python/sglang"},
++  "mounts": [
++    "/raid/hf/hub:/raid/hf/hub:ro",
++    "/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/k3_opt_history:/workspace/opt_history:ro"
++  ],
++  "shm_size": "32g",
++  "codex_model": "gpt-5.6-luna",
++  "agent": "claude",
++  "claude_model": "us.anthropic.claude-opus-5-5",
++  "render": {
++    "METRIC": "CUDA-graph decode-step latency of one Kimi-K3 KDA decoder layer",
++    "FRAMEWORK": "sglang",
++    "CHECKOUT": "/sgl-workspace/sglang",
++    "MODEL_NAME": "Kimi-K3 (moonshotai/Kimi-K3): one KDA (linear-attention) decoder layer, as it runs on one B200 of the production TP8/EP8 deployment (12 attention heads, 112 local mxfp4 experts, bf16 recurrent state)",
++    "WORKLOAD": "batched decode, one token per request per step, judged on the SAME five shapes as the MLA layer: B=1 at context 1,048,576 (primary: single-request long-context decode; for KDA the step cost does not depend on the context length, so this is the B=1 launch/latency-bound regime), plus B=16 at 65,536, B=128 at 8,192, B=32 at 8,192 and B=1 at 8,192 (must not regress)",
++    "DRIVER_ARGS": "--attn-type kda --moe-backend flashinfer_mxfp4 --attn-heads 12 --mamba-ssm-dtype bfloat16 --experts 112 --ep 8 --local-topk 2 --hidden-scale 1.0 --cuda-graph --iters 40 --warmup 10 --bf16-gemm-init --flashinfer-autotune",
++    "POINTS": "1,1048576;16,65536;128,8192;32,8192;1,8192",
++    "INSTALL_CMD": "true",
++    "REBUILD_CMD": "find /sgl-workspace/sglang/python/sglang -name __pycache__ -prune -exec rm -rf {} + ; cd /workspace/opt_run && python3 /tmp/kimi_single_layer_decode.py --point 1,8192 --attn-type kda --moe-backend flashinfer_mxfp4 --attn-heads 12 --mamba-ssm-dtype bfloat16 --experts 112 --ep 8 --local-topk 2 --hidden-scale 1.0 --cuda-graph --iters 5 --warmup 2 --bf16-gemm-init --flashinfer-autotune && echo LAYER_SMOKE_OK",
++    "ORACLE_URL": "http://172.17.0.1:8801",
++    "OPT_HISTORY": "/workspace/opt_history"
++  }
 +}
 diff --git a/scripts-local/vibesim-analysis-container/issue_k3_mla.json b/scripts-local/vibesim-analysis-container/issue_k3_mla.json
 new file mode 100644
@@ -636,6 +734,54 @@ index 0000000..49ea3a0
 +  "agent": "claude",
 +  "claude_model": "us.anthropic.claude-opus-5-5"
 +}
+diff --git a/scripts-local/vibesim-analysis-container/issue_k3_mla_lcprefill_claude.json b/scripts-local/vibesim-analysis-container/issue_k3_mla_lcprefill_claude.json
+new file mode 100644
+index 0000000..832957f
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/issue_k3_mla_lcprefill_claude.json
+@@ -0,0 +1,42 @@
++{
++  "_note": "LONG-CONTEXT CHUNKED PREFILL campaign (user 2026-09-27: chunked prefill, 16k/32k per chunk, contexts >= 128k up to 262k, for both MLA and KDA on the SAME shapes). AGENT = Claude Code (Opus 5.5 via Bedrock). ONE MLA decoder layer of Kimi-K3 on sglang v0.5.20, B200, cookbook production shape (12 heads/rank, trtllm_mla prefill backend: MHA_CHUNKED_KV = TRT-LLM ragged fp8 attention over the chunk + chunked prefix-KV attention merged with merge_state, fp8_e4m3 latent KV written per token, EP8 rank = 112 mxfp4 experts). Points are prefill chunks (EXTEND) `B,L,pf<prefix>`: 1 request x L NEW tokens on a <prefix>-token cached context. Primary: the 16,384-token chunk that completes a 262,144-token prompt (prefix 245,760 cached fp8 latent-KV tokens attended through the chunked-prefix path); secondaries: a 32,768-token chunk completing 262,144 (prefix 229,376), and 16k / 32k chunks at a 131,072-token prefix. Metric = eager step time. Correctness = output + written fp8 KV rows vs a seeded golden from the pristine tree, row-wise prefill rule. Production-fidelity driver flags --bf16-gemm-init --flashinfer-autotune. GPU mode: slurm (K3_GPU_MODE=slurm).",
++  "case": "k3_mla_lcprefill_claude",
++  "mode": "open_ended",
++  "framework": "sglang",
++  "judge": "judge_k3.py",
++  "task_template": "agent_task_k3_opt.md",
++  "driver": "kimi_single_layer_decode.py",
++  "codex_image": "rga-local/sglang-k3:v0520-claude",
++  "before_image": "lmsysorg/sglang:v0.5.20",
++  "driver_args": "--attn-type mla --moe-backend flashinfer_mxfp4 --attention-backend cutedsl_mla --attn-heads 12 --kv-cache-dtype fp8_e4m3 --experts 112 --ep 8 --local-topk 2 --hidden-scale 1.0 --cuda-graph --iters 40 --warmup 10 --bf16-gemm-init --flashinfer-autotune",
++  "points": {
++    "primary": [1, 16384, "pf245760"],
++    "secondary": [[1, 32768, "pf229376"], [1, 16384, "pf131072"], [1, 32768, "pf131072"]]
++  },
++  "reps": 5,
++  "min_improvement": 0.0,
++  "rel_err_max": 0.02,
++  "seed": 0,
++  "edit_tree": {"container_path": "/sgl-workspace/sglang/python/sglang"},
++  "mounts": [
++    "/raid/hf/hub:/raid/hf/hub:ro",
++    "/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/k3_opt_history:/workspace/opt_history:ro"
++  ],
++  "shm_size": "32g",
++  "codex_model": "gpt-5.6-luna",
++  "agent": "claude",
++  "claude_model": "us.anthropic.claude-opus-5-5",
++  "render": {
++    "METRIC": "eager chunked-prefill step latency of one Kimi-K3 MLA decoder layer on long-context prompts",
++    "FRAMEWORK": "sglang",
++    "CHECKOUT": "/sgl-workspace/sglang",
++    "MODEL_NAME": "Kimi-K3 (moonshotai/Kimi-K3): one MLA (dense multi-head latent attention) decoder layer, as it runs on one B200 of the production TP8/EP8 deployment (12 attention heads, trtllm_mla chunked-prefill attention over a paged fp8 latent KV, 112 local mxfp4 experts)",
++    "WORKLOAD": "long-context chunked prefill (ForwardMode.EXTEND), one chunk per step, 1 request: a 16,384-token chunk that completes a 262,144-token prompt (primary; prefix 245,760 cached fp8 latent-KV tokens attended through the chunked-prefix path in prefix chunks, merged with the causal attention inside the chunk; the MoE sees ~32k local rows), plus a 32,768-token chunk completing 262,144 (prefix 229,376; ~64k local MoE rows), and 16k and 32k chunks at a 131,072-token prefix (must not regress)",
++    "DRIVER_ARGS": "--attn-type mla --moe-backend flashinfer_mxfp4 --attention-backend cutedsl_mla --attn-heads 12 --kv-cache-dtype fp8_e4m3 --experts 112 --ep 8 --local-topk 2 --hidden-scale 1.0 --cuda-graph --iters 40 --warmup 10 --bf16-gemm-init --flashinfer-autotune",
++    "POINTS": "1,16384,pf245760;1,32768,pf229376;1,16384,pf131072;1,32768,pf131072",
++    "INSTALL_CMD": "true",
++    "REBUILD_CMD": "find /sgl-workspace/sglang/python/sglang -name __pycache__ -prune -exec rm -rf {} + ; cd /workspace/opt_run && python3 /tmp/kimi_single_layer_decode.py --point 1,2048,pf --attn-type mla --moe-backend flashinfer_mxfp4 --attn-heads 12 --attention-backend cutedsl_mla --kv-cache-dtype fp8_e4m3 --experts 112 --ep 8 --local-topk 2 --hidden-scale 1.0 --cuda-graph --iters 5 --warmup 2 --bf16-gemm-init --flashinfer-autotune && echo LAYER_SMOKE_OK",
++    "ORACLE_URL": "http://172.17.0.1:8806",
++    "OPT_HISTORY": "/workspace/opt_history"
++  }
++}
 diff --git a/scripts-local/vibesim-analysis-container/issue_k3_mla_prefill.json b/scripts-local/vibesim-analysis-container/issue_k3_mla_prefill.json
 new file mode 100644
 index 0000000..3344bf7
@@ -764,12 +910,60 @@ index 0000000..438c2c6
 +  "agent": "claude",
 +  "claude_model": "us.anthropic.claude-opus-5-5"
 +}
+diff --git a/scripts-local/vibesim-analysis-container/issue_k3_mla_shapes_claude.json b/scripts-local/vibesim-analysis-container/issue_k3_mla_shapes_claude.json
+new file mode 100644
+index 0000000..05ab551
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/issue_k3_mla_shapes_claude.json
+@@ -0,0 +1,42 @@
++{
++  "_note": "SHAPE-MATCHED campaign (user 2026-09-26: KDA and MLA must be judged on the SAME input shapes). AGENT = Claude Code (Opus 5.5 via Bedrock). ONE MLA (dense multi-head latent attention) decoder layer of Kimi-K3 on sglang v0.5.20, B200, cookbook production shape (12 heads/rank, cutedsl_mla decode over a paged fp8_e4m3 latent KV, EP8 rank = 112 mxfp4 experts). Points = the union of the decode shapes used so far for either layer: 1x1M (primary), 16x64k with per-request mixed context lengths (`mix`: L, 3L/4, L/2, L/4 — the MLA guard against fixed-length scheduling overfits; KDA's twin is uniform since its state makes it length-independent), 128x8k, 32x8k, 1x8k. Metric = CUDA-graph replay time. Correctness = output + written fp8 KV rows vs a seeded golden from the pristine tree. Driver runs with --bf16-gemm-init and --flashinfer-autotune (production fidelity; parity with the prefill/large-batch cases). GPU mode: slurm (K3_GPU_MODE=slurm; agent container has no GPU, every measurement is one sbatch job on partition main).",
++  "case": "k3_mla_shapes_claude",
++  "mode": "open_ended",
++  "framework": "sglang",
++  "judge": "judge_k3.py",
++  "task_template": "agent_task_k3_opt.md",
++  "driver": "kimi_single_layer_decode.py",
++  "codex_image": "rga-local/sglang-k3:v0520-claude",
++  "before_image": "lmsysorg/sglang:v0.5.20",
++  "driver_args": "--attn-type mla --moe-backend flashinfer_mxfp4 --attention-backend cutedsl_mla --attn-heads 12 --kv-cache-dtype fp8_e4m3 --experts 112 --ep 8 --local-topk 2 --hidden-scale 1.0 --cuda-graph --iters 40 --warmup 10 --bf16-gemm-init --flashinfer-autotune",
++  "points": {
++    "primary": [1, 1048576],
++    "secondary": [[16, 65536, "mix"], [128, 8192], [32, 8192], [1, 8192]]
++  },
++  "reps": 5,
++  "min_improvement": 0.0,
++  "rel_err_max": 0.02,
++  "seed": 0,
++  "edit_tree": {"container_path": "/sgl-workspace/sglang/python/sglang"},
++  "mounts": [
++    "/raid/hf/hub:/raid/hf/hub:ro",
++    "/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/k3_opt_history:/workspace/opt_history:ro"
++  ],
++  "shm_size": "32g",
++  "codex_model": "gpt-5.6-luna",
++  "agent": "claude",
++  "claude_model": "us.anthropic.claude-opus-5-5",
++  "render": {
++    "METRIC": "CUDA-graph decode-step latency of one Kimi-K3 MLA decoder layer",
++    "FRAMEWORK": "sglang",
++    "CHECKOUT": "/sgl-workspace/sglang",
++    "MODEL_NAME": "Kimi-K3 (moonshotai/Kimi-K3): one MLA (dense multi-head latent attention) decoder layer, as it runs on one B200 of the production TP8/EP8 deployment (12 attention heads, cutedsl_mla decode over a paged fp8 latent KV, 112 local mxfp4 experts)",
++    "WORKLOAD": "batched decode, one token per request per step, judged on the SAME five shapes as the KDA layer: B=1 at context 1,048,576 (primary: single-request long-context decode, attention reads 1M fp8 latent-KV tokens), plus B=16 at 65,536 with per-request context lengths cycling L, 3L/4, L/2, L/4 (`mix` tag), B=128 at 8,192, B=32 at 8,192 and B=1 at 8,192 (must not regress)",
++    "DRIVER_ARGS": "--attn-type mla --moe-backend flashinfer_mxfp4 --attention-backend cutedsl_mla --attn-heads 12 --kv-cache-dtype fp8_e4m3 --experts 112 --ep 8 --local-topk 2 --hidden-scale 1.0 --cuda-graph --iters 40 --warmup 10 --bf16-gemm-init --flashinfer-autotune",
++    "POINTS": "1,1048576;16,65536,mix;128,8192;32,8192;1,8192",
++    "INSTALL_CMD": "true",
++    "REBUILD_CMD": "find /sgl-workspace/sglang/python/sglang -name __pycache__ -prune -exec rm -rf {} + ; cd /workspace/opt_run && python3 /tmp/kimi_single_layer_decode.py --point 1,8192 --attn-type mla --moe-backend flashinfer_mxfp4 --attention-backend cutedsl_mla --attn-heads 12 --kv-cache-dtype fp8_e4m3 --experts 112 --ep 8 --local-topk 2 --hidden-scale 1.0 --cuda-graph --iters 5 --warmup 2 --bf16-gemm-init --flashinfer-autotune && echo LAYER_SMOKE_OK",
++    "ORACLE_URL": "http://172.17.0.1:8802",
++    "OPT_HISTORY": "/workspace/opt_history"
++  }
++}
 diff --git a/scripts-local/vibesim-analysis-container/judge_k3.py b/scripts-local/vibesim-analysis-container/judge_k3.py
 new file mode 100644
-index 0000000..306f5f2
+index 0000000..25b5b3a
 --- /dev/null
 +++ b/scripts-local/vibesim-analysis-container/judge_k3.py
-@@ -0,0 +1,365 @@
+@@ -0,0 +1,369 @@
 +#!/usr/bin/env python3
 +"""Open-ended judge for the Kimi-K3 single-decoder-layer case (no PR answer key).
 +
@@ -878,7 +1072,11 @@ index 0000000..306f5f2
 +                "--shm-size", cfg.get("shm_size", "32g"),
 +                "-e", "CUDA_VISIBLE_DEVICES=0", "-e", "HF_HUB_OFFLINE=1",
 +                "-e", "SGLANG_OPT_FUSED_KDA_VERIFY=0", "-e", "TOKENIZERS_PARALLELISM=false",
-+                "-v", "/raid/yilegu/flashinfer_cache:/root/.cache/flashinfer:ro"]
++                # rw (was ro until 2026-09-26): with --flashinfer-autotune the FlashInfer autotuner
++                # persists newly tuned shapes into k3_flashinfer_autotune_cache.json inside this
++                # mount; a read-only mount made every point whose shape was not cached yet
++                # (MLA 1x1M: trtllm_batch_decode_mla) fail with EROFS, i.e. a false FAIL.
++                "-v", "/raid/yilegu/flashinfer_cache:/root/.cache/flashinfer"]
 +        for m in cfg.get("mounts", []):
 +            argv += ["-v", m]
 +        if tree_mount is not None:
@@ -1137,10 +1335,10 @@ index 0000000..306f5f2
 +    main()
 diff --git a/scripts-local/vibesim-analysis-container/run_iter_opt_eval.sh b/scripts-local/vibesim-analysis-container/run_iter_opt_eval.sh
 new file mode 100755
-index 0000000..c124b60
+index 0000000..18d2d73
 --- /dev/null
 +++ b/scripts-local/vibesim-analysis-container/run_iter_opt_eval.sh
-@@ -0,0 +1,236 @@
+@@ -0,0 +1,304 @@
 +#!/usr/bin/env bash
 +# Iterative optimizer eval (de-leaked, config-driven, multi-case).
 +#
@@ -1165,6 +1363,10 @@ index 0000000..c124b60
 +#   START_TREE=<dir>   continuous loop: seed the agent tree from this (current best) tree and
 +#                      judge against its latency (K3 judge only; goldens stay pristine)
 +#   MIN_IMPROVEMENT=<f> override the judge's min_improvement (0 = any 3-sigma gain)
++#   K3_GPU_MODE=slurm  (user 2026-09-26) the agent container gets NO GPU; its driver is replaced by
++#                      k3_gpu_shim.py and a host broker (k3_gpu_broker.py) runs every measurement as
++#                      its own `sbatch` job on partition main (K3_SLURM_PARTITION); the judge runs as
++#                      one sbatch job too. A GPU is held only while something is actually profiled.
 +#
 +# Config keys beyond the judge's (all optional unless noted):
 +#   codex_image (req), model_snap, gpu, case, judge (script in this dir), driver (file copied
@@ -1212,9 +1414,27 @@ index 0000000..c124b60
 +GPU="${DOCKER_GPU_ARG:-\"device=$GPU_DEV\"}"
 +SITE="/opt/venv/lib/python3.12/site-packages/$SITE_FW"
 +OUT="$HERE/iter_opt_eval_${CASE}"; mkdir -p "$OUT" "$FICACHE" "$GOLDEN_DIR"
++K3_GPU_MODE="${K3_GPU_MODE:-direct}"; K3_SLURM_PARTITION="${K3_SLURM_PARTITION:-main}"
++BEFORE_IMG="$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('before_image',''))" "$CONFIG")"
++
++# submit a command as one slurm GPU job (slurm_gpu.sh -> k3_slurm_step.sh guards against foreign
++# tenants), wait for it to leave the queue, echo its output file's tail. Returns the step's rc.
++slurm_run () { # $1 job-name $2 output-file $3... command
++  local name="$1" outf="$2"; shift 2
++  local job; job="$(sbatch --parsable --partition="$K3_SLURM_PARTITION" --job-name="$name" --output="$outf" \
++                 "$HERE/slurm_gpu.sh" "$HERE/k3_slurm_step.sh" "$@" | cut -d';' -f1)"
++  [ -n "$job" ] || { echo "!! sbatch failed for $name"; return 1; }
++  echo "== slurm job $job ($name) submitted; output -> $outf"
++  while squeue -h -j "$job" -o %T 2>/dev/null | grep -q .; do sleep 15; done
++  sleep 2
++  local rc; rc="$(grep -a '^\[step\] EXIT_RC=' "$outf" 2>/dev/null | tail -1 | cut -d= -f2)"
++  echo "== slurm job $job finished rc=${rc:-?}"; tail -5 "$outf" 2>/dev/null
++  [ -n "$rc" ] && return "$rc"; return 1
++}
 +
 +# ---- render the task (python, not sed: REBUILD_CMDs contain '&&' which sed treats specially)
 +TASK_RUNTIME="$OUT/agent_task_rendered.md"
++[ "$K3_GPU_MODE" = slurm ] && export GPU_NOTE_FILE="$HERE/gpu_note_slurm.md"
 +python3 - "$CONFIG" "$TASK_TMPL" "$TASK_RUNTIME" <<'PY'
 +import json,sys
 +c=json.load(open(sys.argv[1])); r=dict(c.get("render",{}))
@@ -1223,6 +1443,9 @@ index 0000000..c124b60
 +r.setdefault("WORKLOAD","short-prompt decode"); r.setdefault("TOKENS", c.get("tokens",8))
 +r.setdefault("REBUILD_CMD","python3 setup.py build_ext --inplace")
 +r["MODEL_SNAP"]=c.get("model_snap","")
++import os
++note=os.environ.get("GPU_NOTE_FILE","")
++r.setdefault("GPU_NOTE", open(note).read().strip() if note and os.path.exists(note) else "")
 +t=open(sys.argv[2]).read()
 +for k in sorted(r, key=len, reverse=True):   # longest first: $MODEL_SNAP before $MODEL
 +    t=t.replace("$"+k, str(r[k]))
@@ -1276,7 +1499,20 @@ index 0000000..c124b60
 +    agent_env=(-e CLAUDE_CODE_USE_BEDROCK=1 -e AWS_REGION="${AWS_REGION:-us-east-1}" -e AWS_PROFILE="${AWS_PROFILE:-default}"
 +               -e IS_SANDBOX=1 -e DISABLE_AUTOUPDATER=1 -v "$HOME/.aws:/root/.aws:ro")
 +  fi
-+  docker run -d --name "$cname" --gpus "$GPU" "${agent_env[@]}" \
++  local -a gpu_arg=(--gpus "$GPU")
++  local broker_pid=""
++  if [ "$K3_GPU_MODE" = slurm ]; then
++    # no GPU in the agent container; measurements go through the broker (see header)
++    gpu_arg=()
++    mkdir -p "${log}_gpu" "${log}_opt_run_live"
++    extra+=(-v "${log}_gpu:/workspace/.gpu" -v "${log}_opt_run_live:/workspace/opt_run")
++    if [ ! -d "$OUT/jit_cache" ]; then   # sglang's prebuilt JIT kernels from the image, persisted per case
++      tmpj="jitseed_${CASE}_$$"; docker create --name "$tmpj" "$BEFORE_IMG" true >/dev/null
++      docker cp "$tmpj:/root/.cache/sglang/jit" "$OUT/jit_cache" 2>/dev/null || mkdir -p "$OUT/jit_cache"
++      docker rm -f "$tmpj" >/dev/null
++    fi
++  fi
++  docker run -d --name "$cname" "${gpu_arg[@]}" "${agent_env[@]}" \
 +    -e CUDA_VISIBLE_DEVICES=0 -e HF_HUB_OFFLINE=1 \
 +    -e SGLANG_OPT_FUSED_KDA_VERIFY=0 -e TOKENIZERS_PARALLELISM=false \
 +    -e CODEX_HOME=/root/.codex-eval \
@@ -1289,6 +1525,24 @@ index 0000000..c124b60
 +  docker cp "$HERE/$DRIVER" "$cname:/tmp/$(basename "$DRIVER")"
 +  [ "$DRIVER" != "extract_and_profile.py" ] || true
 +  docker exec "$cname" mkdir -p /workspace/opt_run
++  if [ "$K3_GPU_MODE" = slurm ]; then
++    docker exec "$cname" mkdir -p /tmp/k3_driver_src
++    docker exec "$cname" mv "/tmp/$(basename "$DRIVER")" "/tmp/k3_driver_src/$(basename "$DRIVER")"
++    docker exec "$cname" chmod 444 "/tmp/k3_driver_src/$(basename "$DRIVER")"
++    docker cp "$HERE/k3_gpu_shim.py" "$cname:/tmp/k3_gpu_shim.py"
++    docker cp "$HERE/k3_gpu_shim.py" "$cname:/tmp/$(basename "$DRIVER")"
++    docker cp "$HERE/gpu_run.sh" "$cname:/tmp/gpu_run.sh"
++    docker exec "$cname" chmod +x /tmp/gpu_run.sh /tmp/k3_gpu_shim.py
++    local -a bmounts=()
++    for m in "${MOUNTS[@]:-}"; do [ -n "$m" ] && bmounts+=(--mount "$m"); done
++    cp "$HERE/$DRIVER" "${log}_gpu/$(basename "$DRIVER")"   # the tree the agent measures with = this driver
++    nohup python3 "$HERE/k3_gpu_broker.py" --dir "${log}_gpu" --tree "$tree" --edit-path "$EDIT_TREE_PATH" \
++      --driver "${log}_gpu/$(basename "$DRIVER")" --opt-run "${log}_opt_run_live" --jit-cache "$OUT/jit_cache" \
++      --image "$BEFORE_IMG" --shm "${SHM:-32g}" --partition "$K3_SLURM_PARTITION" --job-prefix "k3m_${CASE}_${k}" \
++      "${bmounts[@]}" > "${log}_gpu/broker.log" 2>&1 &
++    broker_pid=$!
++    echo "== [$k] slurm mode: agent container has no GPU; broker pid $broker_pid (${log}_gpu/broker.log)"
++  fi
 +
 +  set +e
 +  if [ "$AGENT_KIND" = claude ]; then
@@ -1306,6 +1560,9 @@ index 0000000..c124b60
 +  local acode=$?
 +  set -e
 +  echo "== [$k] agent exit=$acode (transcript: ${log}_agent.log)"
++  # slurm mode: a request the agent filed just before its timeout would otherwise become a stray
++  # GPU job after the smoke; drop anything still queued (the broker only serves *.json).
++  [ "$K3_GPU_MODE" = slurm ] && rm -f "${log}_gpu"/req/*.json 2>/dev/null
 +
 +  docker cp "$cname:/workspace/opt_run" "${log}_opt_run" >/dev/null 2>&1 \
 +    && echo "== [$k] saved iteration workspace -> ${log}_opt_run" \
@@ -1327,6 +1584,7 @@ index 0000000..c124b60
 +  if ! docker exec --workdir "$R_CHECKOUT" "$cname" \
 +        bash -lc "$R_REBUILD" > "${log}_build.log" 2>&1; then
 +    echo "!! [$k] BUILD FAILED -> FAIL"; tail -15 "${log}_build.log"
++    if [ -n "$broker_pid" ]; then touch "${log}_gpu/STOP"; sleep 3; kill "$broker_pid" 2>/dev/null; fi
 +    echo '{"trial":'"$k"',"verdict":"FAIL","reason":"agent left source non-compiling"}' > "${log}_verdict.json"
 +    docker rm -f "$cname" >/dev/null 2>&1 || true; return 0
 +  fi
@@ -1340,7 +1598,15 @@ index 0000000..c124b60
 +
 +  echo "== [$k] judging ($JUDGE)"
 +  set +e
-+  if [ -n "$tree" ]; then
++  if [ -n "$tree" ] && [ "$K3_GPU_MODE" = slurm ]; then
++    if [ -n "$broker_pid" ]; then touch "${log}_gpu/STOP"; sleep 3; kill "$broker_pid" 2>/dev/null; fi
++    slurm_run "k3j_${CASE}_${k}" "${log}_judge_slurm.out" \
++      python3 "$HERE/$JUDGE" --agent-container "$cname" --config "$CONFIG" \
++      --golden-dir "$GOLDEN_DIR" --out "${log}_verdict.json" \
++      --tree-dir "$tree" --pristine-dir "$PRISTINE" \
++      ${START_TREE:+--baseline-tree "$START_TREE"} \
++      ${MIN_IMPROVEMENT:+--min-improvement "$MIN_IMPROVEMENT"}
++  elif [ -n "$tree" ]; then
 +    python3 "$HERE/$JUDGE" --agent-container "$cname" --config "$CONFIG" \
 +      --golden-dir "$GOLDEN_DIR" --out "${log}_verdict.json" \
 +      --tree-dir "$tree" --pristine-dir "$PRISTINE" \

@@ -1,0 +1,293 @@
+diff -ruN -x __pycache__ -x '*.pyc' a/kernels/jit/csrc/kimi_k3/attn_res/fused_tma.cuh b/kernels/jit/csrc/kimi_k3/attn_res/fused_tma.cuh
+--- a/kernels/jit/csrc/kimi_k3/attn_res/fused_tma.cuh	2026-09-27 00:19:33.227205339 -0700
++++ b/kernels/jit/csrc/kimi_k3/attn_res/fused_tma.cuh	2026-09-27 02:22:52.158100137 -0700
+@@ -699,6 +699,155 @@
+   __syncthreads();
+   device::distributed::McBarrier::arrive_at<true>(params.sem_local, params.sem_mc, params.world_size, exit_base);
+ }
++
++// Register-direct aggregation for decode-sized batches (one token per CTA,
++// T <= #SMs). With nvb + 1 rows of one token there is too little data to
++// hide the TMA kernel's serial phases (add -> store -> proxy fence -> bulk
++// reload -> TMEM staging); here each of the kDim / 8 threads owns one 16B
++// vector of every row, so the residual/addend/bank/cw/ow loads go out in a
++// single round trip. Same math as KimiK3AttnResTrait::forward (fp32 scores,
++// max-shifted exp2 softmax, fma mixing in row order, fused out norm); only
++// the fp32 reduction order of the row sums differs. The pending add keeps
++// the explicit add.rn + RN cast, so prefix_out and the bank row are
++// bit-identical to the TMA path.
++template <int64_t kDim, uint32_t kNvb>
++struct AttnResDirect {
++  static constexpr uint32_t kVecElems = 8;
++  static constexpr uint32_t kNumThreads = kDim / kVecElems;
++  static constexpr uint32_t kNumWarps = kNumThreads / device::kWarpThreads;
++  static constexpr uint32_t kRows = kNvb + 1;  // bank rows + prefix row
++  static_assert(kDim % (kVecElems * device::kWarpThreads) == 0);
++  static_assert(kNumThreads <= 1024);
++  static_assert(2 * kRows <= device::kWarpThreads);
++};
++
++template <int64_t kDim, uint32_t kNvb>
++__global__ void __launch_bounds__(AttnResDirect<kDim, kNvb>::kNumThreads, 1)
++    attn_res_direct_kernel(const __grid_constant__ AttnResTMAParams params) {
++  using namespace device;
++  using D = AttnResDirect<kDim, kNvb>;
++  using vec_t = AlignedVector<bf16x2_t, 4>;
++  constexpr uint32_t kRows = D::kRows;
++  __shared__ float red_rows[D::kNumWarps][2 * kRows];
++  __shared__ float tot_rows[2 * kRows];
++  __shared__ float red_sq[D::kNumWarps];
++
++  const uint32_t tx = threadIdx.x;
++  const uint32_t warp_id = tx / kWarpThreads;
++  const uint32_t lane_id = tx % kWarpThreads;
++
++  // Static weights: safe to read before the dependency wait.
++  vec_t cw_v, ow_v;
++  cw_v.load(params.cw, tx);
++  ow_v.load(params.ow, tx);
++  PDLWaitPrimary<true>();
++
++  for (uint32_t token = blockIdx.x; token < params.num_tokens; token += gridDim.x) {
++    const int64_t row_off = static_cast<int64_t>(token) * (kDim / D::kVecElems);
++    const bf16_t* bank_tok = params.bank + static_cast<int64_t>(token) * params.stride_bm;
++    vec_t rows[kRows];
++#pragma unroll
++    for (uint32_t r = 0; r < kNvb; ++r) {
++      rows[r].load(bank_tok + r * kDim, tx);
++    }
++    if (params.addend != nullptr) {
++      vec_t va, vb;
++      va.load(params.residual, row_off + tx);
++      vb.load(params.addend, row_off + tx);
++#pragma unroll
++      for (uint32_t j = 0; j < 4; ++j) {
++        const auto fa = cast<float2>(va[j]);
++        const auto fb = cast<float2>(vb[j]);
++        float2 fs;
++        // Explicit non-ftz fp32 add, as in attn_res_fused_add_kernel.
++        asm("add.rn.f32 %0, %1, %2;" : "=f"(fs.x) : "f"(fa.x), "f"(fb.x));
++        asm("add.rn.f32 %0, %1, %2;" : "=f"(fs.y) : "f"(fa.y), "f"(fb.y));
++        rows[kNvb][j] = __float22bfloat162_rn(fs);
++      }
++      rows[kNvb].store(params.prefix_out, row_off + tx);
++    } else {
++      rows[kNvb].load(params.prefix_sum, row_off + tx);
++    }
++    if (token + gridDim.x >= params.num_tokens) PDLTriggerSecondary<true>();
++    if (params.prefix_dst != nullptr) {
++      rows[kNvb].store(params.prefix_dst + static_cast<int64_t>(token) * params.stride_bm, tx);
++    }
++
++    // Score pass: per-row sum of squares and cw dot.
++    const auto* q2 = reinterpret_cast<const bf16x2_t*>(&cw_v);
++    float part[2 * kRows];
++#pragma unroll
++    for (uint32_t r = 0; r < kRows; ++r) {
++      float2 rms2 = make_float2(0.f, 0.f);
++      float2 dot2 = make_float2(0.f, 0.f);
++#pragma unroll
++      for (uint32_t j = 0; j < 4; ++j) {
++        const auto f = cast<float2>(rows[r][j]);
++        rms2 = fma_f32x2(f, f, rms2);
++        dot2 = fma_f32x2(f, cast<float2>(q2[j]), dot2);
++      }
++      part[2 * r] = warp::reduce_sum(rms2.x + rms2.y);
++      part[2 * r + 1] = warp::reduce_sum(dot2.x + dot2.y);
++    }
++    if (lane_id == 0) {
++#pragma unroll
++      for (uint32_t i = 0; i < 2 * kRows; ++i) red_rows[warp_id][i] = part[i];
++    }
++    __syncthreads();
++    if (warp_id == 0 && lane_id < 2 * kRows) {
++      float t = 0.f;
++#pragma unroll
++      for (uint32_t w = 0; w < D::kNumWarps; ++w) t += red_rows[w][lane_id];
++      tot_rows[lane_id] = t;
++    }
++    __syncthreads();
++
++    constexpr float kScale = 1.f / static_cast<float>(kDim);
++    float logit[kRows];
++    float row_max = -FLT_MAX;
++#pragma unroll
++    for (uint32_t r = 0; r < kRows; ++r) {
++      logit[r] = tot_rows[2 * r + 1] * rsqrtf(tot_rows[2 * r] * kScale + params.eps);
++      row_max = fmaxf(row_max, logit[r]);
++    }
++    float weight_sum = 0.f;
++    float2 acc[4] = {};
++#pragma unroll
++    for (uint32_t r = 0; r < kRows; ++r) {
++      const float w = exp2f((logit[r] - row_max) * math::log2e);
++      weight_sum += w;
++      const float2 w2 = make_float2(w, w);
++#pragma unroll
++      for (uint32_t j = 0; j < 4; ++j) {
++        acc[j] = fma_f32x2(w2, cast<float2>(rows[r][j]), acc[j]);
++      }
++    }
++
++    // Fused out norm: mixed = acc / weight_sum, out = rmsnorm(mixed) * ow.
++    const float inv_sum = 1.f / weight_sum;
++    float2 sq2 = make_float2(0.f, 0.f);
++#pragma unroll
++    for (uint32_t j = 0; j < 4; ++j) sq2 = fma_f32x2(acc[j], acc[j], sq2);
++    const float sq = warp::reduce_sum(sq2.x + sq2.y);
++    if (lane_id == 0) red_sq[warp_id] = sq;
++    __syncthreads();
++    float total_sq = 0.f;
++#pragma unroll
++    for (uint32_t w = 0; w < D::kNumWarps; ++w) total_sq += red_sq[w];
++    const float scale = inv_sum * rsqrtf(total_sq * inv_sum * inv_sum / static_cast<float>(kDim) + params.eps);
++    const float2 scale2 = make_float2(scale, scale);
++    const auto* o2 = reinterpret_cast<const bf16x2_t*>(&ow_v);
++    vec_t out_vec;
++#pragma unroll
++    for (uint32_t j = 0; j < 4; ++j) {
++      out_vec[j] = cast<bf16x2_t>(mul_f32x2(mul_f32x2(acc[j], scale2), cast<float2>(o2[j])));
++    }
++    out_vec.store(params.out, row_off + tx);
++    // red_rows / tot_rows / red_sq are reused by the next token.
++    __syncthreads();
++  }
++}
++
+ using host::distributed::CommunicatorRef;
+ 
+ // Host launcher: constexpr kernel table over nvb.
+@@ -735,6 +884,76 @@
+   }
+   static constexpr auto kAddTable = make_add_table(std::make_index_sequence<kMaxBankRows>{});
+ 
++  template <std::size_t... I>
++  static constexpr auto make_direct_table(std::index_sequence<I...>) {
++    return std::array<KernelFn, kMaxBankRows + 1>{nullptr, attn_res_direct_kernel<kDim, I + 1>...};
++  }
++  static constexpr auto kDirectTable = make_direct_table(std::make_index_sequence<kMaxBankRows>{});
++
++  // Register-direct path (attn_res_direct_kernel) for decode-sized batches.
++  // prefix_b given: prefix_out = prefix_a + prefix_b is materialized and
++  // aggregated (run_add semantics); otherwise prefix_a is aggregated as is
++  // (run semantics) and prefix_out is ignored.
++  static void run_direct(
++      const tvm::ffi::TensorView prefix_a,
++      std::optional<tvm::ffi::TensorView> prefix_b,
++      const tvm::ffi::TensorView bank,
++      const tvm::ffi::TensorView cw,
++      const tvm::ffi::TensorView ow,
++      const tvm::ffi::TensorView out,
++      const tvm::ffi::TensorView prefix_out,
++      int64_t nvb,
++      double eps,
++      bool write_prefix) {
++    using namespace host;
++
++    auto T_ = SymbolicSize{"num_tokens"};
++    auto H_ = SymbolicSize{"hidden_size"};
++    auto NB_ = SymbolicSize{"num_bank_slots"};
++    auto device = SymbolicDevice{};
++    device.set_options<kDLCUDA>();
++
++    TensorMatcher({T_, H_}).with_dtype<bf16_t>().with_device(device).verify(prefix_a).verify(out).verify(prefix_out);
++    if (prefix_b.has_value()) {
++      TensorMatcher({T_, H_}).with_dtype<bf16_t>().with_device(device).verify(prefix_b.value());
++    }
++    TensorMatcher({T_, NB_, H_}).with_dtype<bf16_t>().with_device(device).verify(bank);
++    TensorMatcher({H_}).with_dtype<bf16_t>().with_device(device).verify(cw).verify(ow);
++
++    const auto num_tokens = static_cast<int64_t>(T_.unwrap());
++    const auto H = static_cast<int64_t>(H_.unwrap());
++    const auto NB = static_cast<int64_t>(NB_.unwrap());
++    RuntimeCheck(H == kDim, "attn_res_direct: H must be ", kDim, ", got ", H);
++    RuntimeCheck(1 <= nvb && nvb <= kMaxBankRows && nvb <= NB, "attn_res_direct: invalid nvb=", nvb, " NB=", NB);
++    RuntimeCheck(!write_prefix || nvb < NB, "attn_res_direct: write_prefix targets bank row nvb, needs nvb < NB");
++    if (num_tokens == 0) return;
++
++    const auto num_sm = runtime::get_sm_count(device.unwrap().device_id);
++    const auto grid = std::min<int64_t>((int64_t)num_sm, num_tokens);
++    const bool add = prefix_b.has_value();
++    const auto params = AttnResTMAParams{
++        .prefix_sum = static_cast<const bf16_t*>(prefix_a.data_ptr()),
++        .bank = static_cast<const bf16_t*>(bank.data_ptr()),
++        .cw = static_cast<const bf16_t*>(cw.data_ptr()),
++        .ow = static_cast<const bf16_t*>(ow.data_ptr()),
++        .out = static_cast<bf16_t*>(out.data_ptr()),
++        .prefix_dst = write_prefix ? static_cast<bf16_t*>(bank.data_ptr()) + nvb * H : nullptr,
++        .input_mc = nullptr,
++        .residual = add ? static_cast<const bf16_t*>(prefix_a.data_ptr()) : nullptr,
++        .prefix_out = add ? static_cast<bf16_t*>(prefix_out.data_ptr()) : nullptr,
++        .addend = add ? static_cast<const bf16_t*>(prefix_b.value().data_ptr()) : nullptr,
++        .sem_local = nullptr,
++        .sem_mc = nullptr,
++        .output_mc = nullptr,
++        .world_size = 0,
++        .rank = 0,
++        .stride_bm = NB * H,
++        .eps = static_cast<float>(eps),
++        .num_tokens = static_cast<uint32_t>(num_tokens),
++    };
++    LaunchKernel(grid, AttnResDirect<kDim, 1>::kNumThreads, device.unwrap()).enable_pdl(true)(kDirectTable[nvb], params);
++  }
++
+   static void run_add(
+       const tvm::ffi::TensorView prefix_a,
+       const tvm::ffi::TensorView prefix_b,
+diff -ruN -x __pycache__ -x '*.pyc' a/kernels/ops/kimi_k3/attn_res.py b/kernels/ops/kimi_k3/attn_res.py
+--- a/kernels/ops/kimi_k3/attn_res.py	2026-09-27 00:19:33.227205339 -0700
++++ b/kernels/ops/kimi_k3/attn_res.py	2026-09-27 02:22:52.159100054 -0700
+@@ -58,6 +58,7 @@
+                 ("run_pull_rs", f"AttnResFusedTmaKernel<{args}>::run_pull_rs"),
+                 ("run_direct_ag", f"AttnResFusedTmaKernel<{args}>::run_direct_ag"),
+                 ("run_add", f"AttnResFusedTmaKernel<{args}>::run_add"),
++                ("run_direct", f"AttnResFusedTmaKernel<{args}>::run_direct"),
+             ],
+             extra_cuda_cflags=["-O3", "--use_fast_math"],
+         )
+@@ -84,6 +85,13 @@
+ }
+ 
+ 
++# Decode-sized batches (one token per CTA) take the register-direct kernel
++# (attn_res_direct_kernel): with nvb + 1 rows per token the TMA kernel's
++# serial add/fence/bulk-reload/TMEM phases dominate its latency. Capped at 32
++# so larger batches keep the TMA path bit-for-bit.
++_DIRECT_MAX_TOKENS: int = 32
++
++
+ def _tuning(nvb: int, num_tokens: int) -> tuple[int, int, int]:
+     """(chunk_rows, occupancy, consumer_regs) for this aggregation point.
+ 
+@@ -184,9 +192,13 @@
+                  (bit-exact copy, fused into the score pass which already
+                  has the row in registers); requires NB > nvb
+     """
+-    _jit_fused_tma_module(*_tuning(nvb, prefix_sum.shape[0])).run(
+-        prefix_sum, bank, cw, ow, out, nvb, eps, write_prefix
+-    )
++    module = _jit_fused_tma_module(*_tuning(nvb, prefix_sum.shape[0]))
++    if prefix_sum.shape[0] <= _DIRECT_MAX_TOKENS:
++        module.run_direct(
++            prefix_sum, None, bank, cw, ow, out, out, nvb, eps, write_prefix
++        )
++        return
++    module.run(prefix_sum, bank, cw, ow, out, nvb, eps, write_prefix)
+ 
+ 
+ def attn_res_fused_tma_add(
+@@ -205,7 +217,13 @@
+     """attn_res_fused_tma with the pending residual add folded in: writes
+     prefix_out = prefix_a + prefix_b (bit-identical to the bf16 torch add) and
+     aggregates it. prefix_out must not alias prefix_a / prefix_b."""
+-    _jit_fused_tma_module(*_tuning(nvb, prefix_a.shape[0])).run_add(
++    module = _jit_fused_tma_module(*_tuning(nvb, prefix_a.shape[0]))
++    if prefix_a.shape[0] <= _DIRECT_MAX_TOKENS:
++        module.run_direct(
++            prefix_a, prefix_b, bank, cw, ow, out, prefix_out, nvb, eps, write_prefix
++        )
++        return
++    module.run_add(
+         prefix_a, prefix_b, bank, cw, ow, out, prefix_out, nvb, eps, write_prefix
+     )
+ 

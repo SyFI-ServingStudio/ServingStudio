@@ -6,7 +6,9 @@
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 GPU_IDX="$1"; shift; CASES="${CASES:-mla kda}"
-export DOCKER_GPU_ARG="\"device=$GPU_IDX\""
+# <gpu> = index (direct docker) or `slurm`: keep the DOCKER_GPU_ARG exported by slurm_gpu.sh, i.e. run as
+#   sbatch slurm_gpu.sh k3_slurm_step.sh env CASES="..." ./recheck_best_trees_seeds.sh slurm 1 2
+[ "$GPU_IDX" = slurm ] || export DOCKER_GPU_ARG="\"device=$GPU_IDX\""
 for seed in "$@"; do
   for case_name in $CASES; do
     OUT="$HERE/iter_opt_eval_k3_${case_name}"

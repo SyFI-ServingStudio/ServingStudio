@@ -84,6 +84,31 @@ validate_chain "$HERE/iter_opt_eval_k3_kda/best_tree" "$CB/best_tree" "$OUT"/sgl
 # unaccepted but exact and worth keeping (below the 3-sigma floor on the primary point):
 tree_diff "$CB/best_tree" "$CB/trial_2_tree_judged" "$OUT/sglang/claude/UNACCEPTED_kda_prefill_r2_cuda_kda_chunk_h_hscan.patch"
 
+echo "== sglang Claude SHAPE-MATCHED decode chains (seed = the b512 Claude best tree of the same layer; slurm mode)"
+CB="$HERE/iter_opt_eval_k3_kda_shapes_claude"
+if [ -d "$CB/trial_3_tree_judged" ]; then
+  tree_diff "$HERE/iter_opt_eval_k3_kda_b512_claude/best_tree" "$CB/trial_1_tree_judged" "$OUT/sglang/claude/kda_shapes_01_r1_split_moe_front_small_m_alt_stream_tgv_fp32.patch"
+  tree_diff "$CB/trial_1_tree_judged" "$CB/trial_2_tree_judged" "$OUT/sglang/claude/kda_shapes_02_r2_l2_prefetch_oproj_routed_front.patch"
+  tree_diff "$CB/trial_2_tree_judged" "$CB/trial_3_tree_judged" "$OUT/sglang/claude/kda_shapes_03_r3_fused_decode_attnres_tuning.patch"
+  validate_chain "$HERE/iter_opt_eval_k3_kda_b512_claude/best_tree" "$CB/best_tree" "$OUT"/sglang/claude/kda_shapes_0*.patch
+fi
+CB="$HERE/iter_opt_eval_k3_mla_shapes_claude"
+if [ -d "$CB/trial_2_tree_judged" ]; then
+  tree_diff "$HERE/iter_opt_eval_k3_mla_b512_claude/best_tree" "$CB/trial_1_tree_judged" "$OUT/sglang/claude/mla_shapes_01_r1_b1_kv_split8_lse_merge_kvconcat_q_replicas.patch"
+  tree_diff "$CB/trial_1_tree_judged" "$CB/trial_2_tree_judged" "$OUT/sglang/claude/mla_shapes_02_r2_attnres_cluster_small_moe_finalize_rmsnorm.patch"
+  validate_chain "$HERE/iter_opt_eval_k3_mla_b512_claude/best_tree" "$CB/best_tree" "$OUT"/sglang/claude/mla_shapes_0*.patch
+fi
+echo "== sglang Claude LONG-CONTEXT PREFILL chains (seed = the prefill Claude best tree; slurm mode)"
+for c in kda mla; do
+  CB="$HERE/iter_opt_eval_k3_${c}_lcprefill_claude"; prev="$HERE/iter_opt_eval_k3_${c}_prefill_claude/best_tree"; n=0; chain=()
+  for k in 1 2 3; do
+    t="$CB/trial_${k}_tree_judged"; v="$CB/trial_${k}_verdict.json"
+    [ -d "$t" ] && [ -f "$v" ] && grep -q '"verdict": "PASS"' "$v" || continue
+    n=$((n+1)); p="$OUT/sglang/claude/${c}_lcprefill_0${n}_r${k}.patch"; tree_diff "$prev" "$t" "$p"; chain+=("$p"); prev="$t"
+  done
+  [ "$n" -gt 0 ] && validate_chain "$HERE/iter_opt_eval_k3_${c}_prefill_claude/best_tree" "$CB/best_tree" "${chain[@]}"
+done
+
 echo "== harness (workspace branch kimi-k3-loop vs its base)"
 BASE="$(git -C "$WS" merge-base kimi-k3-loop yilegu/dev)"
 C=scripts-local/vibesim-analysis-container
