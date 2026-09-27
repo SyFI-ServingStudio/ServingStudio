@@ -21,7 +21,8 @@ OUT="${OUT:-$HERE/context_k3}"
 REPO_OUT="$OUT/repo"
 declare -A BAKE=( [k3_kda]=predict_kimi_k3_b200_rank1_layer_kda [k3_mla]=predict_kimi_k3_b200_rank1_layer_mla
                   [k3_kda_b512]=predict_kimi_k3_b200_rank1_layer_kda_b512 [k3_mla_b512]=predict_kimi_k3_b200_rank1_layer_mla_b512
-                  [k3_kda_prefill]=predict_kimi_k3_b200_rank1_layer_kda_prefill [k3_mla_prefill]=predict_kimi_k3_b200_rank1_layer_mla_prefill )
+                  [k3_kda_prefill]=predict_kimi_k3_b200_rank1_layer_kda_prefill [k3_mla_prefill]=predict_kimi_k3_b200_rank1_layer_mla_prefill
+                  [k3_kda_lcprefill]=predict_kimi_k3_b200_rank1_layer_kda_lcprefill [k3_mla_lcprefill]=predict_kimi_k3_b200_rank1_layer_mla_lcprefill )
 
 echo "== staging into $OUT from $SRC_REPO @ $(git -C "$SRC_REPO" rev-parse --short HEAD) ($(git -C "$SRC_REPO" branch --show-current))"
 rm -rf "$OUT"; mkdir -p "$REPO_OUT" "$OUT/app"

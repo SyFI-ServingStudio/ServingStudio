@@ -1,5 +1,5 @@
 {
-  "_note": "LONG-CONTEXT CHUNKED PREFILL campaign (user 2026-09-27: chunked prefill, 16k/32k per chunk, contexts >= 128k up to 262k, for both MLA and KDA on the SAME shapes). AGENT = Claude Code (Opus 5.5 via Bedrock). ONE KDA decoder layer of Kimi-K3 on sglang v0.5.20, B200, cookbook production shape (12 KDA heads/rank, bf16 recurrent state, EP8 rank = 112 mxfp4 experts, local top-2). Points are prefill chunks (ForwardMode.EXTEND) `B,L,pf<prefix>`: 1 request x L NEW tokens on a <prefix>-token context. Primary: the 16,384-token chunk that completes a 262,144-token prompt (prefix 245,760); secondaries: a 32,768-token chunk completing 262,144 (prefix 229,376), and 16k / 32k chunks at a 131,072-token prefix. For KDA the prefix enters only through the carried-in conv + recurrent state, so the 128k and 256k-context points cost the same; the chunk length is what matters (chunk_kda scan + MoE over 16k/32k rows). Metric = eager step time (sglang does not graph-capture prefill). Correctness = output + post-chunk conv/recurrent state vs a seeded golden from the pristine tree, row-wise prefill rule. Production-fidelity driver flags --bf16-gemm-init --flashinfer-autotune. GPU mode: slurm (K3_GPU_MODE=slurm).",
+  "_note": "LONG-CONTEXT CHUNKED PREFILL campaign (user 2026-09-27: chunked prefill, 16k/32k per chunk, contexts >= 128k up to 262k, for both MLA and KDA on the SAME shapes). AGENT = Claude Code (Opus 5.5 via Bedrock). ONE KDA decoder layer of Kimi-K3 on sglang v0.5.20, B200, cookbook production shape (12 KDA heads/rank, bf16 recurrent state, EP8 rank = 112 mxfp4 experts, local top-2). Points are prefill chunks (ForwardMode.EXTEND) `B,L,pf<prefix>`: 1 request x L NEW tokens on a <prefix>-token context. Primary: the 16,384-token chunk that completes a 262,144-token prompt (prefix 245,760); secondaries: a 32,768-token chunk completing 262,144 (prefix 229,376), and 16k / 32k chunks at a 131,072-token prefix. For KDA the prefix enters only through the carried-in conv + recurrent state, so the 128k and 256k-context points cost the same; the chunk length is what matters (chunk_kda scan + MoE over 16k/32k rows). Metric = eager step time (sglang does not graph-capture prefill). Correctness = output + post-chunk conv/recurrent state vs a seeded golden from the pristine tree, row-wise prefill rule. Production-fidelity driver flags --bf16-gemm-init --flashinfer-autotune. GPU mode: slurm (K3_GPU_MODE=slurm). 2026-09-27: oracle re-baked for the long-context points (port 8807); rounds 1-3 used the <=48k-prefix prefill oracle.",
   "case": "k3_kda_lcprefill_claude",
   "mode": "open_ended",
   "framework": "sglang",
@@ -10,14 +10,36 @@
   "before_image": "lmsysorg/sglang:v0.5.20",
   "driver_args": "--attn-type kda --moe-backend flashinfer_mxfp4 --attn-heads 12 --mamba-ssm-dtype bfloat16 --experts 112 --ep 8 --local-topk 2 --hidden-scale 1.0 --cuda-graph --iters 40 --warmup 10 --bf16-gemm-init --flashinfer-autotune",
   "points": {
-    "primary": [1, 16384, "pf245760"],
-    "secondary": [[1, 32768, "pf229376"], [1, 16384, "pf131072"], [1, 32768, "pf131072"]]
+    "primary": [
+      1,
+      16384,
+      "pf245760"
+    ],
+    "secondary": [
+      [
+        1,
+        32768,
+        "pf229376"
+      ],
+      [
+        1,
+        16384,
+        "pf131072"
+      ],
+      [
+        1,
+        32768,
+        "pf131072"
+      ]
+    ]
   },
   "reps": 5,
   "min_improvement": 0.0,
   "rel_err_max": 0.02,
   "seed": 0,
-  "edit_tree": {"container_path": "/sgl-workspace/sglang/python/sglang"},
+  "edit_tree": {
+    "container_path": "/sgl-workspace/sglang/python/sglang"
+  },
   "mounts": [
     "/raid/hf/hub:/raid/hf/hub:ro",
     "/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/k3_opt_history:/workspace/opt_history:ro"
@@ -36,7 +58,7 @@
     "POINTS": "1,16384,pf245760;1,32768,pf229376;1,16384,pf131072;1,32768,pf131072",
     "INSTALL_CMD": "true",
     "REBUILD_CMD": "find /sgl-workspace/sglang/python/sglang -name __pycache__ -prune -exec rm -rf {} + ; cd /workspace/opt_run && python3 /tmp/kimi_single_layer_decode.py --point 1,2048,pf --attn-type kda --moe-backend flashinfer_mxfp4 --attn-heads 12 --mamba-ssm-dtype bfloat16 --experts 112 --ep 8 --local-topk 2 --hidden-scale 1.0 --cuda-graph --iters 5 --warmup 2 --bf16-gemm-init --flashinfer-autotune && echo LAYER_SMOKE_OK",
-    "ORACLE_URL": "http://172.17.0.1:8805",
+    "ORACLE_URL": "http://172.17.0.1:8807",
     "OPT_HISTORY": "/workspace/opt_history"
   }
 }
