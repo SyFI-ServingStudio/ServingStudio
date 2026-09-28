@@ -260,7 +260,17 @@ Verdict files: `iter_opt_eval_k3_{kda,mla}_lcprefill_claude/best_tree_seed{1,2}_
 Survey and field-by-field spec in `K3_MIXED_VERIFY_DRIVER_SPEC.md`; implementation follows once no trial is running (a driver
 edit re-keys every case's goldens).
 
-### 9.5 Seed rechecks of the final KDA lcprefill tree
-(pending — slurm job 2101)
+### 9.5 Seed rechecks of the final KDA lcprefill tree (slurm job 2101, fresh pristine goldens per seed)
+All 8 points PASS, max rel 0.0074.
+
+| point | seed 1: pristine → best (Δ) | seed 2: pristine → best (Δ) |
+|---|---|---|
+| 16k @ 245,760 | 8.91 → 8.30 ms (−6.9%) | 8.90 → 8.18 ms (−8.1%) |
+| 32k @ 229,376 | 17.68 → 16.44 (−7.0%) | 17.65 → 16.30 (−7.6%) |
+| 16k @ 131,072 | 9.12 → 8.34 (−8.5%) | 9.03 → 8.27 (−8.4%) |
+| 32k @ 131,072 | 17.63 → 16.47 (−6.6%) | 17.72 → 16.32 (−7.9%) |
+
+Final state of the long-context prefill trees after follow-ups #1 and #3: MLA 27.69 → 20.45 ms (−26.1%), KDA 9.03 → 8.13 ms
+(−10.0%) on the primary; both seed-verified.
 
 `<base>` = `/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/patches/sglang`.
