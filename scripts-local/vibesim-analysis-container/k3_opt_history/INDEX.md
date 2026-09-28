@@ -1,6 +1,6 @@
 # Kimi-K3 optimization history (warm start index)
 
-*generated 2026-09-28 15:21:52 by build_opt_history.py; read TECHNIQUES.md first*
+*generated 2026-09-28 15:49:59 by build_opt_history.py; read TECHNIQUES.md first*
 
 Each row is one judged trial/round. `Δ` = latency change per point (positive = faster), `chk` = output+state match vs the pristine goldens. Continuous rounds start from the previous accepted tree; their `incremental.diff` is what that round changed. Campaign-1 rows (c1) ran on a workload with collapsed MoE routing -- directions are valid, effect sizes are not.
 

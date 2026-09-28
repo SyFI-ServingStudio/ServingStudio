@@ -391,8 +391,11 @@ was exact but below the noise floor and regressed the 128-decode point; a CuTe c
 |---|---|---|---|---|
 | KDA verify (graph metric) | shapes tree | r3 | 64×8k vk3: 490.0 → 472.5 µs (−3.55%) | −5.6% / −5.7% (seeds 1/2) |
 | MLA verify (graph metric) | pristine | r1, r3 | 64×8k vk3: 492.9 → 472.4 → 473.6* µs (−4.15%, −2.09%) | −6.2% / −6.0% |
-| KDA mixed (eager) | lcprefill tree | r2 | 64 dec + 16k chunk @8k: 8659 → 8361 µs (−3.44%) | (slurm 2467, pending) |
-| MLA mixed (eager) | lcprefill tree | r2, r4 | 64 dec + 16k chunk @8k: 15065 → 8248 → 8290* µs (−45.2%, −2.28%) | (slurm 2467, pending) |
+| KDA mixed (eager) | lcprefill tree | r2 | 64 dec + 16k chunk @8k: 8659 → 8361 µs (−3.44%) | −17.3% / −17.6% (10.1 → 8.35 ms); −18.3/−19.3% @128 dec + 4k; −16.2/−17.7% @48k prefix; rel ≤ 0.008 |
+| MLA mixed (eager) | lcprefill tree | r2, r4 | 64 dec + 16k chunk @8k: 15065 → 8248 → 8290* µs (−45.2%, −2.28%) | **−60.7% / −60.8%** (21.2 → 8.3 ms); −89.7/−89.6% @128 dec + 4k (24.7 → 2.55 ms); −70.7/−68.1% @48k prefix (44.6 → 13.1–14.2 ms); rel ≤ 0.011 |
+
+Seed rechecks of the mixed trees: slurm 2467 (`best_tree_seed{1,2}_verdict.json` in each case dir), fresh pristine
+goldens per seed, all PASS.
 
 \* each round's "before" is re-measured in its own judge job; the between-job spread is ~2% (verify) / ~3% (mixed).
 Patch chains under `patches/sglang/claude/{kda,mla}_{verify,mixed}_*.patch`, each validated to reproduce its best tree.

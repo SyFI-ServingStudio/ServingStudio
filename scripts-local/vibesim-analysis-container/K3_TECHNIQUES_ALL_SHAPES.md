@@ -57,9 +57,9 @@ each patch below is `<base>/<relative>`; every chain is validated to reproduce i
 | V1 64×4 verify @8k (graph) | 509.3 → 480.6 µs (seed 1) | −5.6% / −5.7% | 497.0 → 466.4 µs (seed 1) | −6.2% / −6.0% | 0, 1, 2 |
 | V2 128×4 verify @8k | 653.8 → 599.4 | −8.3% / −8.1% | 650.6 → 620.2 | −4.7% / −4.7% | 0, 1, 2 |
 | V3 16×4 verify @64k | 322.9 → 302.4 | −6.3% / −6.0% | 417.1 → 388.4 | −6.9% / −6.7% | 0, 1, 2 |
-| X1 64 dec + 16k chunk @8k | seed −13.4%, + r2 −3.4% (judge) | (seed recheck 2467 pending) | 15065 → 8290 µs (judge chain) | **≈ −45% + −2.3%** (seed recheck pending) | 0; 1, 2 pending |
-| X2 128 dec + 4k chunk | seed −18.2%, r2 flat | pending | 11512 → 2481 (judge chain) | ≈ −78% | 0; 1, 2 pending |
-| X3 64 dec + 16k chunk @48k | seed −12.7%, + r2 −4.5% | pending | 37898 → 13081 (judge chain) | ≈ −65% | 0; 1, 2 pending |
+| X1 64 dec + 16k chunk @8k | 10.11 → 8.35 ms (seed 1) | −17.3% / −17.6% | 21.24 → 8.35 ms (seed 1) | **−60.7% / −60.8%** | 0, 1, 2 |
+| X2 128 dec + 4k chunk | 3.38 → 2.76 ms | −18.3% / −19.3% | 24.74 → 2.54 ms | **−89.7% / −89.6%** | 0, 1, 2 |
+| X3 64 dec + 16k chunk @48k | 10.04 → 8.42 ms | −16.2% / −17.7% | 44.63 → 13.06 ms | **−70.7% / −68.1%** | 0, 1, 2 |
 
 (P4–P7 updated 2026-09-27 after the follow-up rounds 4–6 with the B12c-corrected long-context oracles; V1–V3 and X1–X3
 added 2026-09-28 from follow-up #4; see `K3_CAMPAIGN6_SHAPES_LCPREFILL.md` §9.6. The verify trees: KDA = shapes tree +
