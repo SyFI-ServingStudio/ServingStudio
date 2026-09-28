@@ -1,0 +1,545 @@
+diff -ruN -x __pycache__ -x '*.pyc' a/kernels/jit/csrc/attention/kda_verify_recurrent.cuh b/kernels/jit/csrc/attention/kda_verify_recurrent.cuh
+--- a/kernels/jit/csrc/attention/kda_verify_recurrent.cuh	1969-12-31 16:00:00.000000000 -0800
++++ b/kernels/jit/csrc/attention/kda_verify_recurrent.cuh	2026-09-28 02:57:22.599620243 -0700
+@@ -0,0 +1,349 @@
++// KDA chain target_verify recurrence for Kimi K3 (speculative decode, topk=1).
++//
++// Drop-in for fused_sigmoid_gating_delta_rule_update(is_kda=True,
++// disable_state_update=True, intermediate_states_buffer=..., chain) on the
++// K = V = 128, H == HV regime: per request, runs the delta-rule recurrence
++// over its draft tokens starting from the committed state (bf16 or fp32 pool,
++// never written) and checkpoints every step's post-state into the fp32
++// speculative `intermediate_ssm` scratch. Same fp32 math and op order as the
++// Triton kernel (gate / beta / l2norm / h*=exp(g) / delta / o = h.q).
++//
++// The Triton kernel runs one warp per [128 k x 32 v] tile and serializes
++// load -> compute -> store per step, reaching ~4 TB/s on what is a pure
++// checkpoint-store stream (4 fp32 states per request vs one bf16 state read).
++// Here every CTA stages all draft tokens' q/k/gate/beta in shared memory up
++// front (one burst of loads), keeps its rows of the state in registers
++// (8 lanes per row, 16 k each -> 3-shuffle reductions), and streams the
++// checkpoints with coalesced 128B st.global.cs float4 stores.
++
++#include <sgl_kernel/tensor.h>  // For TensorMatcher, SymbolicSize, SymbolicDevice
++#include <sgl_kernel/utils.h>   // For RuntimeCheck
++
++#include <sgl_kernel/type.cuh>   // For bf16_t, fp32_t
++#include <sgl_kernel/utils.cuh>  // For LaunchKernel, PDL helpers
++
++#include <tvm/ffi/container/tensor.h>
++
++#include <cstdint>
++#include <type_traits>
++#include <cuda_bf16.h>
++#include <cuda_runtime.h>
++
++namespace sglang {
++
++namespace kda_verify {
++
++constexpr int kDim = 128;             // K == V
++constexpr int kWarps = 4;
++constexpr int kThreads = kWarps * 32;
++constexpr int kLanesPerRow = 8;       // lanes sharing one state row
++constexpr int kKPerLane = kDim / kLanesPerRow;  // 16
++constexpr int kRowGroups = kThreads / kLanesPerRow;  // 16 row groups per CTA
++
++struct Params {
++  const __nv_bfloat16* q;
++  const __nv_bfloat16* k;
++  const __nv_bfloat16* v;
++  const __nv_bfloat16* a;
++  const __nv_bfloat16* b;
++  const float* A_log;
++  const float* dt_bias;
++  const void* state;
++  const int32_t* state_indices;
++  const int32_t* cu_seqlens;
++  float* inter;
++  const int32_t* inter_indices;
++  __nv_bfloat16* out;
++  int64_t stride_q, stride_k, stride_v, stride_a, stride_b;  // token strides (elements)
++  int64_t state_slot_stride;
++  int64_t inter_slot_stride, inter_step_stride;
++  int HV;
++  float scale;
++  float lower_bound;
++};
++
++SGL_DEVICE float2 bf16x2_to_float2(uint32_t u) {
++  __nv_bfloat162 h = *reinterpret_cast<__nv_bfloat162*>(&u);
++  return __bfloat1622float2(h);
++}
++
++template <typename StateT>
++SGL_DEVICE void load_state4(const StateT* p, float* dst) {
++  if constexpr (std::is_same_v<StateT, float>) {
++    const float4 x = *reinterpret_cast<const float4*>(p);
++    dst[0] = x.x, dst[1] = x.y, dst[2] = x.z, dst[3] = x.w;
++  } else {
++    const uint2 x = *reinterpret_cast<const uint2*>(p);
++    const float2 lo = bf16x2_to_float2(x.x), hi = bf16x2_to_float2(x.y);
++    dst[0] = lo.x, dst[1] = lo.y, dst[2] = hi.x, dst[3] = hi.y;
++  }
++}
++
++SGL_DEVICE float group8_sum(float x) {
++  x += __shfl_xor_sync(0xffffffffu, x, 1);
++  x += __shfl_xor_sync(0xffffffffu, x, 2);
++  x += __shfl_xor_sync(0xffffffffu, x, 4);
++  return x;
++}
++
++// Grid: (V / (kRowGroups * kR), HV, N).  Thread t: row group rg = t / 8
++// (rows rg*kR .. rg*kR+kR-1 of this CTA's slice), k lane kl = t % 8 owning
++// k = i*32 + kl*4 + j (i, j < 4) so each i is one coalesced 128B row segment.
++template <int kR, int kMaxT, bool kLB, bool kUsePDL, typename StateT>
++__global__ void __launch_bounds__(kThreads) kda_verify_recurrent_kernel(const Params p) {
++  __shared__ __align__(16) float s_q[kMaxT][kDim];
++  __shared__ __align__(16) float s_k[kMaxT][kDim];
++  __shared__ __align__(16) float s_eg[kMaxT][kDim];
++  __shared__ float s_beta[kMaxT];
++
++  const int tid = threadIdx.x;
++  const int warp = tid >> 5, lane = tid & 31;
++  const int rg = tid / kLanesPerRow, kl = tid % kLanesPerRow;
++  const int hv = blockIdx.y;
++  const int n = blockIdx.z;
++  const int row0 = (blockIdx.x * kRowGroups + rg) * kR;
++
++  device::PDLWaitPrimary<kUsePDL>();
++
++  const int64_t bos = p.cu_seqlens[n];
++  int L = p.cu_seqlens[n + 1] - static_cast<int>(bos);
++  L = L < kMaxT ? L : kMaxT;
++  const int64_t sidx = p.state_indices[n];
++  const int64_t cidx = p.inter_indices[n];
++
++  // Committed state rows (fp32 in registers).
++  float h[kR][kKPerLane];
++  if (sidx >= 0) {
++    const StateT* sp = static_cast<const StateT*>(p.state) + sidx * p.state_slot_stride +
++                       static_cast<int64_t>(hv) * kDim * kDim + static_cast<int64_t>(row0) * kDim + kl * 4;
++#pragma unroll
++    for (int r = 0; r < kR; ++r)
++#pragma unroll
++      for (int i = 0; i < 4; ++i) load_state4<StateT>(sp + r * kDim + i * 32, &h[r][i * 4]);
++  } else {
++#pragma unroll
++    for (int r = 0; r < kR; ++r)
++#pragma unroll
++      for (int e = 0; e < kKPerLane; ++e) h[r][e] = 0.f;
++  }
++
++  // Draft-token v values of this thread's rows.
++  float vv[kMaxT][kR];
++#pragma unroll
++  for (int t = 0; t < kMaxT; ++t) {
++    if (t < L) {
++      const __nv_bfloat16* vp = p.v + (bos + t) * p.stride_v + hv * kDim + row0;
++#pragma unroll
++      for (int r = 0; r < kR; ++r) vv[t][r] = __bfloat162float(vp[r]);
++    }
++  }
++
++  // Stage q / k (l2-normed, q scaled), exp(gate) and beta: warp w handles
++  // tokens w, w + kWarps, ...; lane owns 4 consecutive k.
++  const float A = expf(p.A_log[hv]);
++  for (int t = warp; t < L; t += kWarps) {
++    const int64_t tok = bos + t;
++    const int ko = lane * 4;
++    const uint2 qraw = *reinterpret_cast<const uint2*>(p.q + tok * p.stride_q + hv * kDim + ko);
++    const uint2 kraw = *reinterpret_cast<const uint2*>(p.k + tok * p.stride_k + hv * kDim + ko);
++    const uint2 araw = *reinterpret_cast<const uint2*>(p.a + tok * p.stride_a + hv * kDim + ko);
++    const float4 dtb = *reinterpret_cast<const float4*>(p.dt_bias + hv * kDim + ko);
++    float qf[4], kf[4], af[4];
++    {
++      float2 x = bf16x2_to_float2(qraw.x), y = bf16x2_to_float2(qraw.y);
++      qf[0] = x.x, qf[1] = x.y, qf[2] = y.x, qf[3] = y.y;
++      x = bf16x2_to_float2(kraw.x), y = bf16x2_to_float2(kraw.y);
++      kf[0] = x.x, kf[1] = x.y, kf[2] = y.x, kf[3] = y.y;
++      x = bf16x2_to_float2(araw.x), y = bf16x2_to_float2(araw.y);
++      af[0] = x.x + dtb.x, af[1] = x.y + dtb.y, af[2] = y.x + dtb.z, af[3] = y.y + dtb.w;
++    }
++    float sq = qf[0] * qf[0] + qf[1] * qf[1] + qf[2] * qf[2] + qf[3] * qf[3];
++    float sk = kf[0] * kf[0] + kf[1] * kf[1] + kf[2] * kf[2] + kf[3] * kf[3];
++#pragma unroll
++    for (int m = 16; m >= 1; m >>= 1) {
++      sq += __shfl_xor_sync(0xffffffffu, sq, m);
++      sk += __shfl_xor_sync(0xffffffffu, sk, m);
++    }
++    const float nq = sqrtf(sq + 1e-6f), nk = sqrtf(sk + 1e-6f);
++#pragma unroll
++    for (int j = 0; j < 4; ++j) {
++      float g;
++      if constexpr (kLB) {
++        g = p.lower_bound * (1.f / (1.f + expf(-(A * af[j]))));
++      } else {
++        const float sp = af[j] <= 20.f ? logf(1.f + expf(af[j])) : af[j];
++        g = -A * sp;
++      }
++      s_q[t][ko + j] = qf[j] / nq * p.scale;
++      s_k[t][ko + j] = kf[j] / nk;
++      s_eg[t][ko + j] = expf(g);
++    }
++    if (lane == 0) {
++      const float bb = __bfloat162float(p.b[tok * p.stride_b + hv]);
++      s_beta[t] = 1.f / (1.f + expf(-bb));
++    }
++  }
++  __syncthreads();
++  device::PDLTriggerSecondary<kUsePDL>();
++
++  float* ip = p.inter + cidx * p.inter_slot_stride + static_cast<int64_t>(hv) * kDim * kDim +
++              static_cast<int64_t>(row0) * kDim + kl * 4;
++  __nv_bfloat16* op = p.out + bos * p.HV * kDim + hv * kDim + row0;
++
++#pragma unroll
++  for (int t = 0; t < kMaxT; ++t) {
++    if (t >= L) break;
++    float kk[kKPerLane], qq[kKPerLane], eg[kKPerLane];
++#pragma unroll
++    for (int i = 0; i < 4; ++i) {
++      const float4 k4 = *reinterpret_cast<const float4*>(&s_k[t][i * 32 + kl * 4]);
++      const float4 q4 = *reinterpret_cast<const float4*>(&s_q[t][i * 32 + kl * 4]);
++      const float4 g4 = *reinterpret_cast<const float4*>(&s_eg[t][i * 32 + kl * 4]);
++      kk[i * 4 + 0] = k4.x, kk[i * 4 + 1] = k4.y, kk[i * 4 + 2] = k4.z, kk[i * 4 + 3] = k4.w;
++      qq[i * 4 + 0] = q4.x, qq[i * 4 + 1] = q4.y, qq[i * 4 + 2] = q4.z, qq[i * 4 + 3] = q4.w;
++      eg[i * 4 + 0] = g4.x, eg[i * 4 + 1] = g4.y, eg[i * 4 + 2] = g4.z, eg[i * 4 + 3] = g4.w;
++    }
++    const float beta = s_beta[t];
++#pragma unroll
++    for (int r = 0; r < kR; ++r) {
++      float u = 0.f;
++#pragma unroll
++      for (int e = 0; e < kKPerLane; ++e) {
++        h[r][e] *= eg[e];
++        u += h[r][e] * kk[e];
++      }
++      u = group8_sum(u);
++      const float dv = (vv[t][r] - u) * beta;
++      float o = 0.f;
++#pragma unroll
++      for (int e = 0; e < kKPerLane; ++e) {
++        h[r][e] += kk[e] * dv;
++        o += h[r][e] * qq[e];
++      }
++      o = group8_sum(o);
++      if (kl == r % kLanesPerRow) op[r] = __float2bfloat16(o);
++      if (cidx >= 0) {
++#pragma unroll
++        for (int i = 0; i < 4; ++i)
++          __stcs(reinterpret_cast<float4*>(ip + r * kDim + i * 32),
++                 make_float4(h[r][i * 4 + 0], h[r][i * 4 + 1], h[r][i * 4 + 2], h[r][i * 4 + 3]));
++      }
++    }
++    ip += p.inter_step_stride;
++    op += p.HV * kDim;
++  }
++}
++
++}  // namespace kda_verify
++
++template <bool kUsePDL>
++struct KdaVerifyRecurrentKernel {
++  template <int kR, int kMaxT, typename StateT>
++  static auto select(bool use_lb) {
++    return use_lb ? kda_verify::kda_verify_recurrent_kernel<kR, kMaxT, true, kUsePDL, StateT>
++                  : kda_verify::kda_verify_recurrent_kernel<kR, kMaxT, false, kUsePDL, StateT>;
++  }
++
++  template <typename StateT>
++  static auto select_rt(int rows, int max_t, bool use_lb) {
++    using host::RuntimeCheck;
++    RuntimeCheck(max_t == 4 || max_t == 8, "kda_verify: max_t must be 4 or 8, got ", max_t);
++    RuntimeCheck(rows == 1 || rows == 2 || rows == 4, "kda_verify: rows must be 1, 2 or 4, got ", rows);
++    if (max_t == 4) {
++      return rows == 1 ? select<1, 4, StateT>(use_lb) : rows == 2 ? select<2, 4, StateT>(use_lb) : select<4, 4, StateT>(use_lb);
++    }
++    return rows == 1 ? select<1, 8, StateT>(use_lb) : rows == 2 ? select<2, 8, StateT>(use_lb) : select<4, 8, StateT>(use_lb);
++  }
++
++  static void run(
++      const tvm::ffi::TensorView q,              // [NT, H, 128] bf16, token-strided
++      const tvm::ffi::TensorView k,              // [NT, H, 128] bf16, token-strided
++      const tvm::ffi::TensorView v,              // [NT, H, 128] bf16, token-strided
++      const tvm::ffi::TensorView a,              // [NT, H*128] bf16 raw gate, token-strided
++      const tvm::ffi::TensorView b,              // [NT, H] bf16 raw beta, token-strided
++      const tvm::ffi::TensorView A_log,          // [H] fp32
++      const tvm::ffi::TensorView dt_bias,        // [H*128] fp32
++      const tvm::ffi::TensorView state,          // [slots, H, 128, 128] bf16/fp32, any slot pitch
++      const tvm::ffi::TensorView state_indices,  // [N] int32
++      const tvm::ffi::TensorView cu_seqlens,     // [N+1] int32
++      const tvm::ffi::TensorView inter,          // [islots, steps, H, 128, 128] fp32
++      const tvm::ffi::TensorView inter_indices,  // [N] int32
++      const tvm::ffi::TensorView out,            // [NT, H, 128] bf16 dense
++      double scale,
++      double lower_bound,
++      bool use_lower_bound,
++      int64_t max_t,
++      int64_t rows) {
++    using namespace host;
++    const int64_t kH = A_log.shape()[0];
++    auto NT_ = SymbolicSize{"num_tokens"};
++    auto N_ = SymbolicSize{"num_requests"};
++    auto Slots_ = SymbolicSize{"pool_slots"};
++    auto ISlots_ = SymbolicSize{"inter_slots"};
++    auto Steps_ = SymbolicSize{"inter_steps"};
++    auto NP1_ = SymbolicSize{"num_requests_plus_1"};
++    auto device = SymbolicDevice{};
++    device.set_options<kDLCUDA>();
++
++    TensorMatcher({NT_, kH, 128}).with_dtype<bf16_t>().with_device(device).with_strides({-1, 128, 1}).verify(q);
++    TensorMatcher({NT_, kH, 128}).with_dtype<bf16_t>().with_device(device).with_strides({-1, 128, 1}).verify(k);
++    TensorMatcher({NT_, kH, 128}).with_dtype<bf16_t>().with_device(device).with_strides({-1, 128, 1}).verify(v);
++    TensorMatcher({NT_, kH * 128}).with_dtype<bf16_t>().with_device(device).with_strides({-1, 1}).verify(a);
++    TensorMatcher({NT_, kH}).with_dtype<bf16_t>().with_device(device).with_strides({-1, 1}).verify(b);
++    TensorMatcher({kH}).with_dtype<fp32_t>().with_device(device).with_strides({1}).verify(A_log);
++    TensorMatcher({kH * 128}).with_dtype<fp32_t>().with_device(device).with_strides({1}).verify(dt_bias);
++    TensorMatcher({N_}).with_dtype<int32_t>().with_device(device).with_strides({1}).verify(state_indices);
++    TensorMatcher({NP1_}).with_dtype<int32_t>().with_device(device).with_strides({1}).verify(cu_seqlens);
++    TensorMatcher({ISlots_, Steps_, kH, 128, 128})
++        .with_dtype<fp32_t>()
++        .with_device(device)
++        .with_strides({-1, kH * 128 * 128, 128 * 128, 128, 1})
++        .verify(inter);
++    TensorMatcher({N_}).with_dtype<int32_t>().with_device(device).with_strides({1}).verify(inter_indices);
++    TensorMatcher({NT_, kH, 128}).with_dtype<bf16_t>().with_device(device).with_strides({kH * 128, 128, 1}).verify(out);
++
++    const auto N = static_cast<int>(N_.unwrap());
++    RuntimeCheck(NP1_.unwrap() == N + 1, "kda_verify: cu_seqlens must have N+1 entries");
++    if (N == 0) return;
++
++    kda_verify::Params p;
++    p.q = static_cast<const __nv_bfloat16*>(q.data_ptr());
++    p.k = static_cast<const __nv_bfloat16*>(k.data_ptr());
++    p.v = static_cast<const __nv_bfloat16*>(v.data_ptr());
++    p.a = static_cast<const __nv_bfloat16*>(a.data_ptr());
++    p.b = static_cast<const __nv_bfloat16*>(b.data_ptr());
++    p.A_log = static_cast<const float*>(A_log.data_ptr());
++    p.dt_bias = static_cast<const float*>(dt_bias.data_ptr());
++    p.state = state.data_ptr();
++    p.state_indices = static_cast<const int32_t*>(state_indices.data_ptr());
++    p.cu_seqlens = static_cast<const int32_t*>(cu_seqlens.data_ptr());
++    p.inter = static_cast<float*>(inter.data_ptr());
++    p.inter_indices = static_cast<const int32_t*>(inter_indices.data_ptr());
++    p.out = static_cast<__nv_bfloat16*>(out.data_ptr());
++    p.stride_q = q.stride(0);
++    p.stride_k = k.stride(0);
++    p.stride_v = v.stride(0);
++    p.stride_a = a.stride(0);
++    p.stride_b = b.stride(0);
++    p.state_slot_stride = state.stride(0);
++    p.inter_slot_stride = inter.stride(0);
++    p.inter_step_stride = inter.stride(1);
++    p.HV = static_cast<int>(kH);
++    p.scale = static_cast<float>(scale);
++    p.lower_bound = static_cast<float>(lower_bound);
++
++    const int r = static_cast<int>(rows);
++    const dim3 grid(128 / (kda_verify::kRowGroups * r), static_cast<unsigned>(kH), static_cast<unsigned>(N));
++    if (is_type<bf16_t>(state.dtype())) {
++      TensorMatcher({Slots_, kH, 128, 128}).with_dtype<bf16_t>().with_device(device).with_strides({-1, 128 * 128, 128, 1}).verify(state);
++      auto kernel = select_rt<__nv_bfloat16>(r, static_cast<int>(max_t), use_lower_bound);
++      LaunchKernel(grid, dim3(kda_verify::kThreads), device.unwrap()).enable_pdl(kUsePDL)(kernel, p);
++    } else {
++      TensorMatcher({Slots_, kH, 128, 128}).with_dtype<fp32_t>().with_device(device).with_strides({-1, 128 * 128, 128, 1}).verify(state);
++      auto kernel = select_rt<float>(r, static_cast<int>(max_t), use_lower_bound);
++      LaunchKernel(grid, dim3(kda_verify::kThreads), device.unwrap()).enable_pdl(kUsePDL)(kernel, p);
++    }
++  }
++};
++
++}  // namespace sglang
+diff -ruN -x __pycache__ -x '*.pyc' a/kernels/ops/attention/kda_verify_recurrent.py b/kernels/ops/attention/kda_verify_recurrent.py
+--- a/kernels/ops/attention/kda_verify_recurrent.py	1969-12-31 16:00:00.000000000 -0800
++++ b/kernels/ops/attention/kda_verify_recurrent.py	2026-09-28 02:58:41.349101523 -0700
+@@ -0,0 +1,146 @@
++"""KDA chain target_verify recurrence (Kimi K3 speculative decode fast path).
++
++Replaces ``fused_sigmoid_gating_delta_rule_update(is_kda=True,
++disable_state_update=True, intermediate_states_buffer=...)`` for chain verify
++(no retrieve_parent_token, no ReplaySSM ring) at K = V = 128, H == HV: reads
++the committed state (never written), writes every draft step's post-state into
++the fp32 ``intermediate_ssm`` scratch and returns the per-token output
++[1, NT, HV, V]. Same fp32 math as the Triton kernel; see
++csrc/attention/kda_verify_recurrent.cuh.
++"""
++
++from __future__ import annotations
++
++from typing import TYPE_CHECKING, Optional
++
++import torch
++
++from sglang.kernels.jit.utils import (
++    cache_once,
++    is_arch_support_pdl,
++    load_jit,
++    make_cpp_args,
++)
++
++if TYPE_CHECKING:
++    from tvm_ffi.module import Module
++
++_MAX_STEPS = 8
++
++
++@cache_once
++def _jit_kda_verify_recurrent_module() -> Module:
++    args = make_cpp_args(is_arch_support_pdl())
++    return load_jit(
++        "kda_verify_recurrent",
++        *args,
++        cuda_files=["attention/kda_verify_recurrent.cuh"],
++        cuda_wrappers=[("run", f"KdaVerifyRecurrentKernel<{args}>::run")],
++        extra_cuda_cflags=["-O3"],
++    )
++
++
++def _as_token_rows(x: torch.Tensor, width: int) -> Optional[torch.Tensor]:
++    """[.., NT, width] token-row view of a gate/beta tensor, or None."""
++    if x.stride(-1) != 1:
++        return None
++    try:
++        return x.view(-1, width)
++    except RuntimeError:
++        return None
++
++
++def kda_verify_recurrent(
++    A_log: torch.Tensor,
++    dt_bias: torch.Tensor,
++    q: torch.Tensor,
++    k: torch.Tensor,
++    v: torch.Tensor,
++    a: torch.Tensor,
++    b: torch.Tensor,
++    *,
++    ssm_states: torch.Tensor,
++    cache_indices: torch.Tensor,
++    query_start_loc: torch.Tensor,
++    intermediate_states_buffer: torch.Tensor,
++    intermediate_state_indices: torch.Tensor,
++    cache_steps: int,
++    lower_bound: Optional[float],
++) -> Optional[torch.Tensor]:
++    """Run the verify recurrence, or return None when the inputs fall outside
++    the compiled contract (caller then takes the Triton kernel)."""
++    if not q.is_cuda or q.ndim != 4 or q.shape[0] != 1:
++        return None
++    _, NT, H, K = q.shape
++    if K != 128 or v.shape[-1] != 128 or v.shape[-2] != H or k.shape != q.shape:
++        return None
++    if not (1 <= cache_steps <= _MAX_STEPS):
++        return None
++    if (
++        q.dtype != torch.bfloat16
++        or k.dtype != torch.bfloat16
++        or v.dtype != torch.bfloat16
++        or a.dtype != torch.bfloat16
++        or b.dtype != torch.bfloat16
++        or ssm_states.dtype not in (torch.bfloat16, torch.float32)
++        or intermediate_states_buffer.dtype != torch.float32
++    ):
++        return None
++    if tuple(ssm_states.shape[-3:]) != (H, 128, 128) or ssm_states.ndim != 4:
++        return None
++    if intermediate_states_buffer.ndim != 5 or tuple(
++        intermediate_states_buffer.shape[-3:]
++    ) != (H, 128, 128):
++        return None
++    if intermediate_states_buffer.shape[1] < cache_steps:
++        return None
++    for t in (q, k, v):
++        if t.stride(-1) != 1 or t.stride(-2) != 128:
++            return None
++    a2 = _as_token_rows(a, H * 128)
++    b2 = _as_token_rows(b, H)
++    if a2 is None or b2 is None or a2.shape[0] != NT or b2.shape[0] != NT:
++        return None
++    A_log_f = A_log.reshape(-1)
++    dt_bias_f = dt_bias.reshape(-1)
++    if (
++        A_log_f.numel() != H
++        or dt_bias_f.numel() != H * 128
++        or A_log_f.dtype != torch.float32
++        or dt_bias_f.dtype != torch.float32
++    ):
++        return None
++    N = query_start_loc.shape[0] - 1
++    if (
++        query_start_loc.dtype != torch.int32
++        or cache_indices.dtype != torch.int32
++        or intermediate_state_indices.dtype != torch.int32
++        or cache_indices.shape[0] < N
++        or intermediate_state_indices.shape[0] < N
++    ):
++        return None
++
++    out = torch.empty((NT, H, 128), dtype=torch.bfloat16, device=q.device)
++    # Rows per thread, measured on B200 (H=12): 4 best at N=16, 2 at N=64/128.
++    rows = 4 if N * H < 384 else 2
++    _jit_kda_verify_recurrent_module().run(
++        q[0],
++        k[0],
++        v[0],
++        a2,
++        b2,
++        A_log_f.contiguous(),
++        dt_bias_f.contiguous(),
++        ssm_states,
++        cache_indices[:N].contiguous(),
++        query_start_loc.contiguous(),
++        intermediate_states_buffer,
++        intermediate_state_indices[:N].contiguous(),
++        out,
++        float(k.shape[-1] ** -0.5),
++        float(lower_bound) if lower_bound is not None else 0.0,
++        lower_bound is not None,
++        4 if cache_steps <= 4 else 8,
++        rows,
++    )
++    return out.unsqueeze(0)
+diff -ruN -x __pycache__ -x '*.pyc' a/srt/layers/attention/linear/kernels/kda_triton.py b/srt/layers/attention/linear/kernels/kda_triton.py
+--- a/srt/layers/attention/linear/kernels/kda_triton.py	2026-09-18 02:16:55.000000000 -0700
++++ b/srt/layers/attention/linear/kernels/kda_triton.py	2026-09-28 02:58:49.783402921 -0700
+@@ -18,6 +18,7 @@
+         fused_sigmoid_gating_delta_rule_update,
+     )
+     from sglang.kernels.ops.attention.fla.kda import chunk_kda
++    from sglang.kernels.ops.attention.kda_verify_recurrent import kda_verify_recurrent
+ 
+ 
+ class TritonKDAKernel(LinearAttnKernelBase):
+@@ -188,6 +189,30 @@
+         # the committed pool (disable_state_update=True), and handles chain + tree
+         # (retrieve_parent_token). The verify kernel for the Triton / CuTe DSL KDA
+         # decode backends, and the reference the KDA correctness tests assert against.
++        if (
++            retrieve_parent_token is None
++            and not cache_ring
++            and intermediate_states_buffer is not None
++            and q.is_cuda
++        ):
++            out = kda_verify_recurrent(
++                A_log,
++                dt_bias,
++                q,
++                k,
++                v,
++                a,
++                b,
++                ssm_states=ssm_states,
++                cache_indices=cache_indices,
++                query_start_loc=query_start_loc,
++                intermediate_states_buffer=intermediate_states_buffer,
++                intermediate_state_indices=intermediate_state_indices,
++                cache_steps=cache_steps,
++                lower_bound=lower_bound,
++            )
++            if out is not None:
++                return out
+         return fused_sigmoid_gating_delta_rule_update(
+             A_log=A_log,
+             dt_bias=dt_bias,

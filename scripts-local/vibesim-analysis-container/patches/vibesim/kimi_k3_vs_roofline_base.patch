@@ -44586,6 +44586,86 @@ index 00000000..87d6382e
 +  }
 +]
 \ No newline at end of file
+diff --git a/presets/predict_kimi_k3_b200_rank1_layer_kda_mixed.json b/presets/predict_kimi_k3_b200_rank1_layer_kda_mixed.json
+new file mode 100644
+index 00000000..fd216d8d
+--- /dev/null
++++ b/presets/predict_kimi_k3_b200_rank1_layer_kda_mixed.json
+@@ -0,0 +1,22 @@
++{
++  "arch": {
++    "iter": {
++      "type": "kimi_k3_sglang",
++      "model_config": "model/config/kimi_k3.json",
++      "fp8": false,
++      "attn_tp_size": 1,
++      "ep_size": 1,
++      "pp_size": 1,
++      "dcp_size": 1,
++      "heads_per_rank": 12,
++      "local_experts": 112,
++      "local_top_k": 2,
++      "sim_kda_layers": 1,
++      "sim_mla_layers": 0,
++      "kda_state_dtype": "bf16"
++    }
++  },
++  "gpu": "NVIDIA B200",
++  "log_dir": "logs/predict_kimi_k3_b200_rank1_layer_kda_mixed",
++  "cases_file": "predict_kimi_k3_b200_rank1_layer_kda_mixed_cases.json"
++}
+\ No newline at end of file
+diff --git a/presets/predict_kimi_k3_b200_rank1_layer_kda_mixed_cases.json b/presets/predict_kimi_k3_b200_rank1_layer_kda_mixed_cases.json
+new file mode 100644
+index 00000000..cf266198
+--- /dev/null
++++ b/presets/predict_kimi_k3_b200_rank1_layer_kda_mixed_cases.json
+@@ -0,0 +1,44 @@
++[
++  {
++    "groups": [
++      {
++        "decode_count": 64,
++        "average_decode_length": 8192,
++        "prefill_chunk_pairs": [
++          [
++            0,
++            16384
++          ]
++        ]
++      }
++    ]
++  },
++  {
++    "groups": [
++      {
++        "decode_count": 128,
++        "average_decode_length": 8192,
++        "prefill_chunk_pairs": [
++          [
++            0,
++            4096
++          ]
++        ]
++      }
++    ]
++  },
++  {
++    "groups": [
++      {
++        "decode_count": 64,
++        "average_decode_length": 8192,
++        "prefill_chunk_pairs": [
++          [
++            49152,
++            16384
++          ]
++        ]
++      }
++    ]
++  }
++]
+\ No newline at end of file
 diff --git a/presets/predict_kimi_k3_b200_rank1_layer_kda_prefill.json b/presets/predict_kimi_k3_b200_rank1_layer_kda_prefill.json
 new file mode 100644
 index 00000000..21792cb1
@@ -44782,6 +44862,86 @@ index 00000000..87d6382e
 +          [
 +            131072,
 +            32768
++          ]
++        ]
++      }
++    ]
++  }
++]
+\ No newline at end of file
+diff --git a/presets/predict_kimi_k3_b200_rank1_layer_mla_mixed.json b/presets/predict_kimi_k3_b200_rank1_layer_mla_mixed.json
+new file mode 100644
+index 00000000..0bcb259a
+--- /dev/null
++++ b/presets/predict_kimi_k3_b200_rank1_layer_mla_mixed.json
+@@ -0,0 +1,22 @@
++{
++  "arch": {
++    "iter": {
++      "type": "kimi_k3_sglang",
++      "model_config": "model/config/kimi_k3.json",
++      "fp8": false,
++      "attn_tp_size": 1,
++      "ep_size": 1,
++      "pp_size": 1,
++      "dcp_size": 1,
++      "heads_per_rank": 12,
++      "local_experts": 112,
++      "local_top_k": 2,
++      "sim_kda_layers": 0,
++      "sim_mla_layers": 1,
++      "kda_state_dtype": "bf16"
++    }
++  },
++  "gpu": "NVIDIA B200",
++  "log_dir": "logs/predict_kimi_k3_b200_rank1_layer_mla_mixed",
++  "cases_file": "predict_kimi_k3_b200_rank1_layer_mla_mixed_cases.json"
++}
+\ No newline at end of file
+diff --git a/presets/predict_kimi_k3_b200_rank1_layer_mla_mixed_cases.json b/presets/predict_kimi_k3_b200_rank1_layer_mla_mixed_cases.json
+new file mode 100644
+index 00000000..cf266198
+--- /dev/null
++++ b/presets/predict_kimi_k3_b200_rank1_layer_mla_mixed_cases.json
+@@ -0,0 +1,44 @@
++[
++  {
++    "groups": [
++      {
++        "decode_count": 64,
++        "average_decode_length": 8192,
++        "prefill_chunk_pairs": [
++          [
++            0,
++            16384
++          ]
++        ]
++      }
++    ]
++  },
++  {
++    "groups": [
++      {
++        "decode_count": 128,
++        "average_decode_length": 8192,
++        "prefill_chunk_pairs": [
++          [
++            0,
++            4096
++          ]
++        ]
++      }
++    ]
++  },
++  {
++    "groups": [
++      {
++        "decode_count": 64,
++        "average_decode_length": 8192,
++        "prefill_chunk_pairs": [
++          [
++            49152,
++            16384
 +          ]
 +        ]
 +      }

@@ -167,6 +167,8 @@
  ...ict_kimi_k3_b200_rank1_layer_kda_fp32state.json |   21 +
  ...ict_kimi_k3_b200_rank1_layer_kda_lcprefill.json |   22 +
  ...mi_k3_b200_rank1_layer_kda_lcprefill_cases.json |   50 +
+ ...predict_kimi_k3_b200_rank1_layer_kda_mixed.json |   22 +
+ ...t_kimi_k3_b200_rank1_layer_kda_mixed_cases.json |   44 +
  ...edict_kimi_k3_b200_rank1_layer_kda_prefill.json |   22 +
  ...kimi_k3_b200_rank1_layer_kda_prefill_cases.json |    5 +
  presets/predict_kimi_k3_b200_rank1_layer_mla.json  |   21 +
@@ -175,6 +177,8 @@
  ...predict_kimi_k3_b200_rank1_layer_mla_cases.json |    6 +
  ...ict_kimi_k3_b200_rank1_layer_mla_lcprefill.json |   22 +
  ...mi_k3_b200_rank1_layer_mla_lcprefill_cases.json |   50 +
+ ...predict_kimi_k3_b200_rank1_layer_mla_mixed.json |   22 +
+ ...t_kimi_k3_b200_rank1_layer_mla_mixed_cases.json |   44 +
  ...edict_kimi_k3_b200_rank1_layer_mla_prefill.json |   22 +
  ...kimi_k3_b200_rank1_layer_mla_prefill_cases.json |    5 +
  presets/predict_kimi_k3_b200_sglang_tp8ep8pp2.json |   17 +
@@ -422,4 +426,4 @@
  trace/README.md                                    |   35 +
  trace/diverse_100.csv                              |  101 +
  uv.lock                                            |   11 +
- 424 files changed, 74125 insertions(+), 2696 deletions(-)
+ 428 files changed, 74257 insertions(+), 2696 deletions(-)

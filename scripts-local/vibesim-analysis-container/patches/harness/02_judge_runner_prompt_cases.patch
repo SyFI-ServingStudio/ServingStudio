@@ -1,9 +1,9 @@
 diff --git a/scripts-local/vibesim-analysis-container/agent_task_k3_opt.md b/scripts-local/vibesim-analysis-container/agent_task_k3_opt.md
 new file mode 100644
-index 0000000..15963c2
+index 0000000..69c3be3
 --- /dev/null
 +++ b/scripts-local/vibesim-analysis-container/agent_task_k3_opt.md
-@@ -0,0 +1,139 @@
+@@ -0,0 +1,143 @@
 +# Task: minimize $METRIC
 +
 +You are optimizing a **real $FRAMEWORK checkout** at `$CHECKOUT` (the Python package is
@@ -13,8 +13,11 @@ index 0000000..15963c2
 +- **Model:** $MODEL_NAME.
 +- **Workload:** $WORKLOAD.
 +- **Objective:** **minimize $METRIC**. Change the real source so the layer's step runs faster
-+  (decode points: CUDA-graph replay time; chunked-prefill points `B,L,pf[<prefix>]`: eager step
-+  time, since sglang does not graph-capture prefill), and prove the change **does not alter the
++  (decode points: CUDA-graph replay time; chunked-prefill points `B,L,pf[<prefix>]` and mixed
++  prefill-chunk + decode points `B,L,mx<chunk>[p<prefix>]`: eager step time, since sglang does not
++  graph-capture prefill / mixed batches; speculative-verify points `B,L,vk<k>`: CUDA-graph replay
++  time when the fixed flags include `--verify-graph` (production captures TARGET_VERIFY at the draft
++  width), else eager step time), and prove the change **does not alter the
 +  layer's numerical output or its post-step state** (KDA conv/recurrent state, MLA written KV rows).
 +
 +You are NOT told which operator, kernel, or code path to change, and NOT given a target
@@ -80,8 +83,9 @@ index 0000000..15963c2
 +python3 /tmp/kimi_single_layer_decode.py --point "$POINTS" $ARGS --replay /workspace/opt_run/golden.pt
 +```
 +- Every point prints a `JSON {"latency_us": ..., "latency_mode": "graph"|"eager", ...}` line; the
-+  judged number is `latency_us` (graph mode for decode points, eager for prefill points, whose
-+  `point` carries the `pf<prefix>` tag). `--split` adds eager attn/moe/norms times (decode only).
++  judged number is `latency_us` (graph mode for decode points and, with `--verify-graph`, for `vk`
++  verify points; eager for prefill / mixed points, whose `point` carries the `pf<prefix>` / `mx` tag).
++  `--split` adds eager attn/moe/norms times (decode only).
 +- **Measure before and after with the IDENTICAL command** (same flags, same points, same
 +  `--iters/--warmup`), and treat a run that also carries `--split` or `--profile-kernels` as a
 +  *diagnostic*, not a timing reference: those extra phases perturb the graph-replay number by
@@ -395,6 +399,71 @@ index 0000000..605ef3f
 +    "OPT_HISTORY": "/workspace/opt_history"
 +  }
 +}
+diff --git a/scripts-local/vibesim-analysis-container/issue_k3_kda_mixed_claude.json b/scripts-local/vibesim-analysis-container/issue_k3_kda_mixed_claude.json
+new file mode 100644
+index 0000000..9307790
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/issue_k3_kda_mixed_claude.json
+@@ -0,0 +1,59 @@
++{
++  "_note": "MIXED PREFILL+DECODE campaign (user 2026-09-27, follow-up #4). One KDA decoder layer, one B200 rank of the cookbook TP8/EP8 recipe. Points `B,L,mx<C>[p<P>]` = B decode requests at context L (one token each) batched with ONE chunked-prefill chunk of C new tokens on a P-token cached context, exactly as the production scheduler's mixed chunk (prefill rows first, decode rows as 1-token extends; the eager runner runs MIXED as EXTEND). Primary: 64 decode @8k + a 16,384-token first chunk; secondaries: 128 decode @8k + a 4,096-token first chunk, and 64 decode @8k + a 16k chunk at prefix 49,152. Metric = eager step time (mixed batches are never graph-captured). Correctness = row-wise prefill rule over all C+B output rows + post-step state (KDA conv/recurrent state of all requests; MLA written fp8 KV rows: the chunk rows and each decode request's new row). Oracle: VibeSim mixed-batch prediction (decode group + prefill chunk in one case). GPU mode: slurm.",
++  "case": "k3_kda_mixed_claude",
++  "mode": "open_ended",
++  "framework": "sglang",
++  "judge": "judge_k3.py",
++  "task_template": "agent_task_k3_opt.md",
++  "driver": "kimi_single_layer_decode.py",
++  "codex_image": "rga-local/sglang-k3:v0520-claude",
++  "before_image": "lmsysorg/sglang:v0.5.20",
++  "driver_args": "--attn-type kda --moe-backend flashinfer_mxfp4 --attn-heads 12 --mamba-ssm-dtype bfloat16 --experts 112 --ep 8 --local-topk 2 --hidden-scale 1.0 --cuda-graph --iters 40 --warmup 10 --bf16-gemm-init --flashinfer-autotune",
++  "points": {
++    "primary": [
++      64,
++      8192,
++      "mx16384"
++    ],
++    "secondary": [
++      [
++        128,
++        8192,
++        "mx4096"
++      ],
++      [
++        64,
++        8192,
++        "mx16384p49152"
++      ]
++    ]
++  },
++  "reps": 5,
++  "min_improvement": 0.0,
++  "rel_err_max": 0.02,
++  "seed": 0,
++  "edit_tree": {
++    "container_path": "/sgl-workspace/sglang/python/sglang"
++  },
++  "mounts": [
++    "/raid/hf/hub:/raid/hf/hub:ro",
++    "/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/k3_opt_history:/workspace/opt_history:ro"
++  ],
++  "shm_size": "32g",
++  "codex_model": "gpt-5.6-luna",
++  "agent": "claude",
++  "claude_model": "us.anthropic.claude-opus-5-5",
++  "render": {
++    "METRIC": "eager step latency of one Kimi-K3 KDA decoder layer on MIXED prefill-chunk + decode batches",
++    "FRAMEWORK": "sglang",
++    "CHECKOUT": "/sgl-workspace/sglang",
++    "MODEL_NAME": "Kimi-K3 (moonshotai/Kimi-K3): one KDA (linear-attention) decoder layer, as it runs on one B200 of the production TP8/EP8 deployment (12 attention heads, 112 local mxfp4 experts, bf16 recurrent state)",
++    "WORKLOAD": "mixed batches (ForwardMode.MIXED, run as EXTEND): B=64 decode requests at context 8,192 (one new token each) batched with one 16,384-token first prefill chunk (primary: 16,448 tokens per step; the MoE sees ~33k local rows, the decode rows ride along as 1-token extends and carry their recurrent state through the chunked scan), plus B=128 decode @8k with a 4,096-token chunk, and B=64 decode @8k with a 16k chunk at prefix 49,152 (must not regress)",
++    "DRIVER_ARGS": "--attn-type kda --moe-backend flashinfer_mxfp4 --attn-heads 12 --mamba-ssm-dtype bfloat16 --experts 112 --ep 8 --local-topk 2 --hidden-scale 1.0 --cuda-graph --iters 40 --warmup 10 --bf16-gemm-init --flashinfer-autotune",
++    "POINTS": "64,8192,mx16384;128,8192,mx4096;64,8192,mx16384p49152",
++    "INSTALL_CMD": "true",
++    "REBUILD_CMD": "find /sgl-workspace/sglang/python/sglang -name __pycache__ -prune -exec rm -rf {} + ; cd /workspace/opt_run && python3 /tmp/kimi_single_layer_decode.py --point 1,8192,mx1024 --attn-type kda --moe-backend flashinfer_mxfp4 --attn-heads 12 --mamba-ssm-dtype bfloat16 --experts 112 --ep 8 --local-topk 2 --hidden-scale 1.0 --cuda-graph --iters 5 --warmup 2 --bf16-gemm-init --flashinfer-autotune && echo LAYER_SMOKE_OK",
++    "ORACLE_URL": "http://172.17.0.1:8809",
++    "OPT_HISTORY": "/workspace/opt_history"
++  }
++}
 diff --git a/scripts-local/vibesim-analysis-container/issue_k3_kda_prefill.json b/scripts-local/vibesim-analysis-container/issue_k3_kda_prefill.json
 new file mode 100644
 index 0000000..f152676
@@ -567,6 +636,71 @@ index 0000000..fabb5fd
 +    "POINTS": "1,1048576;16,65536;128,8192;32,8192;1,8192",
 +    "INSTALL_CMD": "true",
 +    "REBUILD_CMD": "find /sgl-workspace/sglang/python/sglang -name __pycache__ -prune -exec rm -rf {} + ; cd /workspace/opt_run && python3 /tmp/kimi_single_layer_decode.py --point 1,8192 --attn-type kda --moe-backend flashinfer_mxfp4 --attn-heads 12 --mamba-ssm-dtype bfloat16 --experts 112 --ep 8 --local-topk 2 --hidden-scale 1.0 --cuda-graph --iters 5 --warmup 2 --bf16-gemm-init --flashinfer-autotune && echo LAYER_SMOKE_OK",
++    "ORACLE_URL": "http://172.17.0.1:8801",
++    "OPT_HISTORY": "/workspace/opt_history"
++  }
++}
+diff --git a/scripts-local/vibesim-analysis-container/issue_k3_kda_verify_claude.json b/scripts-local/vibesim-analysis-container/issue_k3_kda_verify_claude.json
+new file mode 100644
+index 0000000..e723b1c
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/issue_k3_kda_verify_claude.json
+@@ -0,0 +1,59 @@
++{
++  "_note": "SPECULATIVE-DECODE VERIFY campaign (user 2026-09-27, follow-up #4). One KDA decoder layer, one B200 rank of the cookbook TP8/EP8 recipe. Points `B,L,vk<k>` = ForwardMode.TARGET_VERIFY: B requests at context L each verify k+1 tokens (k draft + bonus, chain / topk=1) in one forward, as EAGLE/MTP verification does. KDA takes the non-fused verify path (causal_conv1d_update with intermediate conv windows + the Triton target_verify recurrence with disable_state_update; lower_bound gate), writing the per-token intermediate_ssm scratch. Primary: 64 requests x 4 tokens @8k; secondaries: 128 x 4 @8k and 16 x 4 @64k. Metric = CUDA-graph replay time of the verify step (--verify-graph, 2026-09-28: production's DecodeCudaGraphRunner captures TARGET_VERIFY at the draft width; the eager verify step was 65% host launch overhead, sigma ~90 us under CPU contention, which made the 3-sigma gate reject the -14.7% round 1). Correctness = strict max-rel rule on all B*(k+1) output rows + post-step state. Oracle: the decode prediction at the same B/L (VibeSim has no verify branch; the verify step is ~ a decode step with k+1 query rows). GPU mode: slurm.",
++  "case": "k3_kda_verify_claude",
++  "mode": "open_ended",
++  "framework": "sglang",
++  "judge": "judge_k3.py",
++  "task_template": "agent_task_k3_opt.md",
++  "driver": "kimi_single_layer_decode.py",
++  "codex_image": "rga-local/sglang-k3:v0520-claude",
++  "before_image": "lmsysorg/sglang:v0.5.20",
++  "driver_args": "--attn-type kda --moe-backend flashinfer_mxfp4 --attn-heads 12 --mamba-ssm-dtype bfloat16 --experts 112 --ep 8 --local-topk 2 --hidden-scale 1.0 --cuda-graph --iters 40 --warmup 10 --bf16-gemm-init --flashinfer-autotune --verify-graph",
++  "points": {
++    "primary": [
++      64,
++      8192,
++      "vk3"
++    ],
++    "secondary": [
++      [
++        128,
++        8192,
++        "vk3"
++      ],
++      [
++        16,
++        65536,
++        "vk3"
++      ]
++    ]
++  },
++  "reps": 5,
++  "min_improvement": 0.0,
++  "rel_err_max": 0.02,
++  "seed": 0,
++  "edit_tree": {
++    "container_path": "/sgl-workspace/sglang/python/sglang"
++  },
++  "mounts": [
++    "/raid/hf/hub:/raid/hf/hub:ro",
++    "/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/k3_opt_history:/workspace/opt_history:ro"
++  ],
++  "shm_size": "32g",
++  "codex_model": "gpt-5.6-luna",
++  "agent": "claude",
++  "claude_model": "us.anthropic.claude-opus-5-5",
++  "render": {
++    "METRIC": "CUDA-graph replay latency of one TARGET_VERIFY step of one Kimi-K3 KDA decoder layer (speculative decoding, 4 tokens per request)",
++    "FRAMEWORK": "sglang",
++    "CHECKOUT": "/sgl-workspace/sglang",
++    "MODEL_NAME": "Kimi-K3 (moonshotai/Kimi-K3): one KDA (linear-attention) decoder layer, as it runs on one B200 of the production TP8/EP8 deployment (12 attention heads, 112 local mxfp4 experts, bf16 recurrent state)",
++    "WORKLOAD": "speculative-decode verification (ForwardMode.TARGET_VERIFY, chain, topk=1): B=64 requests at context 8,192 each verifying 4 tokens (3 draft + 1 bonus) in one forward (primary: 256 query tokens; KDA runs the conv window update + the target_verify recurrence per token with intermediate-state checkpoints), plus B=128 x 4 @8k and B=16 x 4 @65,536 (must not regress)",
++    "DRIVER_ARGS": "--attn-type kda --moe-backend flashinfer_mxfp4 --attn-heads 12 --mamba-ssm-dtype bfloat16 --experts 112 --ep 8 --local-topk 2 --hidden-scale 1.0 --cuda-graph --iters 40 --warmup 10 --bf16-gemm-init --flashinfer-autotune --verify-graph",
++    "POINTS": "64,8192,vk3;128,8192,vk3;16,65536,vk3",
++    "INSTALL_CMD": "true",
++    "REBUILD_CMD": "find /sgl-workspace/sglang/python/sglang -name __pycache__ -prune -exec rm -rf {} + ; cd /workspace/opt_run && python3 /tmp/kimi_single_layer_decode.py --point 4,8192,vk3 --attn-type kda --moe-backend flashinfer_mxfp4 --attn-heads 12 --mamba-ssm-dtype bfloat16 --experts 112 --ep 8 --local-topk 2 --hidden-scale 1.0 --cuda-graph --iters 5 --warmup 2 --bf16-gemm-init --flashinfer-autotune --verify-graph && echo LAYER_SMOKE_OK",
 +    "ORACLE_URL": "http://172.17.0.1:8801",
 +    "OPT_HISTORY": "/workspace/opt_history"
 +  }
@@ -826,6 +960,71 @@ index 0000000..7e86a90
 +    "OPT_HISTORY": "/workspace/opt_history"
 +  }
 +}
+diff --git a/scripts-local/vibesim-analysis-container/issue_k3_mla_mixed_claude.json b/scripts-local/vibesim-analysis-container/issue_k3_mla_mixed_claude.json
+new file mode 100644
+index 0000000..5e6e5e1
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/issue_k3_mla_mixed_claude.json
+@@ -0,0 +1,59 @@
++{
++  "_note": "MIXED PREFILL+DECODE campaign (user 2026-09-27, follow-up #4). One MLA decoder layer, one B200 rank of the cookbook TP8/EP8 recipe. Points `B,L,mx<C>[p<P>]` = B decode requests at context L (one token each) batched with ONE chunked-prefill chunk of C new tokens on a P-token cached context, exactly as the production scheduler's mixed chunk (prefill rows first, decode rows as 1-token extends; the eager runner runs MIXED as EXTEND). Primary: 64 decode @8k + a 16,384-token first chunk; secondaries: 128 decode @8k + a 4,096-token first chunk, and 64 decode @8k + a 16k chunk at prefix 49,152. Metric = eager step time (mixed batches are never graph-captured). Correctness = row-wise prefill rule over all C+B output rows + post-step state (KDA conv/recurrent state of all requests; MLA written fp8 KV rows: the chunk rows and each decode request's new row). Oracle: VibeSim mixed-batch prediction (decode group + prefill chunk in one case). GPU mode: slurm.",
++  "case": "k3_mla_mixed_claude",
++  "mode": "open_ended",
++  "framework": "sglang",
++  "judge": "judge_k3.py",
++  "task_template": "agent_task_k3_opt.md",
++  "driver": "kimi_single_layer_decode.py",
++  "codex_image": "rga-local/sglang-k3:v0520-claude",
++  "before_image": "lmsysorg/sglang:v0.5.20",
++  "driver_args": "--attn-type mla --moe-backend flashinfer_mxfp4 --attention-backend cutedsl_mla --attn-heads 12 --kv-cache-dtype fp8_e4m3 --experts 112 --ep 8 --local-topk 2 --hidden-scale 1.0 --cuda-graph --iters 40 --warmup 10 --bf16-gemm-init --flashinfer-autotune",
++  "points": {
++    "primary": [
++      64,
++      8192,
++      "mx16384"
++    ],
++    "secondary": [
++      [
++        128,
++        8192,
++        "mx4096"
++      ],
++      [
++        64,
++        8192,
++        "mx16384p49152"
++      ]
++    ]
++  },
++  "reps": 5,
++  "min_improvement": 0.0,
++  "rel_err_max": 0.02,
++  "seed": 0,
++  "edit_tree": {
++    "container_path": "/sgl-workspace/sglang/python/sglang"
++  },
++  "mounts": [
++    "/raid/hf/hub:/raid/hf/hub:ro",
++    "/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/k3_opt_history:/workspace/opt_history:ro"
++  ],
++  "shm_size": "32g",
++  "codex_model": "gpt-5.6-luna",
++  "agent": "claude",
++  "claude_model": "us.anthropic.claude-opus-5-5",
++  "render": {
++    "METRIC": "eager step latency of one Kimi-K3 MLA decoder layer on MIXED prefill-chunk + decode batches",
++    "FRAMEWORK": "sglang",
++    "CHECKOUT": "/sgl-workspace/sglang",
++    "MODEL_NAME": "Kimi-K3 (moonshotai/Kimi-K3): one MLA (dense multi-head latent attention) decoder layer, as it runs on one B200 of the production TP8/EP8 deployment (12 attention heads, trtllm_mla chunked-prefill attention over a paged fp8 latent KV, 112 local mxfp4 experts)",
++    "WORKLOAD": "mixed batches (ForwardMode.MIXED, run as EXTEND): B=64 decode requests at context 8,192 (one new token each) batched with one 16,384-token first prefill chunk (primary: 16,448 tokens per step; the MoE sees ~33k local rows, the decode rows ride along as 1-token extends and, for MLA, add prefix chunks to the chunked-prefix attention), plus B=128 decode @8k with a 4,096-token chunk, and B=64 decode @8k with a 16k chunk at prefix 49,152 (must not regress)",
++    "DRIVER_ARGS": "--attn-type mla --moe-backend flashinfer_mxfp4 --attention-backend cutedsl_mla --attn-heads 12 --kv-cache-dtype fp8_e4m3 --experts 112 --ep 8 --local-topk 2 --hidden-scale 1.0 --cuda-graph --iters 40 --warmup 10 --bf16-gemm-init --flashinfer-autotune",
++    "POINTS": "64,8192,mx16384;128,8192,mx4096;64,8192,mx16384p49152",
++    "INSTALL_CMD": "true",
++    "REBUILD_CMD": "find /sgl-workspace/sglang/python/sglang -name __pycache__ -prune -exec rm -rf {} + ; cd /workspace/opt_run && python3 /tmp/kimi_single_layer_decode.py --point 1,8192,mx1024 --attn-type mla --moe-backend flashinfer_mxfp4 --attn-heads 12 --attention-backend cutedsl_mla --kv-cache-dtype fp8_e4m3 --experts 112 --ep 8 --local-topk 2 --hidden-scale 1.0 --cuda-graph --iters 5 --warmup 2 --bf16-gemm-init --flashinfer-autotune && echo LAYER_SMOKE_OK",
++    "ORACLE_URL": "http://172.17.0.1:8810",
++    "OPT_HISTORY": "/workspace/opt_history"
++  }
++}
 diff --git a/scripts-local/vibesim-analysis-container/issue_k3_mla_prefill.json b/scripts-local/vibesim-analysis-container/issue_k3_mla_prefill.json
 new file mode 100644
 index 0000000..3344bf7
@@ -998,6 +1197,71 @@ index 0000000..05ab551
 +    "POINTS": "1,1048576;16,65536,mix;128,8192;32,8192;1,8192",
 +    "INSTALL_CMD": "true",
 +    "REBUILD_CMD": "find /sgl-workspace/sglang/python/sglang -name __pycache__ -prune -exec rm -rf {} + ; cd /workspace/opt_run && python3 /tmp/kimi_single_layer_decode.py --point 1,8192 --attn-type mla --moe-backend flashinfer_mxfp4 --attention-backend cutedsl_mla --attn-heads 12 --kv-cache-dtype fp8_e4m3 --experts 112 --ep 8 --local-topk 2 --hidden-scale 1.0 --cuda-graph --iters 5 --warmup 2 --bf16-gemm-init --flashinfer-autotune && echo LAYER_SMOKE_OK",
++    "ORACLE_URL": "http://172.17.0.1:8802",
++    "OPT_HISTORY": "/workspace/opt_history"
++  }
++}
+diff --git a/scripts-local/vibesim-analysis-container/issue_k3_mla_verify_claude.json b/scripts-local/vibesim-analysis-container/issue_k3_mla_verify_claude.json
+new file mode 100644
+index 0000000..3ce7730
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/issue_k3_mla_verify_claude.json
+@@ -0,0 +1,59 @@
++{
++  "_note": "SPECULATIVE-DECODE VERIFY campaign (user 2026-09-27, follow-up #4). One MLA decoder layer, one B200 rank of the cookbook TP8/EP8 recipe. Points `B,L,vk<k>` = ForwardMode.TARGET_VERIFY: B requests at context L each verify k+1 tokens (k draft + bonus, chain / topk=1) in one forward, as EAGLE/MTP verification does. MLA takes the absorbed path: the TRT-LLM/CuteDSL decode kernel with q_len = k+1 per request over the L+k+1 fp8 latent-KV tokens (trtllm_mla_backend.forward_extend verify branch), writing the k+1 new KV rows. Primary: 64 requests x 4 tokens @8k; secondaries: 128 x 4 @8k and 16 x 4 @64k. Metric = CUDA-graph replay time of the verify step (--verify-graph, 2026-09-28: production's DecodeCudaGraphRunner captures TARGET_VERIFY at the draft width; the eager verify step is ~60% host launch overhead with sigma ~90 us under CPU contention, which made the 3-sigma gate reject a -14.7% KDA round). Correctness = strict max-rel rule on all B*(k+1) output rows + post-step state. Oracle: the decode prediction at the same B/L (VibeSim has no verify branch; the verify step is ~ a decode step with k+1 query rows). GPU mode: slurm.",
++  "case": "k3_mla_verify_claude",
++  "mode": "open_ended",
++  "framework": "sglang",
++  "judge": "judge_k3.py",
++  "task_template": "agent_task_k3_opt.md",
++  "driver": "kimi_single_layer_decode.py",
++  "codex_image": "rga-local/sglang-k3:v0520-claude",
++  "before_image": "lmsysorg/sglang:v0.5.20",
++  "driver_args": "--attn-type mla --moe-backend flashinfer_mxfp4 --attention-backend cutedsl_mla --attn-heads 12 --kv-cache-dtype fp8_e4m3 --experts 112 --ep 8 --local-topk 2 --hidden-scale 1.0 --cuda-graph --iters 40 --warmup 10 --bf16-gemm-init --flashinfer-autotune --verify-graph",
++  "points": {
++    "primary": [
++      64,
++      8192,
++      "vk3"
++    ],
++    "secondary": [
++      [
++        128,
++        8192,
++        "vk3"
++      ],
++      [
++        16,
++        65536,
++        "vk3"
++      ]
++    ]
++  },
++  "reps": 5,
++  "min_improvement": 0.0,
++  "rel_err_max": 0.02,
++  "seed": 0,
++  "edit_tree": {
++    "container_path": "/sgl-workspace/sglang/python/sglang"
++  },
++  "mounts": [
++    "/raid/hf/hub:/raid/hf/hub:ro",
++    "/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/k3_opt_history:/workspace/opt_history:ro"
++  ],
++  "shm_size": "32g",
++  "codex_model": "gpt-5.6-luna",
++  "agent": "claude",
++  "claude_model": "us.anthropic.claude-opus-5-5",
++  "render": {
++    "METRIC": "CUDA-graph replay latency of one TARGET_VERIFY step of one Kimi-K3 MLA decoder layer (speculative decoding, 4 tokens per request)",
++    "FRAMEWORK": "sglang",
++    "CHECKOUT": "/sgl-workspace/sglang",
++    "MODEL_NAME": "Kimi-K3 (moonshotai/Kimi-K3): one MLA (dense multi-head latent attention) decoder layer, as it runs on one B200 of the production TP8/EP8 deployment (12 attention heads, trtllm_mla chunked-prefill attention over a paged fp8 latent KV, 112 local mxfp4 experts)",
++    "WORKLOAD": "speculative-decode verification (ForwardMode.TARGET_VERIFY, chain, topk=1): B=64 requests at context 8,192 each verifying 4 tokens (3 draft + 1 bonus) in one forward (primary: 256 query tokens; MLA runs the absorbed decode kernel with 4 query rows per request over 8,196 cached fp8 latent tokens), plus B=128 x 4 @8k and B=16 x 4 @65,536 (must not regress)",
++    "DRIVER_ARGS": "--attn-type mla --moe-backend flashinfer_mxfp4 --attention-backend cutedsl_mla --attn-heads 12 --kv-cache-dtype fp8_e4m3 --experts 112 --ep 8 --local-topk 2 --hidden-scale 1.0 --cuda-graph --iters 40 --warmup 10 --bf16-gemm-init --flashinfer-autotune --verify-graph",
++    "POINTS": "64,8192,vk3;128,8192,vk3;16,65536,vk3",
++    "INSTALL_CMD": "true",
++    "REBUILD_CMD": "find /sgl-workspace/sglang/python/sglang -name __pycache__ -prune -exec rm -rf {} + ; cd /workspace/opt_run && python3 /tmp/kimi_single_layer_decode.py --point 4,8192,vk3 --attn-type mla --moe-backend flashinfer_mxfp4 --attn-heads 12 --attention-backend cutedsl_mla --kv-cache-dtype fp8_e4m3 --experts 112 --ep 8 --local-topk 2 --hidden-scale 1.0 --cuda-graph --iters 5 --warmup 2 --bf16-gemm-init --flashinfer-autotune --verify-graph && echo LAYER_SMOKE_OK",
 +    "ORACLE_URL": "http://172.17.0.1:8802",
 +    "OPT_HISTORY": "/workspace/opt_history"
 +  }

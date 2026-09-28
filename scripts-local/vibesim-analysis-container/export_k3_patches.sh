@@ -111,12 +111,29 @@ for c in kda mla; do
   [ "$n" -gt 0 ] && validate_chain "$HERE/iter_opt_eval_k3_${c}_prefill_claude/best_tree" "$CB/best_tree" "${chain[@]}"
 done
 
+echo "== sglang Claude MIXED prefill+decode and speculative-VERIFY chains (follow-up #4, slurm mode)"
+# seeds: mixed <- the same layer's lcprefill best tree; KDA verify <- the KDA shapes best tree; MLA verify <- PRISTINE
+# (every accepted MLA tree regressed the verify step). Accepted = the loop's own trial_k_verdict.json says PASS
+# (KDA verify r2's graph-mode re-judge PASS is not promoted: r3 superseded it on a separate branch).
+for spec in "kda_mixed:$HERE/iter_opt_eval_k3_kda_lcprefill_claude/best_tree" "mla_mixed:$HERE/iter_opt_eval_k3_mla_lcprefill_claude/best_tree" \
+            "kda_verify:$HERE/iter_opt_eval_k3_kda_shapes_claude/best_tree" "mla_verify:$HERE/iter_opt_eval_k3_mla_verify_claude/pristine_tree"; do
+  c="${spec%%:*}"; seed="${spec#*:}"; CB="$HERE/iter_opt_eval_k3_${c}_claude"; prev="$seed"; n=0; chain=()
+  [ -d "$CB/best_tree" ] || continue
+  for k in 1 2 3 4 5 6; do
+    t="$CB/trial_${k}_tree_judged"; v="$CB/trial_${k}_verdict.json"
+    [ -d "$t" ] && [ -f "$v" ] && grep -q '"verdict": "PASS"' "$v" || continue
+    n=$((n+1)); p="$OUT/sglang/claude/${c}_0${n}_r${k}.patch"; tree_diff "$prev" "$t" "$p"; chain+=("$p"); prev="$t"
+  done
+  [ "$n" -gt 0 ] && validate_chain "$seed" "$CB/best_tree" "${chain[@]}"
+done
+
 echo "== harness (workspace branch kimi-k3-loop vs its base)"
 BASE="$(git -C "$WS" merge-base kimi-k3-loop yilegu/dev)"
 C=scripts-local/vibesim-analysis-container
 git -C "$WS" diff "$BASE"..HEAD -- "$C/kimi_single_layer_decode.py" > "$OUT/harness/01_driver_kimi_single_layer_decode.patch"
 git -C "$WS" diff "$BASE"..HEAD -- "$C/judge_k3.py" "$C/run_iter_opt_eval.sh" "$C/agent_task_k3_opt.md" "$C"/issue_k3_*.json > "$OUT/harness/02_judge_runner_prompt_cases.patch"
-git -C "$WS" diff "$BASE"..HEAD -- "$C"/run_k3_*.sh "$C"/after_*.sh "$C"/resume_k3_loop_when_free.sh "$C"/restart_mla_b512_after_b12.sh "$C"/launch_b12*.sh "$C"/finish_b12.sh "$C"/recheck_best_trees_seeds.sh "$C"/rebake_mla_b512_oracle.sh "$C"/k3_prefill_profiles.sh > "$OUT/harness/03_loop_orchestration_scripts.patch"
+git -C "$WS" diff "$BASE"..HEAD -- "$C"/run_k3_*.sh "$C"/after_*.sh "$C"/resume_k3_loop_when_free.sh "$C"/restart_mla_b512_after_b12.sh "$C"/launch_b12*.sh "$C"/finish_b12.sh "$C"/recheck_best_trees_seeds.sh "$C"/rebake_mla_b512_oracle.sh "$C"/k3_prefill_profiles.sh \
+  "$C"/k3_gpu_shim.py "$C"/k3_gpu_broker.py "$C"/k3_slurm_step.sh "$C"/gpu_run.sh "$C"/gpu_note_slurm.md "$C"/resume_mixed_verify.sh "$C"/finish_and_resume.sh "$C"/bedrock_gate_and_resume.sh "$C"/rejudge_near_misses.sh "$C"/reseed_shapes_case.sh "$C"/bake_lcprefill_oracles.sh "$C"/rebake_prefill_oracles_b12c.sh > "$OUT/harness/03_loop_orchestration_scripts.patch"
 git -C "$WS" diff "$BASE"..HEAD -- "$C/build_opt_history.py" "$C/opt_history_techniques.md" > "$OUT/harness/04_warm_start_history.patch"
 git -C "$WS" diff "$BASE"..HEAD -- "$C/build_context_k3.sh" "$C"/codex_tasks/b*.md "$C/run_k3_jit_fill.sh" > "$OUT/harness/05_oracle_bake_and_codex_tasks.patch"
 git -C "$WS" log --oneline --reverse "$BASE"..HEAD > "$OUT/harness/COMMITS.txt"
@@ -147,6 +164,10 @@ Regenerate with \`./export_k3_patches.sh\` (validates that each sglang chain rep
   (12128 -> 11229 us @16k chunk with 48k prefix), KDA-prefill r1 (9072 -> 8564 us). Each chain is validated against
   the case's best_tree. The r1 b512 patches include the one-shot MoE autotune that reproduces production's warmup
   (harness gap; see the write-up). UNACCEPTED_*: exact but below the judge's 3-sigma floor.
+- \`sglang/claude/{kda,mla}_shapes_*\`, \`{kda,mla}_lcprefill_*\`: Campaign 6 (shape-matched decode incl. 1x1M,
+  long-context chunked prefill at 128k-262k). \`{kda,mla}_verify_*\`: speculative-verify (TARGET_VERIFY, CUDA-graph
+  metric; KDA seeded from the shapes tree, MLA from pristine). \`{kda,mla}_mixed_*\`: mixed prefill-chunk + decode
+  batches (eager metric; seeded from the lcprefill trees). See K3_CAMPAIGN6_SHAPES_LCPREFILL.md §9.6.
 
 ## harness (workspace branch \`kimi-k3-loop\`, vs base \`$(git -C "$WS" rev-parse --short "$BASE")\`)
 - \`harness/01_driver_*.patch\`: the single-layer extractor/driver (CUDA-graph metric, goldens, prefill points, ...).

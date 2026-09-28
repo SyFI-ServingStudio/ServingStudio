@@ -118,6 +118,27 @@ index 0000000..71ccf2d
 +  echo "==== round-25 tree passed the mixed-length point (unexpected) -> best_tree kept"
 +fi
 +echo "==== $(date +%F_%T) mixed-point check done"
+diff --git a/scripts-local/vibesim-analysis-container/after_resume.sh b/scripts-local/vibesim-analysis-container/after_resume.sh
+new file mode 100755
+index 0000000..7816573
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/after_resume.sh
+@@ -0,0 +1,15 @@
++#!/usr/bin/env bash
++# 2026-09-28 07:10: KDA mixed round 3's agent never ran (Bedrock returned 503 on all 10 retries, 0 tokens, tree ==
++# best_tree); its null judge (slurm 2336) was cancelled. Re-run the round once resume_mixed_verify.sh has finished the
++# MLA mixed rounds, keeping the failed evidence under trial_3_api503_*.
++set -uo pipefail
++HERE="$(cd "$(dirname "$0")" && pwd)"
++while pgrep -f "[r]esume_mixed_verify.sh" >/dev/null; do sleep 60; done
++echo "==== $(date +%F_%T) resume_mixed_verify.sh finished; re-running KDA mixed round 3"
++O="$HERE/iter_opt_eval_k3_kda_mixed_claude"
++for f in "$O"/trial_3_*; do
++  b="$(basename "$f")"; [ -e "$f" ] && mv "$f" "$O/trial_3_api503_${b#trial_3_}"
++done
++export AGENT_TIMEOUT="${AGENT_TIMEOUT:-2700}" MIN_IMPROVEMENT=0 K3_GPU_MODE=slurm K3_SHARED_GPU=1
++"$HERE/run_k3_continuous.sh" slurm kda_mixed_claude 3 1
++echo "==== $(date +%F_%T) after_resume done"
 diff --git a/scripts-local/vibesim-analysis-container/after_transfer_b512.sh b/scripts-local/vibesim-analysis-container/after_transfer_b512.sh
 new file mode 100755
 index 0000000..7c1ea08
@@ -256,6 +277,163 @@ index 0000000..44fb2f1
 +  presets/predict_kimi_k3_b200_rank1_layer_kda.json \
 +  presets/predict_kimi_k3_b200_rank1_layer_mla.json
 +echo "==== $(date +%F_%T) fill done exit=$?"
+diff --git a/scripts-local/vibesim-analysis-container/bake_lcprefill_oracles.sh b/scripts-local/vibesim-analysis-container/bake_lcprefill_oracles.sh
+new file mode 100755
+index 0000000..a543501
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/bake_lcprefill_oracles.sh
+@@ -0,0 +1,61 @@
++#!/usr/bin/env bash
++# Follow-up #1 (user 2026-09-27): give the long-context prefill agents a VibeSim prediction of THEIR points.
++#   1. JIT-fill + timing-predict the new presets predict_kimi_k3_b200_rank1_layer_{kda,mla}_lcprefill (16k/32k chunks
++#      at 131072/229376/245760 prefixes) as ONE slurm job (real profiling -> slurm main);
++#   2. commit presets + prediction logs on the worktree branch kimi-k3-arch, fast-forward main/ kimi-k3;
++#   3. re-bake vibesim-analysis:k3 (build_context_k3.sh has the k3_{kda,mla}_lcprefill BAKE entries) and start
++#      vibesim_oracle_k3_kda_lcprefill (8807) / vibesim_oracle_k3_mla_lcprefill (8808); existing oracles keep running;
++#   4. point issue_k3_{kda,mla}_lcprefill_claude.json at 8807/8808 (render-only change: goldens keep their key);
++#   5. launch MLA lcprefill rounds 4..6 (slurm mode). KDA rounds are follow-up #3 (longer agent budget).
++# Usage: bake_lcprefill_oracles.sh [first_round_k=4] [n_rounds=3]
++set -uo pipefail
++HERE="$(cd "$(dirname "$0")" && pwd)"; K0="${1:-4}"; N="${2:-3}"
++WT=/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/main-k3-rust
++MAIN=/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/main
++PRESETS=(presets/predict_kimi_k3_b200_rank1_layer_kda_lcprefill.json presets/predict_kimi_k3_b200_rank1_layer_mla_lcprefill.json)
++
++echo "==== $(date +%F_%T) 1. JIT fill + predict (slurm main)"
++job="$(sbatch --parsable --partition=main --job-name=k3_lcprefill_fill --output="$HERE/k3_lcprefill_fill.slurm.out" \
++       "$HERE/slurm_gpu.sh" "$HERE/k3_slurm_step.sh" "$HERE/run_k3_jit_fill.sh" "${PRESETS[@]}" | cut -d';' -f1)"
++echo "slurm job $job -> $HERE/k3_lcprefill_fill.slurm.out"
++while squeue -h -j "$job" -o %T 2>/dev/null | grep -q .; do sleep 60; done; sleep 2
++grep -a "^RESULT" "$HERE/k3_lcprefill_fill.slurm.out"
++for c in kda mla; do
++  m="$WT/logs/predict_kimi_k3_b200_rank1_layer_${c}_lcprefill/prediction.meta.json"
++  [ -f "$m" ] || { echo "!! no prediction for $c (see k3_lcprefill_fill.slurm.out)"; exit 1; }
++  echo "$c prediction: $(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('prediction_id'))" "$m")"
++done
++
++echo "==== $(date +%F_%T) 2. commit on kimi-k3-arch, ff main/ kimi-k3"
++cd "$WT" && git add presets/predict_kimi_k3_b200_rank1_layer_*_lcprefill*.json \
++  logs/predict_kimi_k3_b200_rank1_layer_kda_lcprefill logs/predict_kimi_k3_b200_rank1_layer_mla_lcprefill 2>/dev/null
++git -C "$WT" commit -q -m "kimi_k3: long-context chunked-prefill presets + baked predictions (16k/32k chunks at 128k-262k prefixes) for the lcprefill oracles
++
++Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>" && git -C "$WT" log --oneline -1
++(cd "$MAIN" && git merge --ff-only kimi-k3-arch 2>&1 | tail -1)
++
++echo "==== $(date +%F_%T) 3. bake image + start 8807/8808"
++"$HERE/build_context_k3.sh" > "$HERE/k3_lcprefill_bake.log" 2>&1 \
++  && sed 's#COPY context/#COPY context_k3/#' "$HERE/Dockerfile" | docker build -q -t vibesim-analysis:k3 -f - "$HERE" >> "$HERE/k3_lcprefill_bake.log" 2>&1 \
++  || { echo "!! bake failed (k3_lcprefill_bake.log)"; exit 1; }
++for spec in k3_kda_lcprefill:8807 k3_mla_lcprefill:8808; do
++  run="${spec%%:*}"; port="${spec##*:}"
++  docker rm -f "vibesim_oracle_${run}" >/dev/null 2>&1 || true
++  docker run -d --name "vibesim_oracle_${run}" -e VIBESIM_PREBAKED_RUN="$run" -e VIBESIM_API_PORT="$port" \
++    -p "172.17.0.1:${port}:${port}" vibesim-analysis:k3 >/dev/null
++done
++sleep 25
++for port in 8807 8808; do printf "oracle %s: " "$port"; curl -s -m 10 "http://172.17.0.1:$port/api/v1/analyze?level=run_summary" | head -c 160; echo; done
++
++echo "==== $(date +%F_%T) 4. point the lcprefill cases at the new oracles"
++python3 - "$HERE" <<'PY'
++import json, sys, pathlib
++here = pathlib.Path(sys.argv[1])
++for c, port in (("kda", 8807), ("mla", 8808)):
++    p = here / f"issue_k3_{c}_lcprefill_claude.json"; d = json.loads(p.read_text())
++    d["render"]["ORACLE_URL"] = f"http://172.17.0.1:{port}"
++    d["_note"] += f" 2026-09-27: oracle re-baked for the long-context points (port {port}); rounds 1-3 used the <=48k-prefix prefill oracle."
++    p.write_text(json.dumps(d, indent=2) + "\n"); print(p.name, "->", port)
++PY
++echo "==== $(date +%F_%T) 5. MLA lcprefill rounds $K0..$((K0+N-1)) (slurm mode)"
++exec "$HERE/run_k3_continuous.sh" slurm mla_lcprefill_claude "$K0" "$N"
+diff --git a/scripts-local/vibesim-analysis-container/bedrock_gate_and_resume.sh b/scripts-local/vibesim-analysis-container/bedrock_gate_and_resume.sh
+new file mode 100755
+index 0000000..5b4cc09
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/bedrock_gate_and_resume.sh
+@@ -0,0 +1,32 @@
++#!/usr/bin/env bash
++# 2026-09-28 07:15: Bedrock (us-east-1, us.anthropic.claude-opus-5-5) returns 503 ServiceUnavailable; the KDA mixed r3
++# and MLA mixed r2 agents exited after 10 retries with zero tokens (evidence kept as trial_*_api503_*). Gate the campaign
++# on a live probe and resume when the endpoint answers twice in a row; resume_mixed_verify.sh skips every round that
++# already has a verdict, so it continues with KDA mixed r3 and MLA mixed r2-r4.
++set -uo pipefail
++HERE="$(cd "$(dirname "$0")" && pwd)"
++export AWS_PROFILE="${AWS_PROFILE:-default}" AWS_REGION="${AWS_REGION:-us-east-1}"
++probe() {
++  timeout 90 python3 - <<'PY'
++import boto3, botocore, sys
++c = boto3.client("bedrock-runtime", region_name="us-east-1", config=botocore.config.Config(retries={"max_attempts": 1}))
++try:
++    r = c.converse(modelId="us.anthropic.claude-opus-5-5",
++                   messages=[{"role": "user", "content": [{"text": "Reply with OK"}]}], inferenceConfig={"maxTokens": 5})
++    print("OK", r["output"]["message"]["content"][0]["text"].strip()); sys.exit(0)
++except botocore.exceptions.ClientError as e:
++    print("ERR", e.response["ResponseMetadata"]["HTTPStatusCode"], e.response["Error"]["Code"]); sys.exit(1)
++except Exception as e:
++    print("EXC", type(e).__name__, str(e)[:120]); sys.exit(1)
++PY
++}
++ok=0
++while :; do
++  out="$(probe 2>&1 | tail -n 1)"
++  echo "$(date +%F_%T) probe: $out"
++  case "$out" in OK*) ok=$((ok + 1)) ;; *) ok=0 ;; esac
++  [ "$ok" -ge 2 ] && break
++  sleep $([ "$ok" -eq 1 ] && echo 60 || echo 120)
++done
++echo "$(date +%F_%T) Bedrock healthy (2 consecutive probes) -> resuming"
++exec "$HERE/resume_mixed_verify.sh"
+diff --git a/scripts-local/vibesim-analysis-container/finish_and_resume.sh b/scripts-local/vibesim-analysis-container/finish_and_resume.sh
+new file mode 100755
+index 0000000..9e91df1
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/finish_and_resume.sh
+@@ -0,0 +1,46 @@
++#!/usr/bin/env bash
++# 2026-09-28 01:40: the placeholders released GPUs 0/5/6/7 and the three paused-campaign judges started
++# (2150 = MLA mixed r1 judge, 2152 = KDA verify r1 15-rep re-judge, 2149 = stray MLA-mixed measurement).
++# Their parent loops were killed for the pause, so nobody records/promotes their verdicts. This script:
++#   1. waits for 2150 and 2152 to leave the queue;
++#   2. appends the verdicts to rounds.jsonl (same record shape as run_k3_continuous.sh) and promotes PASS trees;
++#   3. hands over to resume_mixed_verify.sh for the remaining rounds.
++set -uo pipefail
++HERE="$(cd "$(dirname "$0")" && pwd)"
++WAIT_JOBS="${WAIT_JOBS:-2150 2152}"
++for j in $WAIT_JOBS; do
++  while squeue -h -j "$j" -o %T 2>/dev/null | grep -q .; do sleep 60; done
++  echo "$(date +%F_%T) job $j finished"
++done
++python3 - "$HERE" <<'PY'
++import json, sys, time, os, shutil
++here = sys.argv[1]
++def rec(case, k, vpath, note, promote_from=None):
++    o = f"{here}/iter_opt_eval_k3_{case}"
++    if not os.path.exists(vpath):
++        print(f"!! {case} r{k}: no verdict at {vpath}"); return
++    v = json.load(open(vpath))
++    pts = {p: (round(d["before_us"], 1), round(d["after_us"], 1), d["improvement"], d["correctness"].get("pass"))
++           for p, d in (v.get("points") or {}).items()}
++    r = {"round": k, "case": case, "verdict": v.get("verdict"), "reason": v.get("reason"), "points": pts,
++         "files": v.get("changed_files"), "diff_lines": v.get("diff_lines"), "pristine_points": v.get("pristine_points"),
++         "time": time.strftime("%F %T"), "note": note}
++    open(f"{o}/rounds.jsonl", "a").write(json.dumps(r) + "\n")
++    print(f"{case} r{k}: {v.get('verdict')} {v.get('reason')} {pts}")
++    if v.get("verdict") == "PASS" and promote_from and os.path.isdir(promote_from):
++        best = f"{o}/best_tree"
++        shutil.rmtree(best + ".prev", ignore_errors=True)
++        if os.path.isdir(best): os.rename(best, best + ".prev")
++        shutil.copytree(promote_from, best, symlinks=True)
++        print(f"   promoted {promote_from} -> best_tree")
++kv = f"{here}/iter_opt_eval_k3_kda_verify_claude"
++rec("kda_verify_claude", 1, f"{kv}/trial_1_verdict.json",
++    "5-rep judge: noise-rejected (sigma 141us on the host-bound eager verify step); re-judged at 15 reps below")
++rec("kda_verify_claude", 1, f"{kv}/rejudge15_trial_1_verdict.json", "15-rep re-judge of trial 1 (slurm 2152)",
++    promote_from=f"{kv}/rejudge15_trial_1_tree_judged")
++mm = f"{here}/iter_opt_eval_k3_mla_mixed_claude"
++rec("mla_mixed_claude", 1, f"{mm}/trial_1_verdict.json", "judge ran as slurm 2150 after the pause; parent loop killed",
++    promote_from=f"{mm}/trial_1_tree_judged")
++PY
++echo "$(date +%F_%T) handing over to resume_mixed_verify.sh"
++exec "$HERE/resume_mixed_verify.sh"
 diff --git a/scripts-local/vibesim-analysis-container/finish_b12.sh b/scripts-local/vibesim-analysis-container/finish_b12.sh
 new file mode 100755
 index 0000000..153d367
@@ -303,6 +481,288 @@ index 0000000..153d367
 +fi
 +cd /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/main && git merge --ff-only kimi-k3-arch 2>&1 | tail -1 && echo "main/ kimi-k3 @ $(git log --oneline -1)"
 +echo "==== $(date +%F_%T) finish_b12 done"
+diff --git a/scripts-local/vibesim-analysis-container/gpu_note_slurm.md b/scripts-local/vibesim-analysis-container/gpu_note_slurm.md
+new file mode 100644
+index 0000000..4a262a8
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/gpu_note_slurm.md
+@@ -0,0 +1,15 @@
++**GPU access in this container (read before measuring).** This container has **no GPU**
++(`nvidia-smi`, `torch.cuda` and `ncu` will not work here). Every `python3 /tmp/kimi_single_layer_decode.py …`
++call is transparently forwarded to a **slurm-allocated B200**: the real driver (read-only source:
++`/tmp/k3_driver_src/kimi_single_layer_decode.py`) runs in a fresh sglang container with **your edited
++tree mounted at the same path** and `/workspace/opt_run` shared, and its output streams back with the
++driver's exit code. Consequences:
++- Each call costs slurm queue + container start (typically 1–3 min before the first driver line):
++  **batch all points into one call**, do not poll with many small runs.
++- Output paths: write under `/workspace/opt_run/…`. A `/tmp/<x>` path you pass is rewritten to
++  `/workspace/opt_run/tmp/<x>` and symlinked back to `/tmp/<x>` here, so `--capture /tmp/golden.pt`
++  still works. Environment variables you export here do NOT reach the GPU job (only source edits
++  carry over — exactly as with the judge).
++- For any other GPU command (micro-benchmarks, `nsys`, a quick `python3 -c` on CUDA):
++  `/tmp/gpu_run.sh <command…>` runs it in the same kind of measurement container.
++- Edited JIT-CUDA sources compile inside the GPU job; a compile error shows up in that output.
+diff --git a/scripts-local/vibesim-analysis-container/gpu_run.sh b/scripts-local/vibesim-analysis-container/gpu_run.sh
+new file mode 100755
+index 0000000..fdd5933
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/gpu_run.sh
+@@ -0,0 +1,8 @@
++#!/usr/bin/env bash
++# Run an arbitrary command on the slurm-allocated B200 (this agent container has no GPU): the
++# command executes in a fresh sglang container with your edited tree at
++# /sgl-workspace/sglang/python/sglang and /workspace/opt_run shared. cwd is kept if it is under
++# /sgl-workspace or /workspace/opt_run, else /workspace/opt_run. Example:
++#   /tmp/gpu_run.sh python3 -c 'import torch; print(torch.cuda.get_device_name())'
++#   /tmp/gpu_run.sh nsys profile -o /workspace/opt_run/iter_03/trace python3 /tmp/kimi_single_layer_decode.py ...
++exec python3 /tmp/k3_gpu_shim.py --exec -- "$@"
+diff --git a/scripts-local/vibesim-analysis-container/k3_gpu_broker.py b/scripts-local/vibesim-analysis-container/k3_gpu_broker.py
+new file mode 100755
+index 0000000..d801b26
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/k3_gpu_broker.py
+@@ -0,0 +1,129 @@
++#!/usr/bin/env python3
++"""Host-side GPU broker for one Kimi-K3 trial in slurm mode (user 2026-09-26: submit GPU work as
++slurm `main` jobs and hold a GPU only while actually profiling).
++
++The agent container runs WITHOUT a GPU; its /tmp/kimi_single_layer_decode.py is k3_gpu_shim.py,
++which drops request files into <dir>/req/. This daemon turns each request into ONE slurm job
++(`sbatch --wait slurm_gpu.sh k3_slurm_step.sh --docker <docker-run args>`): a fresh
++`before_image` container bound to the slurm-allocated GPU, the agent's edited tree mounted at the
++edit path, /workspace/opt_run shared, per-trial sglang JIT cache persisted. stdout goes to
++<dir>/res/<id>.out (slurm -o; the shim tails it live), the job's exit code to <id>.rc.
++Requests are served strictly one at a time (the agent is sequential; two concurrent measurements
++would also double-book GPUs).
++
++Usage: k3_gpu_broker.py --dir D --tree HOST_TREE --edit-path /sgl-workspace/sglang/python/sglang
++         --driver HOST_DRIVER --opt-run HOST_DIR --jit-cache HOST_DIR --image lmsysorg/sglang:v0.5.20
++         [--mount host:cont[:ro] ...] [--shm 32g] [--partition main] [--job-prefix k3m_case]
++Stops when <dir>/STOP exists.
++"""
++import argparse, json, os, pathlib, shlex, subprocess, sys, time
++
++HERE = pathlib.Path(__file__).resolve().parent
++
++
++def log(msg):
++    print(time.strftime("%F %T"), msg, flush=True)
++
++
++def submit_and_wait(cmd, out, job_f, poll=5):
++    """sbatch (no --wait: its job-id line would sit in a pipe buffer), then poll squeue until the
++    job leaves the queue. Exit code: the `[step] EXIT_RC=` marker k3_slurm_step.sh appends to the
++    output file, else scontrol's ExitCode, else 1."""
++    p = subprocess.run(cmd, capture_output=True, text=True)
++    if p.returncode != 0 or not p.stdout.strip():
++        out.write_text(f"[broker] sbatch failed rc={p.returncode}: {p.stdout} {p.stderr}\n")
++        return 1, "?"
++    job = p.stdout.strip().split(";")[0]
++    job_f.write_text(job)
++    while True:
++        q = subprocess.run(["squeue", "-h", "-j", job, "-o", "%T"], capture_output=True, text=True)
++        if q.returncode != 0 or not q.stdout.strip():
++            break
++        time.sleep(poll)
++    time.sleep(2)                      # let slurm flush the output file
++    rc = None
++    if out.exists():
++        tail = out.read_bytes()[-4000:].decode(errors="replace")
++        for line in reversed(tail.splitlines()):
++            if line.startswith("[step] EXIT_RC="):
++                try:
++                    rc = int(line.split("=", 1)[1].strip())
++                except ValueError:
++                    pass
++                break
++    if rc is None:
++        s = subprocess.run(["scontrol", "show", "job", job], capture_output=True, text=True).stdout
++        for tok in s.split():
++            if tok.startswith("ExitCode="):
++                try:
++                    rc = int(tok.split("=")[1].split(":")[0])
++                except ValueError:
++                    pass
++        with open(out, "a") as f:
++            f.write(f"\n[broker] no EXIT_RC marker (job killed/timed out?); scontrol ExitCode -> rc={rc}\n")
++    return (1 if rc is None else rc), job
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--dir", required=True); ap.add_argument("--tree", required=True)
++    ap.add_argument("--edit-path", default="/sgl-workspace/sglang/python/sglang")
++    ap.add_argument("--driver", required=True); ap.add_argument("--opt-run", required=True)
++    ap.add_argument("--jit-cache", required=True); ap.add_argument("--image", required=True)
++    ap.add_argument("--mount", action="append", default=[]); ap.add_argument("--shm", default="32g")
++    ap.add_argument("--partition", default="main"); ap.add_argument("--job-prefix", default="k3m")
++    ap.add_argument("--flashinfer-cache", default="/raid/yilegu/flashinfer_cache")
++    a = ap.parse_args()
++    d = pathlib.Path(a.dir); req_d, res_d = d / "req", d / "res"
++    req_d.mkdir(parents=True, exist_ok=True); res_d.mkdir(parents=True, exist_ok=True)
++    stop = d / "STOP"
++    pathlib.Path(a.opt_run).mkdir(parents=True, exist_ok=True)
++    pathlib.Path(a.jit_cache).mkdir(parents=True, exist_ok=True)
++    log(f"broker up: dir={d} tree={a.tree} image={a.image} partition={a.partition}")
++    while not stop.exists():
++        reqs = sorted(req_d.glob("*.json"), key=lambda p: p.stat().st_mtime)
++        if not reqs:
++            time.sleep(2); continue
++        rp = reqs[0]
++        try:
++            r = json.loads(rp.read_text())
++        except Exception as e:
++            log(f"bad request {rp}: {e}"); rp.rename(rp.with_suffix(".bad")); continue
++        rid = r["id"]
++        out, rc_f, job_f = (res_d / f"{rid}.{s}" for s in ("out", "rc", "job"))
++        docker_args = ["-e", "CUDA_VISIBLE_DEVICES=0", "-e", "HF_HUB_OFFLINE=1",
++                       "-e", "SGLANG_OPT_FUSED_KDA_VERIFY=0", "-e", "TOKENIZERS_PARALLELISM=false",
++                       "--shm-size", a.shm,
++                       "-v", f"{a.tree}:{a.edit_path}",
++                       "-v", f"{a.driver}:/tmp/kimi_single_layer_decode.py:ro",
++                       "-v", f"{a.opt_run}:/workspace/opt_run",
++                       "-v", f"{a.jit_cache}:/root/.cache/sglang/jit",
++                       "-v", f"{a.flashinfer_cache}:/root/.cache/flashinfer"]
++        for m in a.mount:
++            docker_args += ["-v", m]
++        docker_args += ["--workdir", r.get("cwd") or "/workspace/opt_run", a.image] + list(r["argv"])
++        cmd = ["sbatch", "--parsable", f"--partition={a.partition}",
++               f"--job-name={a.job_prefix}_{rid[-6:]}", f"--output={out}",
++               str(HERE / "slurm_gpu.sh"), str(HERE / "k3_slurm_step.sh"), "--docker"] + docker_args
++        log(f"[{rid}] {r['kind']}: {' '.join(shlex.quote(x) for x in r['argv'])[:300]}")
++        rp.rename(rp.with_suffix(".running"))
++        t0 = time.time()
++        try:
++            rc, job = submit_and_wait(cmd, out, job_f)
++            rc_f.write_text(str(rc))
++            log(f"[{rid}] done rc={rc} in {time.time()-t0:.0f}s (job {job})")
++            rp.with_suffix(".running").rename(rp.with_suffix(".done"))
++        except OSError as e:
++            # 2026-09-27: /raid hit 100% for ~15 min and an ENOSPC on the output file killed the
++            # broker, stranding the agent's call. Never die on I/O: requeue the request and retry.
++            log(f"[{rid}] I/O error ({e}); requeue and retry in 60s")
++            try:
++                rp.with_suffix(".running").rename(rp)
++            except OSError:
++                pass
++            time.sleep(60)
++    log("broker stopped (STOP file)")
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/scripts-local/vibesim-analysis-container/k3_gpu_shim.py b/scripts-local/vibesim-analysis-container/k3_gpu_shim.py
+new file mode 100755
+index 0000000..fcd0dad
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/k3_gpu_shim.py
+@@ -0,0 +1,106 @@
++#!/usr/bin/env python3
++"""GPU proxy for the Kimi-K3 agent container (slurm mode).
++
++This container has NO GPU. Installed as /tmp/kimi_single_layer_decode.py it forwards every
++invocation of the measurement driver to a host-side broker (k3_gpu_broker.py) that runs the REAL
++driver (read-only copy: /tmp/k3_driver_src/kimi_single_layer_decode.py) in a fresh sglang
++container on a slurm-allocated B200, with YOUR edited tree mounted at the same path
++(/sgl-workspace/sglang/python/sglang) and /workspace/opt_run shared. stdout/stderr of the GPU job
++are streamed back here; the exit code is the driver's.
++
++  python3 /tmp/kimi_single_layer_decode.py --point ... <flags>     # driver call (transparent)
++  /tmp/gpu_run.sh <any command>                                     # generic GPU command in the
++                                                                    # same measurement container
++Paths: /workspace/opt_run is the shared directory. Any `/tmp/<x>` output path you pass is
++rewritten to /workspace/opt_run/tmp/<x> (and symlinked back to /tmp/<x> in this container), so
++`--capture /tmp/golden.pt` keeps working. Environment variables set in this shell do NOT reach the
++GPU job (only edits to the source tree carry over, exactly like the judge).
++Each call costs slurm queue + container start (~1-3 min): batch your points into one call.
++"""
++import json, os, pathlib, shutil, sys, time, uuid
++
++BROKER = pathlib.Path(os.environ.get("K3_GPU_BROKER_DIR", "/workspace/.gpu"))
++SHARED = "/workspace/opt_run"
++DRIVER_SRC = "/tmp/k3_driver_src/kimi_single_layer_decode.py"
++TIMEOUT = int(os.environ.get("K3_GPU_TIMEOUT", "5400"))
++
++
++PATH_FLAGS = {"--capture", "--replay", "--profile-kernels", "--json-out", "--nvtx-align",
++              "--flashinfer-autotune-cache", "-o", "--output", "--out"}
++
++
++def _rewrite(tok, cwd, prev=None):
++    """/tmp/<x> -> /workspace/opt_run/tmp/<x>; a RELATIVE value of a known output flag when cwd is
++    /tmp likewise (numbers such as `--hidden-scale 1.0` are never touched)."""
++    if tok.startswith("/tmp/") and not tok.startswith("/tmp/k3_driver_src"):
++        new = f"{SHARED}/tmp/{tok[len('/tmp/'):]}"
++    elif cwd == "/tmp" and prev in PATH_FLAGS and not tok.startswith("-") and not tok.startswith("/"):
++        new = f"{SHARED}/tmp/{tok}"
++    else:
++        return tok
++    pathlib.Path(new).parent.mkdir(parents=True, exist_ok=True)
++    link = pathlib.Path("/tmp") / pathlib.Path(new).relative_to(f"{SHARED}/tmp")
++    try:
++        if not link.exists() and not link.is_symlink():
++            link.parent.mkdir(parents=True, exist_ok=True)
++            link.symlink_to(new)
++    except OSError:
++        pass
++    return new
++
++
++def main():
++    argv = sys.argv[1:]
++    cwd = os.getcwd()
++    if argv[:1] == ["--exec"]:
++        kind, cmd = "exec", argv[1:]
++        if cmd[:1] == ["--"]:
++            cmd = cmd[1:]
++        if not (cwd.startswith("/sgl-workspace") or cwd.startswith(SHARED)):
++            cwd = SHARED
++        cmd = [_rewrite(t, os.getcwd(), cmd[i - 1] if i else None) for i, t in enumerate(cmd)]
++    else:
++        kind = "driver"
++        cmd = ["python3", "/tmp/kimi_single_layer_decode.py"] + \
++              [_rewrite(t, cwd, argv[i - 1] if i else None) for i, t in enumerate(argv)]
++        cwd = SHARED if cwd == "/tmp" else cwd
++    if not cmd:
++        print(__doc__); return 2
++    (BROKER / "req").mkdir(parents=True, exist_ok=True)
++    (BROKER / "res").mkdir(parents=True, exist_ok=True)
++    rid = time.strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:6]
++    req = {"id": rid, "kind": kind, "argv": cmd, "cwd": cwd, "created": time.time()}
++    tmp = BROKER / "req" / f"{rid}.json.tmp"
++    tmp.write_text(json.dumps(req)); tmp.rename(BROKER / "req" / f"{rid}.json")
++    out, rc_f, job_f = (BROKER / "res" / f"{rid}.{s}" for s in ("out", "rc", "job"))
++    print(f"[gpu-proxy] request {rid}: {' '.join(cmd)}  (cwd {cwd}) -> slurm B200 job; waiting", file=sys.stderr, flush=True)
++    t0, pos, announced = time.time(), 0, False
++    while True:
++        if not announced and job_f.exists():
++            print(f"[gpu-proxy] slurm job {job_f.read_text().strip()} submitted; output streams below", file=sys.stderr, flush=True)
++            announced = True
++        if out.exists():
++            with open(out, "rb") as f:
++                f.seek(pos); chunk = f.read(); pos += len(chunk)
++            if chunk:
++                sys.stdout.buffer.write(chunk); sys.stdout.flush()
++        if rc_f.exists():
++            time.sleep(0.5)                      # let the last flush land
++            with open(out, "rb") as f:
++                f.seek(pos); chunk = f.read()
++            if chunk:
++                sys.stdout.buffer.write(chunk); sys.stdout.flush()
++            try:
++                rc = int(rc_f.read_text().strip() or 1)
++            except ValueError:
++                rc = 1
++            print(f"[gpu-proxy] done rc={rc} in {time.time()-t0:.0f}s", file=sys.stderr, flush=True)
++            return rc
++        if time.time() - t0 > TIMEOUT:
++            print(f"[gpu-proxy] TIMEOUT after {TIMEOUT}s waiting for the GPU job (id {rid})", file=sys.stderr, flush=True)
++            return 124
++        time.sleep(2)
++
++
++if __name__ == "__main__":
++    sys.exit(main())
 diff --git a/scripts-local/vibesim-analysis-container/k3_prefill_profiles.sh b/scripts-local/vibesim-analysis-container/k3_prefill_profiles.sh
 new file mode 100755
 index 0000000..458417f
@@ -336,6 +796,41 @@ index 0000000..458417f
 +echo "==== $(date +%F_%T) MLA prefill profiles"
 +run mla "--attn-type mla --attention-backend cutedsl_mla --kv-cache-dtype fp8_e4m3" "1,16384,pf49152;1,16384,pf;4,4096,pf"
 +echo "==== $(date +%F_%T) done"; ls -la "$OUTD"/profiles/${TAG}_* "$OUTD"/result_${TAG}_* 2>/dev/null
+diff --git a/scripts-local/vibesim-analysis-container/k3_slurm_step.sh b/scripts-local/vibesim-analysis-container/k3_slurm_step.sh
+new file mode 100755
+index 0000000..11cba46
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/k3_slurm_step.sh
+@@ -0,0 +1,29 @@
++#!/usr/bin/env bash
++# Runs INSIDE a slurm_gpu.sh allocation (DOCKER_GPU_ARG / SLURM_GPU_UUID exported). Two jobs:
++#   1. guard against a foreign (non-slurm) tenant on the allocated GPU: slurm does not see direct
++#      docker users, so a "free" allocation can still be occupied -> wait up to WAIT_MAX s for
++#      memory.used < 1000 MiB, then proceed with a loud warning (the judge's sigma catches noise);
++#   2. `--docker <args>`: exec `docker run --rm --name k3m_<jobid> --gpus $DOCKER_GPU_ARG <args>`
++#      and remove that container if slurm kills the job (time limit / scancel);
++#      otherwise exec "$@" as-is (e.g. the judge).
++set -uo pipefail
++WAIT_MAX="${K3_GPU_BUSY_WAIT:-300}"
++uuid="${SLURM_GPU_UUID%%,*}"
++t=0
++while :; do
++  used="$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits -i "$uuid" 2>/dev/null | tr -d ' ')"
++  [ -z "$used" ] && { echo "[step] cannot read memory.used of $uuid; continuing"; break; }
++  [ "$used" -lt 1000 ] && break
++  if [ "$t" -ge "$WAIT_MAX" ]; then echo "[step] GPU_BUSY_WARNING: $uuid has ${used} MiB resident from a non-slurm tenant after ${t}s; proceeding"; break; fi
++  echo "[step] $(date +%T) GPU $uuid busy (${used} MiB, non-slurm tenant) -> wait 30s"; sleep 30; t=$((t + 30))
++done
++if [ "${1:-}" = "--docker" ]; then
++  shift
++  name="k3m_${SLURM_JOB_ID:-$$}"
++  trap 'echo "[step] signal -> removing container $name"; docker rm -f "$name" >/dev/null 2>&1; exit 143' TERM INT
++  docker run --rm --name "$name" --gpus "$DOCKER_GPU_ARG" "$@" &
++  wait $!; rc=$?
++  echo "[step] EXIT_RC=$rc"; exit $rc
++fi
++"$@"; rc=$?
++echo "[step] EXIT_RC=$rc"; exit $rc
 diff --git a/scripts-local/vibesim-analysis-container/launch_b12_after_b12a.sh b/scripts-local/vibesim-analysis-container/launch_b12_after_b12a.sh
 new file mode 100755
 index 0000000..c273b2e
@@ -421,6 +916,33 @@ index 0000000..7672fdb
 +sleep 25; curl -s "http://172.17.0.1:8804/api/v1/analyze?level=iteration" | python3 -c "
 +import json,sys,re; t=json.load(sys.stdin)['tree_text']; print([l for l in t.splitlines() if l.startswith('total') or 'mla_decode_attention (' in l][:6])"
 +echo "==== $(date +%F_%T) 8804 restarted"
+diff --git a/scripts-local/vibesim-analysis-container/rebake_prefill_oracles_b12c.sh b/scripts-local/vibesim-analysis-container/rebake_prefill_oracles_b12c.sh
+new file mode 100755
+index 0000000..e019862
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/rebake_prefill_oracles_b12c.sh
+@@ -0,0 +1,21 @@
++#!/usr/bin/env bash
++# Re-bake vibesim-analysis:k3 with the B12c-corrected prefill predictions and restart the prefill oracles.
++# $@ = ports to restart now (default 8805 8806 8807); 8808 is restarted separately once the running MLA agent is done.
++set -uo pipefail
++HERE="$(cd "$(dirname "$0")" && pwd)"
++PORTS=("${@:-8805 8806 8807}"); [ $# -gt 0 ] || PORTS=(8805 8806 8807)
++declare -A RUN=([8805]=k3_kda_prefill [8806]=k3_mla_prefill [8807]=k3_kda_lcprefill [8808]=k3_mla_lcprefill)
++echo "==== $(date +%F_%T) bake with $(git -C /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/main-k3-rust log --oneline -1)"
++"$HERE/build_context_k3.sh" > "$HERE/k3_b12c_rebake.log" 2>&1 \
++  && sed 's#COPY context/#COPY context_k3/#' "$HERE/Dockerfile" | docker build -q -t vibesim-analysis:k3 -f - "$HERE" >> "$HERE/k3_b12c_rebake.log" 2>&1 \
++  || { echo "!! bake failed (k3_b12c_rebake.log)"; exit 1; }
++for port in "${PORTS[@]}"; do
++  run="${RUN[$port]}"; docker rm -f "vibesim_oracle_${run}" >/dev/null 2>&1 || true
++  docker run -d --name "vibesim_oracle_${run}" -e VIBESIM_PREBAKED_RUN="$run" -e VIBESIM_API_PORT="$port" -p "172.17.0.1:${port}:${port}" vibesim-analysis:k3 >/dev/null
++done
++sleep 25
++for port in "${PORTS[@]}"; do printf "oracle %s: " "$port"; curl -s -m 10 "http://172.17.0.1:$port/api/v1/analyze?level=iteration" | python3 -c "
++import json,sys
++try: t=json.load(sys.stdin)['tree_text']; print([l.strip()[:90] for l in t.splitlines() if l.startswith('total') or 'attention_prefix' in l][:3])
++except Exception as e: print('ERR', e)"; done
++echo "==== $(date +%F_%T) done"
 diff --git a/scripts-local/vibesim-analysis-container/recheck_best_trees_seeds.sh b/scripts-local/vibesim-analysis-container/recheck_best_trees_seeds.sh
 new file mode 100755
 index 0000000..49fd4b3
@@ -462,6 +984,86 @@ index 0000000..49fd4b3
 +  done
 +done
 +echo "==== $(date +%F_%T) recheck done"
+diff --git a/scripts-local/vibesim-analysis-container/rejudge_near_misses.sh b/scripts-local/vibesim-analysis-container/rejudge_near_misses.sh
+new file mode 100755
+index 0000000..f25533f
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/rejudge_near_misses.sh
+@@ -0,0 +1,26 @@
++#!/usr/bin/env bash
++# Follow-up #2 (user 2026-09-27): re-judge the exact-but-below-3-sigma rounds with a lower noise floor (15 reps
++# instead of 5; a reps change re-keys the goldens, so fresh 15-rep goldens/baselines are generated too).
++# One slurm job per case (each ~60-90 min; the 2 h partition limit is why they are not chained).
++#   rejudge_near_misses.sh kda_b512_claude 2 1     # trial 2 tree vs the trial-1 tree it was judged against
++#   rejudge_near_misses.sh kda_lcprefill_claude 3 2
++# Verdict: iter_opt_eval_k3_<case>/rejudge15_trial_<k>_verdict.json
++set -uo pipefail
++HERE="$(cd "$(dirname "$0")" && pwd)"
++CASE="$1"; K="$2"; BASE_K="$3"; REPS="${REPS:-15}"
++OUT="$HERE/iter_opt_eval_k3_${CASE}"
++CFG="$OUT/issue_k3_${CASE}_reps${REPS}.json"
++python3 - "$HERE/issue_k3_${CASE}.json" "$CFG" "$REPS" <<'PY'
++import json, sys
++c = json.load(open(sys.argv[1])); c["reps"] = int(sys.argv[3]); c["min_improvement"] = 0.0
++json.dump(c, open(sys.argv[2], "w"), indent=2)
++PY
++TREE="$OUT/trial_${K}_tree_judged"; BASE="$OUT/trial_${BASE_K}_tree_judged"
++[ -d "$TREE" ] && [ -d "$BASE" ] || { echo "!! missing $TREE or $BASE"; exit 1; }
++rm -rf "$OUT/rejudge15_trial_${K}_tree" "$OUT/rejudge15_trial_${K}_tree_judged"; cp -a "$TREE" "$OUT/rejudge15_trial_${K}_tree"
++job="$(sbatch --parsable --partition=main --job-name="k3_rejudge_${CASE}_${K}" --output="$OUT/rejudge15_trial_${K}.slurm.out" \
++      "$HERE/slurm_gpu.sh" "$HERE/k3_slurm_step.sh" python3 "$HERE/judge_k3.py" \
++      --agent-container "rejudge15_${CASE}_${K}" --config "$CFG" --golden-dir /raid/yilegu/eval_goldens \
++      --out "$OUT/rejudge15_trial_${K}_verdict.json" --tree-dir "$OUT/rejudge15_trial_${K}_tree" \
++      --pristine-dir "$OUT/pristine_tree" --baseline-tree "$BASE" --min-improvement 0 | cut -d';' -f1)"
++echo "$(date +%F_%T) $CASE trial $K vs trial $BASE_K, $REPS reps -> slurm job $job ($OUT/rejudge15_trial_${K}.slurm.out)"
+diff --git a/scripts-local/vibesim-analysis-container/reseed_shapes_case.sh b/scripts-local/vibesim-analysis-container/reseed_shapes_case.sh
+new file mode 100755
+index 0000000..23358e2
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/reseed_shapes_case.sh
+@@ -0,0 +1,42 @@
++#!/usr/bin/env bash
++# Re-run the seed transfer check of a shape-matched case after an infrastructure fix (2026-09-26: the judge's
++# read-only FlashInfer cache mount made the MLA 1x1M autotune write fail -> false CHECK failures). Same
++# candidate chain as run_k3_shapes_slurm.sh; on PASS installs best_tree (picked up by the next round).
++# Usage: reseed_shapes_case.sh <kda|mla>
++set -uo pipefail
++HERE="$(cd "$(dirname "$0")" && pwd)"; c="$1"
++OUT="$HERE/iter_opt_eval_k3_${c}_shapes_claude"; GOLDEN_DIR=/raid/yilegu/eval_goldens
++K3_SLURM_PARTITION="${K3_SLURM_PARTITION:-main}"
++[ -d "$OUT/best_tree" ] && { echo "best_tree already present in $OUT"; exit 0; }
++for cand in "$HERE/iter_opt_eval_k3_${c}_b512_claude/best_tree" "$HERE/iter_opt_eval_k3_${c}/best_tree"; do
++  [ -d "$cand" ] || continue
++  tag="$(basename "$(dirname "$cand")")"
++  echo "==== $(date +%F_%T) ${c}_shapes_claude: transfer check (retry) of $tag/best_tree"
++  rm -rf "$OUT/seed_candidate" "$OUT/seed_candidate_judged"; cp -a "$cand" "$OUT/seed_candidate"
++  outf="$OUT/seed_transfer_${tag}.retry.slurm.out"
++  job="$(sbatch --parsable --partition="$K3_SLURM_PARTITION" --job-name="k3t_${c}_shapes" --output="$outf" \
++        "$HERE/slurm_gpu.sh" "$HERE/k3_slurm_step.sh" python3 "$HERE/judge_k3.py" \
++        --agent-container transfer_check --config "$HERE/issue_k3_${c}_shapes_claude.json" \
++        --golden-dir "$GOLDEN_DIR" --out "$OUT/seed_transfer_${tag}_verdict.json" \
++        --tree-dir "$OUT/seed_candidate" --pristine-dir "$OUT/pristine_tree" --min-improvement 0 | cut -d';' -f1)"
++  echo "$(date +%T) slurm job $job -> $outf"
++  while squeue -h -j "$job" -o %T 2>/dev/null | grep -q .; do sleep 20; done; sleep 2
++  ok="$(python3 - "$OUT/seed_transfer_${tag}_verdict.json" <<'PY'
++import json, sys
++try: d = json.load(open(sys.argv[1]))
++except Exception: print("no"); sys.exit()
++pts = d.get("points") or {}
++for k, p in pts.items():
++    c = p["correctness"]
++    print(f"  {k}: pristine {p['before_us']:.1f} -> seed {p['after_us']:.1f} us ({p['improvement']*100:+.1f}%) CHECK {c.get('pass')} rel {c.get('max_rel_err')}", file=sys.stderr)
++print("yes" if pts and all(p["correctness"].get("pass") for p in pts.values()) else "no")
++PY
++)"
++  if [ "$ok" = yes ]; then
++    mv "$OUT/seed_candidate" "$OUT/best_tree"; rm -rf "$OUT/seed_candidate_judged"
++    echo "==== $(date +%F_%T) ${c}_shapes_claude seeded from $tag/best_tree"; exit 0
++  fi
++  mv "$OUT/seed_candidate" "$OUT/seed_candidate_failed_${tag}.retry"; rm -rf "$OUT/seed_candidate_judged"
++  echo "!! $tag/best_tree fails CHECK on the new points (see $outf)"
++done
++echo "!! no candidate passed; rounds start from PRISTINE"; exit 1
 diff --git a/scripts-local/vibesim-analysis-container/restart_mla_b512_after_b12.sh b/scripts-local/vibesim-analysis-container/restart_mla_b512_after_b12.sh
 new file mode 100755
 index 0000000..2487cd1
@@ -530,6 +1132,53 @@ index 0000000..ea82a0a
 +  fi
 +  echo "$(date +%T) GPUs 2/3 busy, GPU 7 free=$((total7 - used7)) MiB -> wait 120s"; sleep 120
 +done
+diff --git a/scripts-local/vibesim-analysis-container/resume_mixed_verify.sh b/scripts-local/vibesim-analysis-container/resume_mixed_verify.sh
+new file mode 100755
+index 0000000..0e61d9d
+--- /dev/null
++++ b/scripts-local/vibesim-analysis-container/resume_mixed_verify.sh
+@@ -0,0 +1,41 @@
++#!/usr/bin/env bash
++# Resume follow-up #4 (mixed + verify campaigns) after the 2026-09-27 evening GPU starvation (all 8 GPUs held by
++# the user's 4-GPU job + four slurm-manager placeholders; KDA-mixed r1 got a FALSE "non-compiling" verdict because its
++# rebuild smoke timed out after 90 min in the queue). Run when `sinfo`/`squeue` show free GPUs on partition main.
++#   1. re-judge the KDA-mixed r1 tree (agent tree exists; only the smoke/judge never ran) as trial 1;
++#   2. verify: KDA rounds 2-3 (r1 verdict is whatever job 2142 produced), MLA rounds 1-3 (from PRISTINE, see the write-up);
++#   3. mixed: KDA rounds 2-3, MLA rounds 1-3 (MLA r1 may already have a verdict if its in-flight trial finished).
++# Everything sequential (one agent at a time) to keep the queue pressure low.
++set -uo pipefail
++HERE="$(cd "$(dirname "$0")" && pwd)"
++export AGENT_TIMEOUT="${AGENT_TIMEOUT:-2700}" MIN_IMPROVEMENT=0 K3_GPU_MODE=slurm K3_SHARED_GPU=1
++O="$HERE/iter_opt_eval_k3_kda_mixed_claude"
++if grep -q "non-compiling" "$O/trial_1_verdict.json" 2>/dev/null && [ -d "$O/trial_1_tree" ]; then
++  echo "==== $(date +%F_%T) re-judging KDA mixed r1 (false non-compiling verdict from the queue timeout)"
++  mv "$O/trial_1_verdict.json" "$O/trial_1_verdict.queue_timeout.json"
++  job="$(sbatch --parsable --partition=main --job-name=k3j_kda_mixed_r1_rejudge --output="$O/trial_1_judge_slurm.rejudge.out" \
++        "$HERE/slurm_gpu.sh" "$HERE/k3_slurm_step.sh" python3 "$HERE/judge_k3.py" --agent-container rejudge --config "$HERE/issue_k3_kda_mixed_claude.json" \
++        --golden-dir /raid/yilegu/eval_goldens --out "$O/trial_1_verdict.json" --tree-dir "$O/trial_1_tree" --pristine-dir "$O/pristine_tree" \
++        --baseline-tree "$O/best_tree" --min-improvement 0 | cut -d';' -f1)"
++  while squeue -h -j "$job" -o %T 2>/dev/null | grep -q .; do sleep 30; done
++  python3 - "$O" <<'PY'
++import json, sys, time, shutil, os
++o = sys.argv[1]; v = json.load(open(f"{o}/trial_1_verdict.json"))
++pts = {p: (round(d["before_us"], 1), round(d["after_us"], 1), d["improvement"], d["correctness"].get("pass")) for p, d in (v.get("points") or {}).items()}
++open(f"{o}/rounds.jsonl", "a").write(json.dumps({"round": 1, "case": "kda_mixed_claude", "verdict": v.get("verdict"), "reason": v.get("reason"), "points": pts, "time": time.strftime("%F %T"), "note": "re-judged after queue-timeout false FAIL"}) + "\n")
++print("KDA mixed r1 re-judge:", v.get("verdict"), pts)
++if v.get("verdict") == "PASS":
++    shutil.rmtree(f"{o}/best_tree.prev", ignore_errors=True); os.rename(f"{o}/best_tree", f"{o}/best_tree.prev"); shutil.copytree(f"{o}/trial_1_tree_judged", f"{o}/best_tree", symlinks=True); print("promoted")
++PY
++fi
++# mla_mixed gets 4 because its r1 (slurm 2150, FAIL +0.04%) was a wasted round: the agent's tree came back byte-identical
++# to the seed -- it never got past iter_00 while its GPU requests sat behind the placeholders.
++for spec in "kda_verify_claude 2 2" "mla_verify_claude 1 3" "kda_mixed_claude 2 2" "mla_mixed_claude 1 4"; do
++  set -- $spec; c="$1"; k0="$2"; n="$3"
++  # skip rounds that already have a verdict (an in-flight trial may have finished after the pause)
++  while [ -f "$HERE/iter_opt_eval_k3_${c}/trial_${k0}_verdict.json" ] && [ "$n" -gt 0 ]; do k0=$((k0+1)); n=$((n-1)); done
++  [ "$n" -gt 0 ] || continue
++  echo "==== $(date +%F_%T) $c rounds $k0..$((k0+n-1))"
++  "$HERE/run_k3_continuous.sh" slurm "$c" "$k0" "$n"
++done
++echo "==== $(date +%F_%T) mixed/verify campaigns done"
 diff --git a/scripts-local/vibesim-analysis-container/run_k3_alternate.sh b/scripts-local/vibesim-analysis-container/run_k3_alternate.sh
 new file mode 100755
 index 0000000..3bb17f7

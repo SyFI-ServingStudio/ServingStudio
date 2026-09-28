@@ -138,3 +138,10 @@ c8be24a K3 follow-up #2: re-judge exact-but-below-3-sigma rounds with 15 reps (s
 6ceecbf K3 follow-up #2 results: KDA b512 r2 accepted on the 15-rep re-judge (+1.0% @512, promoted; patch kda_b512_02), KDA lcprefill r3 stays below the floor; KB notes
 a9c88f3 K3: rebake script for the B12c-corrected prefill oracles
 38581bf K3 follow-up #4: driver extension spec for MIXED (prefill chunk + decode) and TARGET_VERIFY steps (sglang v0.5.20 code survey, field tables, guards, plan)
+b122daf K3 follow-ups 1-3 results: corrected long-context oracles (B12c), MLA lcprefill r5/r6 + KDA r4 accepted, near-miss re-judges, patch chains and docs
+1298f80 K3 Campaign 6 write-up: KDA lcprefill seed rechecks (8/8 PASS) and final long-context numbers
+a8452d8 K3 follow-up #4: driver MIXED (prefill chunk + decode piggyback, tag mx<C>[p<P>]) and TARGET_VERIFY (tag vk<k>) steps for KDA and MLA; cases k3_{kda,mla}_{mixed,verify}_claude; mixed oracles in the bake map
+f3f5ffd K3 Campaign 6 write-up: follow-up #4 driver extension, smoke results, cases and launch note
+c07da5d K3 follow-up #4: resume script after the GPU starvation pause (re-judge the false non-compiling KDA-mixed r1, then remaining rounds sequentially)
+fa5067a k3 verify: --verify-graph (CUDA-graph TARGET_VERIFY at the draft width) + campaign resume wrappers
+b79a471 k3 follow-up #4: §9.6 interim results (KDA verify -3.55%, MLA verify r1/r3, KDA mixed -3.44%), Bedrock 503 gate

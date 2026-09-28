@@ -25,8 +25,9 @@ while :; do
   out="$(probe 2>&1 | tail -n 1)"
   echo "$(date +%F_%T) probe: $out"
   case "$out" in OK*) ok=$((ok + 1)) ;; *) ok=0 ;; esac
-  [ "$ok" -ge 2 ] && break
-  sleep $([ "$ok" -eq 1 ] && echo 60 || echo 120)
+  # 07:36 / 07:44: single OKs between 503s, and the 07:44 resume died 15 min later -> require 5 OKs one minute apart
+  [ "$ok" -ge "${NEED_OK:-5}" ] && break
+  sleep $([ "$ok" -ge 1 ] && echo 60 || echo 120)
 done
-echo "$(date +%F_%T) Bedrock healthy (2 consecutive probes) -> resuming"
+echo "$(date +%F_%T) Bedrock healthy (${NEED_OK:-5} consecutive probes) -> resuming"
 exec "$HERE/resume_mixed_verify.sh"

@@ -1,0 +1,166 @@
+diff -ruN -x __pycache__ -x '*.pyc' a/kernels/jit/csrc/attention/kda_chunk_h.cuh b/kernels/jit/csrc/attention/kda_chunk_h.cuh
+--- a/kernels/jit/csrc/attention/kda_chunk_h.cuh	2026-09-27 15:20:37.589882776 -0700
++++ b/kernels/jit/csrc/attention/kda_chunk_h.cuh	2026-09-28 06:27:35.799950448 -0700
+@@ -169,14 +169,13 @@
+   if (cu_seqlens != nullptr) {
+     bos = cu_seqlens[i_n];
+     T = cu_seqlens[i_n + 1] - static_cast<int32_t>(bos);
++    // Lane-strided partial sums + warp reduce: a serial walk costs one
++    // dependent load per preceding sequence, which dominates 1-token rows.
+     int32_t acc = 0;
+-    int32_t prev = cu_seqlens[0];
+-    for (int i = 1; i <= i_n; ++i) {
+-      const int32_t cur = cu_seqlens[i];
+-      acc += (cur - prev + kBT - 1) / kBT;
+-      prev = cur;
++    for (int i = 1 + lane; i <= i_n; i += 32) {
++      acc += (cu_seqlens[i] - cu_seqlens[i - 1] + kBT - 1) / kBT;
+     }
+-    boh = acc;
++    boh = __reduce_add_sync(0xffffffffu, acc);
+   } else {
+     T = T_fixed;
+     bos = static_cast<int64_t>(i_n) * T;
+diff -ruN -x __pycache__ -x '*.pyc' a/kernels/jit/csrc/attention/kda_conv_l2norm.cuh b/kernels/jit/csrc/attention/kda_conv_l2norm.cuh
+--- a/kernels/jit/csrc/attention/kda_conv_l2norm.cuh	2026-09-27 15:47:33.195171557 -0700
++++ b/kernels/jit/csrc/attention/kda_conv_l2norm.cuh	2026-09-28 06:47:30.946359618 -0700
+@@ -43,6 +43,7 @@
+ constexpr int kThreads = 32 * kWarps;
+ constexpr int kStrip = 32;                  // tokens per warp
+ constexpr int kUnroll = 8;                  // token rows loaded ahead
++constexpr int kStripTokens = kWarps * kStrip;  // tokens per CTA; kda_conv_l2norm.py mirrors it
+ 
+ SGL_DEVICE uint4 zero_vec() {
+   return make_uint4(0u, 0u, 0u, 0u);
+@@ -147,7 +148,7 @@
+ }
+ 
+ /**
+- * \brief grid (dim / 256, strips of kWarps * kStrip tokens, num_seqs), kThreads threads.
++ * \brief grid (dim / 256, total CTA strips over all sequences), kThreads threads.
+  * \param x          [T, dim] pre-conv packed qkv rows (row stride x_stride)
+  * \param w          [dim, 4] fp32 conv weights
+  * \param out        [3, T, group]: l2norm(q), l2norm(k), v
+@@ -164,15 +165,41 @@
+     int64_t x_stride,
+     int64_t state_stride,
+     int32_t num_tokens,
++    int32_t num_seqs,
+     int32_t dim,
+     int32_t group,
+     float eps) {
+   const int lane = threadIdx.x & 31;
+   const int warp = threadIdx.x >> 5;
+-  const int seq = blockIdx.z;
++
++  // Strips are packed back to back over the sequences (a 1-token decode row
++  // gets one CTA, not max_seqlen / kStripTokens); find ours by a warp scan.
++  const int b = blockIdx.y;
++  int seq = -1;
++  int strip = 0;
++  int base = 0;
++  for (int s0 = 0; s0 < num_seqs; s0 += 32) {
++    const int s = s0 + lane;
++    const int n = s < num_seqs ? (query_start_loc[s + 1] - query_start_loc[s] + kStripTokens - 1) / kStripTokens : 0;
++    int incl = n;
++#pragma unroll
++    for (int o = 1; o < 32; o <<= 1) {
++      const int v = __shfl_up_sync(0xffffffffu, incl, o);
++      if (lane >= o) incl += v;
++    }
++    const unsigned hit = __ballot_sync(0xffffffffu, base + incl > b);
++    if (hit != 0u) {
++      const int l = __ffs(hit) - 1;
++      seq = s0 + l;
++      strip = b - base - __shfl_sync(0xffffffffu, incl - n, l);
++      break;
++    }
++    base += __shfl_sync(0xffffffffu, incl, 31);
++  }
++  if (seq < 0) return;
+   const int bos = query_start_loc[seq];
+   const int seqlen = query_start_loc[seq + 1] - bos;
+-  const int t0 = (blockIdx.y * kWarps + warp) * kStrip;
++  const int t0 = (strip * kWarps + warp) * kStrip;
+   if (t0 >= seqlen) return;
+ 
+   const int c = blockIdx.x * kWarpChannels + lane * kVec;
+@@ -249,7 +276,7 @@
+       const tvm::ffi::TensorView has_initial_state,
+       const tvm::ffi::TensorView query_start_loc,
+       const tvm::ffi::TensorView out,
+-      int64_t max_seqlen,
++      int64_t num_strips,
+       double eps,
+       bool has_init) {
+     using namespace host;
+@@ -289,13 +316,10 @@
+           << "kda_conv_l2norm: has_initial_state must be [num_seqs] bool";
+       init_ptr = static_cast<const uint8_t*>(has_initial_state.data_ptr());
+     }
+-    if (N == 0 || max_seqlen <= 0) return;
++    if (N == 0 || num_strips <= 0) return;
++    CHECK_HOST(num_strips <= 65535) << "kda_conv_l2norm: too many token strips " << num_strips;
+ 
+-    const int64_t strip_tokens = kWarps * kStrip;
+-    const dim3 grid(
+-        static_cast<uint32_t>(dim / kWarpChannels),
+-        static_cast<uint32_t>((max_seqlen + strip_tokens - 1) / strip_tokens),
+-        static_cast<uint32_t>(N));
++    const dim3 grid(static_cast<uint32_t>(dim / kWarpChannels), static_cast<uint32_t>(num_strips));
+     LaunchKernel(grid, dim3(kThreads), device.unwrap())(
+         kda_conv_l2norm_kernel,
+         static_cast<const __nv_bfloat16*>(x.data_ptr()),
+@@ -308,6 +332,7 @@
+         x.stride(0),
+         conv_state.stride(0),
+         static_cast<int32_t>(T),
++        static_cast<int32_t>(N),
+         static_cast<int32_t>(dim),
+         static_cast<int32_t>(group),
+         static_cast<float>(eps));
+diff -ruN -x __pycache__ -x '*.pyc' a/kernels/ops/attention/fla/chunk_delta_h.py b/kernels/ops/attention/fla/chunk_delta_h.py
+--- a/kernels/ops/attention/fla/chunk_delta_h.py	2026-09-27 02:44:02.879742101 -0700
++++ b/kernels/ops/attention/fla/chunk_delta_h.py	2026-09-28 06:39:59.455973915 -0700
+@@ -418,12 +418,15 @@
+         N, NT = len(cu_seqlens) - 1, len(chunk_indices)
+     assert K <= 256, "current kernel does not support head dimension larger than 256."
+ 
+-    # The CUDA scan keeps one CTA per (seq, head, 16 V columns) resident; it
+-    # beats the Triton kernel only while that grid fits in one wave (measured).
+-    # It derives the chunk offsets itself, so no host round trip either.
++    # The CUDA scan runs one latency-bound CTA per (seq, head, 16 V columns),
++    # so Triton wins once one-chunk rows (mixed-batch decode) outnumber the
++    # chunks beyond each sequence's first (measured in-layer on B200: 16k + 64
++    # decode rows 285 vs 645 us, 4k + 128 decode rows 235 vs 188 us). It
++    # derives the chunk offsets itself, so no host round trip either.
++    extra_chunks = (NT if cu_seqlens is not None else N * NT) - N
+     if (
+         k.is_cuda
+-        and triton.cdiv(V, 16) * N * H <= get_multiprocessor_count(k.device.index)
++        and extra_chunks >= N
+         and kda_chunk_h_covered(
+             k=k,
+             w=w,
+diff -ruN -x __pycache__ -x '*.pyc' a/kernels/ops/attention/kda_conv_l2norm.py b/kernels/ops/attention/kda_conv_l2norm.py
+--- a/kernels/ops/attention/kda_conv_l2norm.py	2026-09-27 15:47:48.438901650 -0700
++++ b/kernels/ops/attention/kda_conv_l2norm.py	2026-09-28 06:47:30.946359618 -0700
+@@ -14,6 +14,9 @@
+ 
+ from sglang.kernels.jit.utils import cache_once, load_jit
+ 
++# Tokens per CTA strip; must match kStripTokens in kda_conv_l2norm.cuh.
++_STRIP_TOKENS = 128
++
+ if TYPE_CHECKING:
+     from tvm_ffi.module import Module
+ 
+@@ -90,7 +93,7 @@
+         has_initial_state if has_initial_state is not None else cache_indices,
+         query_start_loc,
+         out,
+-        max(seq_lens_cpu) if len(seq_lens_cpu) > 0 else 0,
++        sum((n + _STRIP_TOKENS - 1) // _STRIP_TOKENS for n in seq_lens_cpu),
+         eps,
+         has_initial_state is not None,
+     )

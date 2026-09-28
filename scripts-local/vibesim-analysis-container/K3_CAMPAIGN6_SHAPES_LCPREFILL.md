@@ -336,7 +336,19 @@ metric, 5 reps).**
 
 (Each round's "before" is the judge's own re-measurement of the then-best tree in the same slurm job — the 472.4 → 483.7
 shift between r1's after and r2/r3's before is the between-job spread of the graph replay on different GPUs, ~2%;
-comparisons within a round are same-job. Cumulative vs pristine ≈ −6%; the seed recheck at the end gives the exact number.)
+comparisons within a round are same-job.)
+
+**Seed rechecks of the final verify trees (slurm 2339, fresh pristine goldens per seed, graph metric) — all PASS:**
+
+| tree | seed | 64×8k vk3 | 128×8k vk3 | 16×64k vk3 | max rel err |
+|---|---|---|---|---|---|
+| KDA verify best | 1 | 509.3 → 480.6 µs (−5.6%) | 653.8 → 599.4 (−8.3%) | 322.9 → 302.4 (−6.3%) | 0.017 |
+| KDA verify best | 2 | 503.2 → 474.5 (−5.7%) | 662.8 → 609.5 (−8.1%) | 339.3 → 318.8 (−6.0%) | 0.013 |
+| MLA verify best | 1 | 497.0 → 466.4 (−6.2%) | 650.6 → 620.2 (−4.7%) | 417.1 → 388.4 (−6.9%) | 0.0 |
+| MLA verify best | 2 | 513.3 → 482.7 (−6.0%) | 670.7 → 639.4 (−4.7%) | 423.3 → 394.9 (−6.7%) | 0.0 |
+
+KDA's cumulative gain includes the shapes-tree seed (its bf16-state fused decode kernel gives the 0.01–0.017 rel err, well
+inside the 0.02 tolerance); MLA's is r1 + r3 on pristine and bit-exact.
 
 **KDA mixed (`k3_kda_mixed_claude`, seed = the KDA lcprefill tree, transfer check −13.4/−18.2/−12.7% vs pristine; eager
 metric — sglang runs mixed batches eagerly; 5 reps).**

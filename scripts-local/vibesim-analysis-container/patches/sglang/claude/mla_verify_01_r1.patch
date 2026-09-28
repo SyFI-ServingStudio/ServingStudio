@@ -1,0 +1,163 @@
+diff -ruN -x __pycache__ -x '*.pyc' a/kernels/jit/csrc/elementwise/set_mla_kv_concat_q.cuh b/kernels/jit/csrc/elementwise/set_mla_kv_concat_q.cuh
+--- a/kernels/jit/csrc/elementwise/set_mla_kv_concat_q.cuh	2026-09-18 02:16:55.000000000 -0700
++++ b/kernels/jit/csrc/elementwise/set_mla_kv_concat_q.cuh	2026-09-28 03:38:51.131317408 -0700
+@@ -342,10 +342,19 @@
+   int32_t qo_stride_1;
+ };
+ 
+-// 2x bf16 -> 2x fp8 e4m3, float-mediated cvt.rn NOSAT (matches aten: overflow -> NaN).
++// NOSAT e4m3 code for a value outside +-464: NaN -> 0x7F (sign dropped), overflow -> sign | 0x7F.
++SGL_DEVICE uint32_t fp8_e4m3_nosat_overflow_code(const float x) {
++  return x != x ? 0x7Fu : (((__float_as_uint(x) >> 24) & 0x80u) | 0x7Fu);
++}
++
++// 2x bf16 -> 2x fp8 e4m3 with NOSAT semantics (matches aten: overflow -> NaN). __NV_NOSAT is
++// software-emulated; hardware satfinite plus this fixup is bit-identical for every bf16 input.
+ SGL_DEVICE uint16_t bf16x2_to_fp8x2(const bf16x2_t v) {
+   const float2 f = __bfloat1622float2(v);
+-  return __nv_cvt_float2_to_fp8x2(f, __NV_NOSAT, __NV_E4M3);
++  uint32_t out = __nv_cvt_float2_to_fp8x2(f, __NV_SATFINITE, __NV_E4M3);
++  if (!(fabsf(f.x) <= 464.0f)) out = (out & 0xFF00u) | fp8_e4m3_nosat_overflow_code(f.x);
++  if (!(fabsf(f.y) <= 464.0f)) out = (out & 0x00FFu) | (fp8_e4m3_nosat_overflow_code(f.y) << 8);
++  return static_cast<uint16_t>(out);
+ }
+ 
+ // Convert 8 bf16 (one int4 load) to 8 fp8 packed in a uint2.
+diff -ruN -x __pycache__ -x '*.pyc' a/srt/models/kimi_k3.py b/srt/models/kimi_k3.py
+--- a/srt/models/kimi_k3.py	2026-09-18 02:16:55.000000000 -0700
++++ b/srt/models/kimi_k3.py	2026-09-28 04:01:21.673608623 -0700
+@@ -1318,8 +1318,18 @@
+                     prefix_sum,
+                 )
+         else:  # single collective over the flat [latent | shared] pair
+-            self._forward_shared(gate_up, shared_output)
+-            self._forward_routed(hidden_states, router_logits, routed_input, latent)
++            if self.alt_stream is not None:
++                # the shared experts write a disjoint slice of buf: overlap
++                # them with the routed MoE, join before the collective
++                current_stream = torch.cuda.current_stream()
++                self.alt_stream.wait_stream(current_stream)
++                with torch.cuda.stream(self.alt_stream):
++                    self._forward_shared(gate_up, shared_output)
++                self._forward_routed(hidden_states, router_logits, routed_input, latent)
++                current_stream.wait_stream(self.alt_stream)
++            else:
++                self._forward_shared(gate_up, shared_output)
++                self._forward_routed(hidden_states, router_logits, routed_input, latent)
+             if self.fuse_ar_norm and k3_ar_fusion.enabled():
+                 fused_norm = True
+                 k3_ar_fusion.all_reduce_norm(
+@@ -2199,15 +2209,16 @@
+             # cores, so wrap its forward at the instance level; the module
+             # itself (weights, reduce_results, loading path) is untouched.
+             self._gate_hidden_states = None
+-            # (gate, producer stream) issued on the alt stream by forward();
+-            # None when the lazy path computes the gate here instead.
+-            self._gate_precomputed = None
++            # Event recorded at attention-core entry; the o_proj wrap issues
++            # the gate on the alt stream ordered only after it. None when the
++            # lazy path computes the gate on the current stream instead.
++            self._gate_fork_event = None
+             self._gate_alt_stream = gate_alt_stream
+             # Above this token count the attention-core kernels fill the SMs
+-            # on their own and the overlap only adds sync overhead (same
+-            # bound as deepseek_v4).
++            # on their own and the overlap only adds sync overhead. Blackwell
++            # bound measured on B200 MTP verify (still a win at 512 tokens).
+             self._gate_bs_limit = (
+-                (128 if get_platform().is_blackwell else 64)
++                (512 if get_platform().is_blackwell else 64)
+                 if self._gate_alt_stream is not None
+                 else 0
+             )
+@@ -2216,17 +2227,12 @@
+             def _gated_o_proj_forward(x, *args, **kwargs):
+                 gate_input = self._gate_hidden_states
+                 self._gate_hidden_states = None
+-                precomputed = self._gate_precomputed
+-                self._gate_precomputed = None
+-                if precomputed is not None:
+-                    # Use wait_stream rather than an explicit event so the
+-                    # breakable-CUDA-graph runner can track the side-stream
+-                    # join across graph-segment boundaries.
+-                    torch.cuda.current_stream().wait_stream(precomputed[1])
++                fork_event = self._gate_fork_event
++                self._gate_fork_event = None
+                 if gate_input is not None and not isinstance(x, tuple):
+                     gate = (
+-                        precomputed[0]
+-                        if precomputed is not None
++                        self._overlapped_output_gate(gate_input, fork_event)
++                        if fork_event is not None
+                         else self.g_proj(gate_input)[0]
+                     )
+                     from sglang.kernels.ops.kimi_k3 import mla_output_gate
+@@ -2259,27 +2265,32 @@
+             return AttnForwardMethod.MLA
+         return method
+ 
+-    def _precompute_output_gate(self, hidden_states: torch.Tensor) -> None:
+-        """Issue the output-gate GEMM on the alt stream so it overlaps the
+-        attention core; the lazy path in the o_proj wrap otherwise computes
+-        it on the critical path right before the gate multiply. The gate
+-        tensor stays referenced via _gate_precomputed until the wrap joins,
+-        so its memory cannot be reused while the alt stream still writes."""
+-        self._gate_precomputed = None
++    def _fork_output_gate(self) -> None:
++        """Mark the fork point for the output-gate GEMM at attention-core entry;
++        the o_proj wrap issues it on the alt stream ordered only after this
++        event. Enqueued after the MLA kernel, the gate runs on the SMs the MLA
++        grid leaves idle instead of delaying the KV write that gates it."""
++        self._gate_fork_event = None
+         if (
+             self._gate_alt_stream is not None
+             and get_is_capture_mode()
+-            # The attention-core break ends the segment between the alt-stream
+-            # event record and the o_proj-side wait, so under breakable capture
+-            # the wait would cross graph segments; use the lazy path instead.
++            # The attention-core break ends the segment between the fork event
++            # and the o_proj-side join, so under breakable capture the join
++            # would cross graph segments; use the lazy path instead.
+             and not is_in_breakable_cuda_graph()
+-            and (0 < hidden_states.shape[0] <= self._gate_bs_limit)
++            and (0 < self._gate_hidden_states.shape[0] <= self._gate_bs_limit)
+         ):
+-            alt = self._gate_alt_stream
+-            alt.wait_stream(torch.cuda.current_stream())
+-            with torch.cuda.stream(alt):
+-                gate, _ = self.g_proj(hidden_states)
+-            self._gate_precomputed = (gate, alt)
++            self._gate_fork_event = torch.cuda.current_stream().record_event()
++
++    def _overlapped_output_gate(
++        self, gate_input: torch.Tensor, fork_event: torch.cuda.Event
++    ) -> torch.Tensor:
++        alt = self._gate_alt_stream
++        alt.wait_event(fork_event)
++        with torch.cuda.stream(alt):
++            gate, _ = self.g_proj(gate_input)
++        torch.cuda.current_stream().wait_stream(alt)
++        return gate
+ 
+     def forward(
+         self,
+@@ -2291,11 +2302,18 @@
+     ):
+         if self.use_output_gate:
+             self._gate_hidden_states = hidden_states
+-            self._precompute_output_gate(hidden_states)
++            self._gate_fork_event = None
+         return super().forward(
+             positions, hidden_states, forward_batch, zero_allocator, **kwargs
+         )
+ 
++    def forward_absorb_core(self, *args, **kwargs):
++        # Forked here rather than at forward entry so the gate GEMM overlaps
++        # the MLA kernel instead of the HBM-bound fused_qkv_a GEMM.
++        if self.use_output_gate and self._gate_hidden_states is not None:
++            self._fork_output_gate()
++        return super().forward_absorb_core(*args, **kwargs)
++
+ 
+ class KimiK3DecoderLayer(nn.Module):
+     """Decoder layer carrying the K3 attention-residual stream."""

@@ -1,4 +1,4 @@
-# Kimi-K3 loop — patches of what works (2026-09-27)
+# Kimi-K3 loop — patches of what works (2026-09-28)
 
 Regenerate with `./export_k3_patches.sh` (validates that each sglang chain reproduces the case's best tree).
 
@@ -15,6 +15,10 @@ Regenerate with `./export_k3_patches.sh` (validates that each sglang chain repro
   (12128 -> 11229 us @16k chunk with 48k prefix), KDA-prefill r1 (9072 -> 8564 us). Each chain is validated against
   the case's best_tree. The r1 b512 patches include the one-shot MoE autotune that reproduces production's warmup
   (harness gap; see the write-up). UNACCEPTED_*: exact but below the judge's 3-sigma floor.
+- `sglang/claude/{kda,mla}_shapes_*`, `{kda,mla}_lcprefill_*`: Campaign 6 (shape-matched decode incl. 1x1M,
+  long-context chunked prefill at 128k-262k). `{kda,mla}_verify_*`: speculative-verify (TARGET_VERIFY, CUDA-graph
+  metric; KDA seeded from the shapes tree, MLA from pristine). `{kda,mla}_mixed_*`: mixed prefill-chunk + decode
+  batches (eager metric; seeded from the lcprefill trees). See K3_CAMPAIGN6_SHAPES_LCPREFILL.md §9.6.
 
 ## harness (workspace branch `kimi-k3-loop`, vs base `c252264`)
 - `harness/01_driver_*.patch`: the single-layer extractor/driver (CUDA-graph metric, goldens, prefill points, ...).
