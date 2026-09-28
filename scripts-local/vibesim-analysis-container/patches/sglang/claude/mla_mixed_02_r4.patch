@@ -1,0 +1,237 @@
+diff -ruN -x __pycache__ -x '*.pyc' a/srt/layers/attention/trtllm_mla_backend.py b/srt/layers/attention/trtllm_mla_backend.py
+--- a/srt/layers/attention/trtllm_mla_backend.py	2026-09-28 12:59:54.483875533 -0700
++++ b/srt/layers/attention/trtllm_mla_backend.py	2026-09-28 14:58:40.872847805 -0700
+@@ -1184,16 +1184,32 @@
+         query = query.clamp_(-448.0, 448.0).to(self.data_type).unsqueeze(1)
+         k_cache = self.token_to_kv_pool.get_key_buffer(layer.layer_id)
+         kv_cache = k_cache.view(-1, self.page_size, self.kv_cache_dim).unsqueeze(1)
+-        raw_out = self._run_decode_kernel(
+-            query=query,
+-            kv_cache=kv_cache,
+-            block_tables=block_kv_indices,
+-            seq_lens=seq_lens_k,
+-            max_seq_len=max_seq,
+-            layer=layer,
++        # Own workspace: the caller may run these rows on the alt stream next
++        # to the causal / prefix passes, which use self.workspace_buffer.
++        shared_workspace = self.workspace_buffer
++        self.workspace_buffer = get_buffer(
++            "trtllm_mla_mixed_decode_workspace",
++            lambda: torch.zeros(
++                self.workspace_size, dtype=torch.int8, device=q_pe.device
++            ),
+         )
++        try:
++            raw_out = self._run_decode_kernel(
++                query=query,
++                kv_cache=kv_cache,
++                block_tables=block_kv_indices,
++                seq_lens=seq_lens_k,
++                max_seq_len=max_seq,
++                layer=layer,
++            )
++        finally:
++            self.workspace_buffer = shared_workspace
+         return raw_out.view(-1, layer.tp_q_head_num, self.kv_lora_rank)
+ 
++    # forward_mixed_decode_rows shares no workspace with the extend passes,
++    # so it may run on a side stream concurrently with them.
++    mixed_decode_rows_concurrent: bool = True
++
+     def can_overlap_causal_with_prefix(self) -> bool:
+         # Only the cute-dsl prefix pass may run next to the causal trtllm-gen
+         # pass; two trtllm-gen launches would share self.workspace_buffer.
+@@ -1203,11 +1219,16 @@
+             and cute_dsl_fmha_fp8.is_supported()
+         )
+ 
++    # forward_extend honours forward_batch.causal_num_reqs on the causal pass.
++    supports_causal_num_reqs: bool = True
++
+     def _causal_seq_lens_cpu(
+-        self, q: torch.Tensor, k: torch.Tensor
++        self, q: torch.Tensor, k: torch.Tensor, num_reqs: Optional[int] = None
+     ) -> Optional[torch.Tensor]:
+         # flashinfer validates the mirror against the ragged token counts.
+         lens = self.forward_prefill_metadata.seq_lens_cpu
++        if lens is not None and num_reqs is not None:
++            lens = lens[:num_reqs]
+         if lens is None or not q.shape[0] == k.shape[0] == int(lens.sum()):
+             return None
+         return lens
+@@ -2036,22 +2057,37 @@
+                 device=q.device,
+                 dtype=self.q_data_type,
+             )
++            metadata = self.forward_prefill_metadata
++            # A mixed batch may hand only its leading (prefill) requests' rows
++            # to the causal pass; the trailing decode rows go to MLA decode.
++            num_reqs = forward_batch.causal_num_reqs
++            if num_reqs is None or num_reqs >= forward_batch.batch_size:
++                num_reqs = None
++                batch_size = forward_batch.batch_size
++                cum_seq_lens = metadata.cum_seq_lens
++                seq_lens = metadata.seq_lens
++                max_seq_len = metadata.max_seq_len
++            else:
++                batch_size = num_reqs
++                cum_seq_lens = metadata.cum_seq_lens[: num_reqs + 1]
++                seq_lens = metadata.seq_lens[:num_reqs]
++                max_seq_len = max(forward_batch.extend_seq_lens_cpu[:num_reqs])
+             return self._run_prefill_kernel(
+                 q=q,
+                 k=k,
+                 v=v,
+                 layer=layer,
+-                batch_size=forward_batch.batch_size,
+-                cum_seq_lens_q=self.forward_prefill_metadata.cum_seq_lens,
+-                max_q_len=self.forward_prefill_metadata.max_seq_len,
+-                seq_lens_kv=self.forward_prefill_metadata.seq_lens,
+-                cum_seq_lens_kv=self.forward_prefill_metadata.cum_seq_lens,
+-                max_kv_len=self.forward_prefill_metadata.max_seq_len,
++                batch_size=batch_size,
++                cum_seq_lens_q=cum_seq_lens,
++                max_q_len=max_seq_len,
++                seq_lens_kv=seq_lens,
++                cum_seq_lens_kv=cum_seq_lens,
++                max_kv_len=max_seq_len,
+                 is_causal=True,
+                 return_lse=forward_batch.mha_return_lse,
+                 out_buffer=out,
+                 o_sf_scale=1.0,
+-                seq_lens_cpu=self._causal_seq_lens_cpu(q, k),
++                seq_lens_cpu=self._causal_seq_lens_cpu(q, k, num_reqs),
+             )
+ 
+ 
+diff -ruN -x __pycache__ -x '*.pyc' a/srt/model_executor/forward_batch_deepseek_mha_mixin.py b/srt/model_executor/forward_batch_deepseek_mha_mixin.py
+--- a/srt/model_executor/forward_batch_deepseek_mha_mixin.py	2026-09-28 13:15:00.593353144 -0700
++++ b/srt/model_executor/forward_batch_deepseek_mha_mixin.py	2026-09-28 14:33:18.786986048 -0700
+@@ -28,6 +28,10 @@
+     # A mixed batch serves its trailing decode rows with absorbed MLA decode,
+     # so only the prefill requests attend their prefix via chunked MHA.
+     prefix_chunk_num_reqs: Optional[int] = None
++    # Leading requests the causal (in-chunk) pass covers (None = the whole
++    # batch). Set around the causal call when the mixed decode rows are
++    # served by absorbed MLA decode, whose causal outputs would be dropped.
++    causal_num_reqs: Optional[int] = None
+     # Cached (first_req, block_kv_indices, seq_lens, max_seq_len) for the
+     # absorbed decode of a mixed batch's trailing decode rows.
+     mixed_decode_metadata: Optional[tuple] = None
+diff -ruN -x __pycache__ -x '*.pyc' a/srt/models/deepseek_common/attention_forward_methods/forward_mha.py b/srt/models/deepseek_common/attention_forward_methods/forward_mha.py
+--- a/srt/models/deepseek_common/attention_forward_methods/forward_mha.py	2026-09-28 13:14:55.549768388 -0700
++++ b/srt/models/deepseek_common/attention_forward_methods/forward_mha.py	2026-09-28 15:09:59.753157218 -0700
+@@ -32,6 +32,9 @@
+ 
+ import os as _os
+ _EXP_CAUSAL_FIRST = _os.environ.get("K3_EXP_CAUSAL_FIRST", "0") == "1"
++# Prefill-token count from which a mixed batch's decode rows run on the alt
++# stream next to the causal pass (B200: 16k-token chunk -0.65%, 4k +1%).
++_MIXED_DECODE_ON_ALT_MIN_TOKENS = 8192
+ 
+ if TYPE_CHECKING:
+     from sglang.srt.models.deepseek_v2 import DeepseekV2AttentionMLA
+@@ -355,10 +358,25 @@
+         # Mixed batch: the trailing 1-token decode rows attend their context
+         # with absorbed MLA decode; chunked MHA covers only the prefill rows.
+         decode_split = self._mixed_decode_split(backend, forward_batch)
++        decode_output = decode_done = None
+         if decode_split is not None:
+             num_prefill_reqs, num_prefill_tokens = decode_split
+             q_decode = q[num_prefill_tokens:]
+             prefix_lens_cpu = forward_batch.extend_prefix_lens_cpu[:num_prefill_reqs]
++            if (
++                self.alt_stream is not None
++                and getattr(backend, "mixed_decode_rows_concurrent", False)
++                and num_prefill_tokens >= _MIXED_DECODE_ON_ALT_MIN_TOKENS
++                and _os.environ.get("K3_AB", "1") == "1"  # AB_TMP
++            ):
++                # Launched first on the alt stream, the small decode-row grids
++                # fill the SMs the causal / prefix passes' last waves leave idle.
++                # Below the threshold the causal pass is too short to hide them
++                # and the side-stream bookkeeping costs more host time than
++                # the overlap saves.
++                decode_output, decode_done = self._mixed_decode_rows_attn_on_alt(
++                    backend, q_decode, forward_batch, num_prefill_reqs
++                )
+         else:
+             num_prefill_reqs = num_prefill_tokens = None
+             prefix_lens_cpu = forward_batch.extend_prefix_lens_cpu
+@@ -396,9 +414,20 @@
+         forward_batch.mha_return_lse = has_extend_prefix
+         # Do mha for extended part without prefix
+         forward_batch.set_attn_attend_prefix_cache(False)
+-        # The causal pass covers every row; the prefix passes only the
+-        # prefill rows (all rows without a decode split).
++        # The causal and prefix passes cover only the prefill rows when the
++        # decode rows are split off (every row otherwise): a decode row's
++        # causal output (itself only) would be replaced by its decode output.
+         q_prefix = q if decode_split is None else q[:num_prefill_tokens]
++        if decode_split is not None and getattr(
++            backend, "supports_causal_num_reqs", False
++        ):
++            q_causal = q_prefix
++            k = k[:num_prefill_tokens]
++            v = v[:num_prefill_tokens]
++            forward_batch.causal_num_reqs = num_prefill_reqs
++        else:
++            q_causal = q
++            forward_batch.causal_num_reqs = None
+         if has_extend_prefix and self._overlap_causal_with_prefix(backend):
+             forward_batch.set_attn_attend_prefix_cache(True)
+             attn_output = self._chunked_prefix_attn_mha(
+@@ -407,10 +436,12 @@
+                 accum_lse=None,
+                 forward_batch=forward_batch,
+                 causal_kv=(k, v),
+-                causal_q=q,
++                causal_q=q_causal,
+             )
+         else:
+-            attn_output = self.attn_mha(q, k, v, forward_batch, save_kv_cache=False)
++            attn_output = self.attn_mha(
++                q_causal, k, v, forward_batch, save_kv_cache=False
++            )
+ 
+             # Do mha attention with chunked prefix cache if there are any sequence with prefix
+             if has_extend_prefix:
+@@ -423,10 +454,14 @@
+                     forward_batch=forward_batch,
+                 )
+ 
++        forward_batch.causal_num_reqs = None
+         if decode_split is not None:
+-            decode_output = self._mixed_decode_rows_attn(
+-                backend, q_decode, forward_batch, num_prefill_reqs
+-            )
++            if decode_done is not None:
++                torch.cuda.current_stream().wait_event(decode_done)
++            else:
++                decode_output = self._mixed_decode_rows_attn(
++                    backend, q_decode, forward_batch, num_prefill_reqs
++                )
+             hidden = self.num_local_heads * self.v_head_dim
+             attn_output = torch.cat(
+                 [
+@@ -752,6 +787,21 @@
+         torch.bmm(latent.transpose(0, 1), self.w_vc, out=output.transpose(0, 1))
+         return output
+ 
++    def _mixed_decode_rows_attn_on_alt(
++        self: DeepseekV2AttentionMLA,
++        backend,
++        q: torch.Tensor,
++        forward_batch: ForwardBatch,
++        first_req: int,
++    ) -> tuple[torch.Tensor, torch.cuda.Event]:
++        current_stream = torch.cuda.current_stream()
++        self.alt_stream.wait_stream(current_stream)
++        with torch.cuda.stream(self.alt_stream):
++            output = self._mixed_decode_rows_attn(backend, q, forward_batch, first_req)
++        q.record_stream(self.alt_stream)
++        output.record_stream(current_stream)
++        return output, self.alt_stream.record_event()
++
+     def _overlap_causal_with_prefix(self: DeepseekV2AttentionMLA, backend) -> bool:
+         if self.alt_stream is None or torch.cuda.is_current_stream_capturing():
+             return False

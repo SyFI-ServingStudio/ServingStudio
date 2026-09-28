@@ -378,7 +378,26 @@ batch (unless chunked-prefix caching is disabled), with no per-row split — so 
 take the same chunked-prefix MHA path the harness's seed took. The lever applies whenever the deployment forms mixed
 prefill+decode batches (sglang `--enable-mixed-chunk`); it is a no-op for pure-decode and pure-prefill batches.
 
-MLA mixed r3–r4: (pending — in flight since 13:32)
+| r3 | 8441 → 8361 (−0.95%, below the 1.7% 3σ floor) | 2659 → 2773 (+4.3%) | 13376 → 13269 (−0.8%) | FAIL (secondary regression) |
+
+| r4 | 8483 → **8290 µs (−2.28%)** | 2518 → 2481 (−1.47%) | 13348 → 13081 (−2.00%) | **PASS**, promoted (3 files, 131 lines: the causal in-chunk attention pass restricted to the prefill rows of a mixed batch — the decode rows already go to the absorbed decode kernel; max rel err 0.0) |
+
+r3's own lever (MoE tail add3 → in-place `addmm_` accumulation into the attention-residual prefix sum, −1.2% eager)
+was exact but below the noise floor and regressed the 128-decode point; a CuTe causal variant failed CHECK.
+
+**Follow-up #4 summary (all vs the round's baseline tree, judge-measured, CHECK pass on every point):**
+
+| case | seed | accepted rounds | primary point | cumulative vs pristine (seed rechecks) |
+|---|---|---|---|---|
+| KDA verify (graph metric) | shapes tree | r3 | 64×8k vk3: 490.0 → 472.5 µs (−3.55%) | −5.6% / −5.7% (seeds 1/2) |
+| MLA verify (graph metric) | pristine | r1, r3 | 64×8k vk3: 492.9 → 472.4 → 473.6* µs (−4.15%, −2.09%) | −6.2% / −6.0% |
+| KDA mixed (eager) | lcprefill tree | r2 | 64 dec + 16k chunk @8k: 8659 → 8361 µs (−3.44%) | (slurm 2467, pending) |
+| MLA mixed (eager) | lcprefill tree | r2, r4 | 64 dec + 16k chunk @8k: 15065 → 8248 → 8290* µs (−45.2%, −2.28%) | (slurm 2467, pending) |
+
+\* each round's "before" is re-measured in its own judge job; the between-job spread is ~2% (verify) / ~3% (mixed).
+Patch chains under `patches/sglang/claude/{kda,mla}_{verify,mixed}_*.patch`, each validated to reproduce its best tree.
+Rounds lost to infrastructure (recorded as VOID in `rounds.jsonl`, artifacts kept): KDA mixed r3 ×2 + MLA mixed r2 ×3
+(Bedrock Opus 5.5 503 storms 07:00–11:45; all eight GPUs held by placeholders + the user's job 12:20–12:47).
 
 ### 9.5 Seed rechecks of the final KDA lcprefill tree (slurm job 2101, fresh pristine goldens per seed)
 All 8 points PASS, max rel 0.0074.

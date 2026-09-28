@@ -30,6 +30,12 @@ each patch below is `<base>/<relative>`; every chain is validated to reproduce i
 | P5 | 1 × 32k chunk @ prefix 131,072 | long-context prefill, 64k local MoE rows | lcprefill |
 | P6 | 1 × 16k chunk @ prefix 245,760 (completes 262,144) | long-context prefill, MLA prefix attention = 66% of step | lcprefill (primary) |
 | P7 | 1 × 32k chunk @ prefix 229,376 (completes 262,144) | long-context prefill, heaviest point | lcprefill |
+| V1 | 64 × (3 draft + 1 bonus) verify @ 8k (`vk3`) | speculative-decode TARGET_VERIFY, 256 query rows; judged as a CUDA-graph replay (`--verify-graph`) | verify (primary) |
+| V2 | 128 × 4 verify @ 8k | verify at the throughput batch | verify |
+| V3 | 16 × 4 verify @ 64k | verify with long context | verify |
+| X1 | 64 decodes @ 8k + one 16k prefill chunk (`mx16384`) | MIXED (EXTEND) batch, eager; 16,448 rows | mixed (primary) |
+| X2 | 128 decodes @ 8k + one 4k chunk (`mx4096`) | decode-heavy mixed batch | mixed |
+| X3 | 64 decodes @ 8k + one 16k chunk @ prefix 49,152 | mixed batch with a long-prefix chunk | mixed |
 
 ## 2. Cumulative results per shape (best tree of the campaign that owns the shape, vs pristine)
 
@@ -48,9 +54,17 @@ each patch below is `<base>/<relative>`; every chain is validated to reproduce i
 | P5 32k @ 128k | 18.07 → 16.14 | −10.7% | 35.09 → 30.33 | −13.6% | 0, 1, 2 |
 | P6 16k @ 245k | 9.03 → 8.13 | **−10.0%** | 27.69 → 20.45 | **−26.1%** | 0, 1, 2 |
 | P7 32k @ 229k | 17.94 → 16.15 | −10.0% | 48.36 → 39.95 | −17.4% | 0, 1, 2 |
+| V1 64×4 verify @8k (graph) | 509.3 → 480.6 µs (seed 1) | −5.6% / −5.7% | 497.0 → 466.4 µs (seed 1) | −6.2% / −6.0% | 0, 1, 2 |
+| V2 128×4 verify @8k | 653.8 → 599.4 | −8.3% / −8.1% | 650.6 → 620.2 | −4.7% / −4.7% | 0, 1, 2 |
+| V3 16×4 verify @64k | 322.9 → 302.4 | −6.3% / −6.0% | 417.1 → 388.4 | −6.9% / −6.7% | 0, 1, 2 |
+| X1 64 dec + 16k chunk @8k | seed −13.4%, + r2 −3.4% (judge) | (seed recheck 2467 pending) | 15065 → 8290 µs (judge chain) | **≈ −45% + −2.3%** (seed recheck pending) | 0; 1, 2 pending |
+| X2 128 dec + 4k chunk | seed −18.2%, r2 flat | pending | 11512 → 2481 (judge chain) | ≈ −78% | 0; 1, 2 pending |
+| X3 64 dec + 16k chunk @48k | seed −12.7%, + r2 −4.5% | pending | 37898 → 13081 (judge chain) | ≈ −65% | 0; 1, 2 pending |
 
-(P4–P7 updated 2026-09-27 after the follow-up rounds 4–6 with the B12c-corrected long-context oracles; see
-`K3_CAMPAIGN6_SHAPES_LCPREFILL.md` §9.)
+(P4–P7 updated 2026-09-27 after the follow-up rounds 4–6 with the B12c-corrected long-context oracles; V1–V3 and X1–X3
+added 2026-09-28 from follow-up #4; see `K3_CAMPAIGN6_SHAPES_LCPREFILL.md` §9.6. The verify trees: KDA = shapes tree +
+r3, MLA = pristine + r1 + r3 (every accepted MLA decode tree regressed the verify step). The mixed trees: lcprefill
+tree + accepted mixed rounds.)
 
 The D1–D5 trees are the shape-matched campaign's (`iter_opt_eval_k3_{kda,mla}_shapes_claude/best_tree`), which
 contain the decode levers + the b512 Claude levers + the shape rounds; D7 is the b512 Claude tree; P1–P3 the prefill
@@ -97,6 +111,20 @@ Legend: **gain** = judged faster on that shape; ok = engaged, neutral (≤0.5%);
 | T32 | fp8 packing of the prefix-chunk `kv_b_proj` output fused into the GEMM epilogue | MLA | — | — | — | — | — | — | (not measured) | **gain −1.1% @245k, −0.7% @128k** |
 | T33 | causal in-chunk attention pass on the alt stream, overlapping the prefix passes; join before `merge_state` | MLA | — | — | — | — | — | — | (not measured) | **gain −1.6% @245k, −0.8% @128k** |
 | T34 | warp-specialized 4-stage CUDA h-scan + pinned config for the inter-chunk solve | KDA | — | — | — | — | — | — | (not measured) | **gain −1.6% @245k, −3.5% @128k** |
+
+### 3b. Verify and mixed shapes (follow-up #4, 2026-09-28)
+
+| # | technique | layer | V1 64×4 @8k | V2 128×4 @8k | V3 16×4 @64k | X1 64 dec + 16k | X2 128 dec + 4k | X3 64 dec + 16k @48k |
+|---|---|---|---|---|---|---|---|---|
+| T35 | CUDA JIT verify recurrence kernel (`kda_verify_recurrent.cuh`) replacing the Triton `fused_recurrent` verify path | KDA | **gain −3.55%** | **gain −4.85%** | gain −2.1% | — | — | — |
+| T36 | satfinite fp8 cvt in `set_mla_kv_concat_q` + shared/routed alt-stream overlap + output-gate `g_proj` enqueued after the MLA node (fork at `forward_absorb_core`, ≤512 tokens) | MLA | **gain −4.15%** | **gain −5.0%** | **gain −5.8%** | | | |
+| T37 | residual add fused into the attn-res TMA aggregate + SM carveout on the shared-expert down GEMM | MLA | **gain −2.1%** | ok −0.3% | ok −0.8% | | | |
+| T38 | lift the one-wave dispatch guard so the 4-stage CUDA `kda_chunk_h` scan serves mixed batches (N = 65/129 sequences) | KDA | — | — | — | **gain −3.4%** | ok −0.1% | **gain −4.5%** |
+| T39 | decode rows of a MIXED batch → absorbed MLA decode kernel; chunked-prefix MHA only for the prefill request | MLA | — | — | — | **gain −45%** | **gain −77%** | **gain −65%** |
+| T40 | causal in-chunk attention pass restricted to the prefill rows of the mixed batch | MLA | — | — | — | **gain −2.3%** | gain −1.5% | gain −2.0% |
+| (inherited) shapes-tree levers T1–T20 on the verify step | KDA | seed −12% (eager) → 0 under the graph metric: the eager gain was host time | | +3.6% at V3 eager | | | |
+| (inherited) accepted MLA decode trees on the verify step | MLA | ✗ +5.8…+31% (shapes tree worst) → MLA verify was run from pristine | ✗ | ✗ | | | |
+| (inherited) lcprefill trees on the mixed step | both | | | | KDA −13.4% / MLA −29.0% | −18.2% / −54.4% | −12.7% / −17.0% |
 
 ## 4. The techniques, by mechanism
 
@@ -203,10 +231,40 @@ Legend: **gain** = judged faster on that shape; ok = engaged, neutral (≤0.5%);
   **harness gap, not a kernel improvement** — the driver now carries `--flashinfer-autotune`; when porting, keep the
   kernel parts of those patches and drop the autotune.
 
+### 4.8 Speculative verify and mixed prefill+decode batches (follow-up #4)
+
+- **The verify metric must be a CUDA-graph replay.** The eager TARGET_VERIFY step is ~65% host launch time (KDA
+  64×4 @8k: 1420 µs eager vs 502 µs graph; MLA 1523 vs 493). Under CPU contention its σ was 92–418 µs, so the 3σ gate
+  demanded 22–99% and rejected KDA r1 (−14.7% eager) and r2 (−21.7% eager) — and r1's eager gain was **entirely host
+  time** (−0.05% under the graph metric). Production graph-captures verify; the driver now does too (`--verify-graph`,
+  graph replay bit-exact vs eager, σ ≈ 0.05 µs).
+- **T35 (KDA verify).** `<base>/claude/kda_verify_01_r3.patch`: a CUDA JIT kernel for the verify recurrence (the Triton
+  path was 2× off its roofline). Store-policy / occupancy / TMA variants of the new kernel were neutral.
+- **T36–T37 (MLA verify, from pristine).** `mla_verify_01_r1.patch`, `mla_verify_02_r3.patch`. The accepted MLA
+  decode trees all *regressed* the verify step (+5.8% b512 tree, +7.5% decode best, +31% shapes tree): their small-m
+  GEMM dispatch and B=1 attention scheduling assume one query row per request, verify has four. Start verify work
+  from pristine or re-gate those levers on `q_len`.
+- **T38 (KDA mixed).** `kda_mixed_01_r2.patch` (4 files, 70 lines): the CUDA h-scan's one-wave guard was measured on
+  the old single-stage kernel; with the 4-stage ring the CUDA scan beats Triton (645 µs in the mixed batch) even at
+  6240 CTAs.
+- **T39 (MLA mixed, the largest single win of the whole effort).** `mla_mixed_01_r2.patch` (3 files, 224 lines). sglang's
+  `handle_attention_trtllm_mla` routes every `is_extend_without_speculative()` batch through `MHA_CHUNKED_KV`, so the
+  1-token decode rows of a mixed chunk each run a chunked-prefix MHA pass (prefix_chunk_len = capacity // batch_size:
+  64–128 tiny passes per layer). Routing those rows to the absorbed decode kernel (trtllm-gen) cuts the step 45–77%.
+  Applies to any deployment with `--enable-mixed-chunk`; a no-op for pure decode / pure prefill. **Do not** merge the
+  prefix into one chunk to go faster: log2-LSE vs ln `merge_state` makes the output chunk-dependent (CHECK FAIL).
+- **T40 (MLA mixed).** `mla_mixed_02_r4.patch`: with T39 in place the causal in-chunk pass is needed only for the
+  prefill rows; restricting it is bit-exact and worth another 2%.
+
 ## 5. Dead ends, across shapes
 
 | idea | shapes tried | outcome |
 |---|---|---|
+| eager-metric "wins" on verify (fewer launches / less Python) | V1–V3 | 0% under the graph metric — host time only |
+| inheriting the MLA decode best trees into verify | V1–V3 | +5.8…+31% regression; start from pristine |
+| trtllm-gen MLA kernel at q_len = 4 (verify) | V1 | 2× slower than CuteDSL (microbench) |
+| one big prefix chunk instead of chunked prefix passes (mixed) | X3 | faster (11095 µs) but CHECK FAIL: `merge_state` LSE base mismatch makes output chunk-dependent |
+| MoE tail add3 → in-place `addmm_` into the attn-res prefix sum (mixed) | X1–X3 | exact, −1.2%, but +4.3% at X2 → rejected |
 | TGV / CuTe small-m GEMMs at m ≥ 256 | D7 | +8% front, +2% shared_down → rejected; small-m only |
 | bf16-activation MXFP4 MoE dispatch | D3, D6, D7 | no SM100 tactic / no gain |
 | MoE tactic buckets, PDL off, tuning ceiling 512 → 1024 | D3, D7 | neutral or regression |
@@ -233,3 +291,10 @@ Legend: **gain** = judged faster on that shape; ok = engaged, neutral (≤0.5%);
 5. **Correctness envelope:** most accepted levers are bit-exact; the ones that are not (T14 rel 0.013, T4 0.006,
    T28 0.007, T22 0.0156) all passed seeds 0/1/2 with fresh goldens; the closest call is the KDA shape tree at D4
    under seed 2 (rel 0.0198 vs the 0.02 tolerance).
+6. **Speculative verify (q_len = 4 per request):** judge it as a graph replay or you measure the host. The decode levers
+   that assume one query row per request (small-m GEMM dispatch, B=1 KV split, persistent decode schedule) regress
+   verify; the wins are the verify-specific kernels (T35) and stream-level overlap that is row-count agnostic (T36, T37).
+7. **Mixed prefill+decode batches:** check which attention path each *row class* takes before tuning kernels — the
+   whole-batch dispatch (T39) was worth 45–77%, more than every kernel lever in this document combined; the KDA analogue
+   was a stale dispatch guard (T38). Prefill-tree levers transfer to the prefill rows of a mixed batch (−13…−54% seed
+   transfer) but the decode rows need decode-path treatment.

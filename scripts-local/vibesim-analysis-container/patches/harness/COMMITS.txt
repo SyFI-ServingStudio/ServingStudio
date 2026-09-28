@@ -145,3 +145,7 @@ f3f5ffd K3 Campaign 6 write-up: follow-up #4 driver extension, smoke results, ca
 c07da5d K3 follow-up #4: resume script after the GPU starvation pause (re-judge the false non-compiling KDA-mixed r1, then remaining rounds sequentially)
 fa5067a k3 verify: --verify-graph (CUDA-graph TARGET_VERIFY at the draft width) + campaign resume wrappers
 b79a471 k3 follow-up #4: §9.6 interim results (KDA verify -3.55%, MLA verify r1/r3, KDA mixed -3.44%), Bedrock 503 gate
+552dd95 k3 follow-up #4: verify/mixed patch chains (validated), seed rechecks of the verify trees, 5-probe Bedrock gate
+9649f4b k3 warm-start KB: verify/mixed cases, per-case seed trees, techniques section E
+57a531b k3 follow-up #4: KDA mixed r2/r3 rows, redo_void_rounds.sh (re-run rounds killed by Bedrock 503 storms)
+78ecf27 k3 follow-up #4: MLA mixed r2 (-45% primary: decode rows of a mixed batch -> absorbed MLA decode), gate v3 (Bedrock 15 min + GPU probe), void-round redo v3

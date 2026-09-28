@@ -1414,6 +1414,66 @@
   "dir": "trials/kda_mixed_claude_2"
  },
  {
+  "case": "kda_mixed_claude",
+  "trial": 3,
+  "verdict": "FAIL",
+  "reason": "failed: latency_improved",
+  "continuous_round": true,
+  "campaign1_unrealistic_routing": false,
+  "points": {
+   "64,8192mx16384": {
+    "before_us": 8301.7,
+    "after_us": 8367.5,
+    "improvement": -0.0079,
+    "check": true,
+    "rel_err": 0.007246376391514412
+   },
+   "128,8192mx4096": {
+    "before_us": 2694.6,
+    "after_us": 2719.8,
+    "improvement": -0.0094,
+    "check": true,
+    "rel_err": 0.00781249951171878
+   },
+   "64,8192mx16384p49152": {
+    "before_us": 8564.9,
+    "after_us": 8428.7,
+    "improvement": 0.0159,
+    "check": true,
+    "rel_err": 0.007246376391514412
+   }
+  },
+  "files": [
+   "kernels/jit/csrc/attention/kda_fused_decode.cuh",
+   "kernels/jit/csrc/attention/kda_conv_l2norm.cuh",
+   "kernels/jit/csrc/attention/kda_chunk_h.cuh",
+   "kernels/jit/csrc/kimi_k3/situ_and_mul.cuh",
+   "kernels/jit/csrc/kimi_k3/attn_res/fused_tma.cuh",
+   "kernels/ops/attention/kda_chunk_h.py",
+   "kernels/ops/attention/kda_fused_decode.py",
+   "kernels/ops/attention/kda_conv_l2norm.py",
+   "kernels/ops/kimi_k3/attn_res.py",
+   "kernels/ops/mamba/causal_conv1d_triton.py",
+   "kernels/ops/attention/fla/fused_norm_gate.py",
+   "kernels/ops/attention/fla/kda.py",
+   "kernels/ops/attention/fla/fused_recurrent.py",
+   "kernels/ops/attention/fla/l2norm.py",
+   "kernels/ops/attention/fla/chunk_intra.py",
+   "kernels/ops/attention/fla/chunk_delta_h.py",
+   "kernels/ops/attention/linear/kda_ptx_prefill/__init__.py",
+   "srt/models/kimi_k3.py",
+   "srt/layers/attn_residual.py",
+   "srt/layers/attention/linear/kda_backend.py",
+   "srt/layers/attention/linear/kernels/kda_triton.py",
+   "srt/layers/attention/linear/kernels/kda_ptx.py",
+   "srt/layers/moe/moe_runner/flashinfer_trtllm.py"
+  ],
+  "diff_lines": 2906,
+  "incremental_diff_lines": 14,
+  "note": "null (Claude, third start after two VOID ones): -0.8% @64 dec + 16k chunk, +1.6% @48k prefix, correct; the agent lost Bedrock after 133 turns at iter_01.",
+  "dir": "trials/kda_mixed_claude_3"
+ },
+ {
   "case": "kda_prefill_claude",
   "trial": 1,
   "verdict": "PASS",
@@ -3326,6 +3386,177 @@
   "incremental_diff_lines": 0,
   "note": "VOID (Claude): tree byte-identical to the seed -- the agent never got past iter_00 while GPU-starved (placeholders); +0.04%.",
   "dir": "trials/mla_mixed_claude_1"
+ },
+ {
+  "case": "mla_mixed_claude",
+  "trial": 2,
+  "verdict": "PASS",
+  "reason": "all gates passed",
+  "continuous_round": true,
+  "campaign1_unrealistic_routing": false,
+  "points": {
+   "64,8192mx16384": {
+    "before_us": 15065.4,
+    "after_us": 8248.3,
+    "improvement": 0.4525,
+    "check": true,
+    "rel_err": 0.012962962194787426
+   },
+   "128,8192mx4096": {
+    "before_us": 11512.2,
+    "after_us": 2590.0,
+    "improvement": 0.775,
+    "check": true,
+    "rel_err": 0.010036495764292218
+   },
+   "64,8192mx16384p49152": {
+    "before_us": 37897.8,
+    "after_us": 13165.9,
+    "improvement": 0.6526,
+    "check": true,
+    "rel_err": 0.013059700712853688
+   }
+  },
+  "files": [
+   "kernels/jit/csrc/elementwise/set_mla_kv_concat_q.cuh",
+   "kernels/jit/csrc/moe/route_quant_fused.cuh",
+   "kernels/jit/csrc/moe/route_radix.cuh",
+   "kernels/jit/csrc/kimi_k3/attn_res/fused_tma.cuh",
+   "kernels/ops/gemm/dense_gemm_sm100_fp8_via_bf16_epilogue.py",
+   "kernels/ops/attention/set_mla_kv_concat_q.py",
+   "kernels/ops/attention/mla_kv_b_proj_pack_fp8.py",
+   "kernels/ops/attention/cute_dsl_fmha_fp8.py",
+   "kernels/ops/kimi_k3/attn_res.py",
+   "kernels/ops/kvcache/mla_buffer.py",
+   "kernels/ops/kvcache/kv_indices.py",
+   "kernels/ops/moe/moe_route_quant_fused.py",
+   "srt/model_executor/forward_batch_deepseek_mha_mixin.py",
+   "srt/models/kimi_k3.py",
+   "srt/layers/attn_residual.py",
+   "srt/models/deepseek_common/attention_forward_methods/forward_mha.py",
+   "srt/layers/attention/trtllm_mla_backend.py",
+   "srt/layers/attention/tokenspeed_mla_backend.py",
+   "srt/layers/attention/cutedsl_mla_backend.py",
+   "srt/layers/moe/topk.py"
+  ],
+  "diff_lines": 3811,
+  "incremental_diff_lines": 431,
+  "note": "ACCEPTED (Claude, eager metric): in a MIXED (EXTEND) batch route the 1-token decode rows to the absorbed MLA decode kernel (trtllm-gen) and keep the chunked-prefix MHA only for the prefill request -- the seed (and production's handle_attention_trtllm_mla) sent the whole batch through MHA_CHUNKED_KV, i.e. 64-128 tiny prefix passes per layer: 15065->8248 us @64 dec + 16k chunk (-45.2%), -77.5% @128 dec + 4k, -65.3% @48k prefix; max rel 0.013, 0/16448 rows over tol. Dead end: one big prefix chunk (11095 @p49152) FAILS CHECK -- log2-LSE vs ln merge_state makes the output chunk-dependent.",
+  "dir": "trials/mla_mixed_claude_2"
+ },
+ {
+  "case": "mla_mixed_claude",
+  "trial": 3,
+  "verdict": "FAIL",
+  "reason": "failed: latency_improved",
+  "continuous_round": true,
+  "campaign1_unrealistic_routing": false,
+  "points": {
+   "64,8192mx16384": {
+    "before_us": 8441.1,
+    "after_us": 8361.0,
+    "improvement": 0.0095,
+    "check": true,
+    "rel_err": 0.012962962194787426
+   },
+   "128,8192mx4096": {
+    "before_us": 2658.5,
+    "after_us": 2773.3,
+    "improvement": -0.0432,
+    "check": true,
+    "rel_err": 0.010264597940753404
+   },
+   "64,8192mx16384p49152": {
+    "before_us": 13375.9,
+    "after_us": 13268.7,
+    "improvement": 0.008,
+    "check": true,
+    "rel_err": 0.013059700712853688
+   }
+  },
+  "files": [
+   "kernels/jit/csrc/elementwise/set_mla_kv_concat_q.cuh",
+   "kernels/jit/csrc/moe/route_quant_fused.cuh",
+   "kernels/jit/csrc/moe/route_radix.cuh",
+   "kernels/jit/csrc/kimi_k3/attn_res/fused_tma.cuh",
+   "kernels/ops/gemm/dense_gemm_sm100_fp8_via_bf16_epilogue.py",
+   "kernels/ops/attention/set_mla_kv_concat_q.py",
+   "kernels/ops/attention/mla_kv_b_proj_pack_fp8.py",
+   "kernels/ops/attention/cute_dsl_fmha_fp8.py",
+   "kernels/ops/kimi_k3/attn_res.py",
+   "kernels/ops/kvcache/mla_buffer.py",
+   "kernels/ops/kvcache/kv_indices.py",
+   "kernels/ops/moe/moe_route_quant_fused.py",
+   "srt/model_executor/forward_batch_deepseek_mha_mixin.py",
+   "srt/models/kimi_k3.py",
+   "srt/layers/attn_residual.py",
+   "srt/models/deepseek_common/attention_forward_methods/forward_mha.py",
+   "srt/layers/attention/trtllm_mla_backend.py",
+   "srt/layers/attention/tokenspeed_mla_backend.py",
+   "srt/layers/attention/cutedsl_mla_backend.py",
+   "srt/layers/moe/topk.py"
+  ],
+  "diff_lines": 3947,
+  "incremental_diff_lines": 255,
+  "note": "FAIL (Claude): MoE tail add3 -> in-place addmm_ accumulation into the attn-res prefix sum: -0.95% (below the 1.7% floor), +4.3% @128 dec + 4k chunk, exact. Dead ends: CuTe causal variant (CHECK FAIL), MoE tune-at-exact-m (no gain), addmm out= (hidden 72 us memcpy).",
+  "dir": "trials/mla_mixed_claude_3"
+ },
+ {
+  "case": "mla_mixed_claude",
+  "trial": 4,
+  "verdict": "PASS",
+  "reason": "all gates passed",
+  "continuous_round": true,
+  "campaign1_unrealistic_routing": false,
+  "points": {
+   "64,8192mx16384": {
+    "before_us": 8483.0,
+    "after_us": 8289.5,
+    "improvement": 0.0228,
+    "check": true,
+    "rel_err": 0.012962962194787426
+   },
+   "128,8192mx4096": {
+    "before_us": 2517.5,
+    "after_us": 2480.5,
+    "improvement": 0.0147,
+    "check": true,
+    "rel_err": 0.010036495764292218
+   },
+   "64,8192mx16384p49152": {
+    "before_us": 13348.4,
+    "after_us": 13081.2,
+    "improvement": 0.02,
+    "check": true,
+    "rel_err": 0.013059700712853688
+   }
+  },
+  "files": [
+   "kernels/jit/csrc/elementwise/set_mla_kv_concat_q.cuh",
+   "kernels/jit/csrc/moe/route_quant_fused.cuh",
+   "kernels/jit/csrc/moe/route_radix.cuh",
+   "kernels/jit/csrc/kimi_k3/attn_res/fused_tma.cuh",
+   "kernels/ops/gemm/dense_gemm_sm100_fp8_via_bf16_epilogue.py",
+   "kernels/ops/attention/set_mla_kv_concat_q.py",
+   "kernels/ops/attention/mla_kv_b_proj_pack_fp8.py",
+   "kernels/ops/attention/cute_dsl_fmha_fp8.py",
+   "kernels/ops/kimi_k3/attn_res.py",
+   "kernels/ops/kvcache/mla_buffer.py",
+   "kernels/ops/kvcache/kv_indices.py",
+   "kernels/ops/moe/moe_route_quant_fused.py",
+   "srt/model_executor/forward_batch_deepseek_mha_mixin.py",
+   "srt/models/kimi_k3.py",
+   "srt/layers/attn_residual.py",
+   "srt/models/deepseek_common/attention_forward_methods/forward_mha.py",
+   "srt/layers/attention/trtllm_mla_backend.py",
+   "srt/layers/attention/tokenspeed_mla_backend.py",
+   "srt/layers/attention/cutedsl_mla_backend.py",
+   "srt/layers/moe/topk.py"
+  ],
+  "diff_lines": 3922,
+  "incremental_diff_lines": 237,
+  "note": "ACCEPTED (Claude): causal in-chunk attention pass restricted to the prefill rows of the mixed batch (the decode rows already take the absorbed decode kernel): 8483->8290 us @64 dec + 16k chunk (-2.28%), -1.5% @128 dec + 4k, -2.0% @48k prefix, max rel 0.0.",
+  "dir": "trials/mla_mixed_claude_4"
  },
  {
   "case": "mla_prefill_claude",
