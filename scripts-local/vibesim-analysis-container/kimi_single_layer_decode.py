@@ -595,6 +595,8 @@ class KDAState:
                 return layer_cache
 
         self.req_pool = _StubReqToTokenPool()
+        self.layer_cache = layer_cache      # KDAVerifyState adds the speculative scratch here
+        self.num_slots = num_slots
 
         model_runner = SimpleNamespace(
             server_args=sa,
@@ -1066,6 +1068,351 @@ class MLAPrefillState:
         torch.cuda.empty_cache()
 
 
+# --------------------------------------------------------------------------- #
+# MIXED (prefill chunk + decode piggyback) and TARGET_VERIFY (speculative decode) steps.
+# See K3_MIXED_VERIFY_DRIVER_SPEC.md: the production scheduler builds a MIXED batch as prefill rows
+# first + one 1-token extend row per decode request, and the eager runner rewrites MIXED to EXTEND
+# before any backend sees it; TARGET_VERIFY is B requests x D = k+1 draft tokens (chain, topk=1).
+# --------------------------------------------------------------------------- #
+def _mixed_extend_fields(chunk, prefix, n_dec, L, dev):
+    """EXTEND metadata for [1 chunk request (chunk new tokens on a prefix-token context)] +
+    [n_dec decode requests (1 new token each on an (L-1)-token context)], in the scheduler's order
+    (schedule_batch.mix_with_running: prefix_lens += seq_lens-1, extend_lens += [1]*D)."""
+    seq = [chunk] + [1] * n_dec
+    pre = [prefix] + [L - 1] * n_dec
+    start = [0]
+    for s in seq[:-1]:
+        start.append(start[-1] + s)
+    positions = torch.cat([prefix + torch.arange(chunk, device=dev, dtype=torch.int64),
+                           torch.full((n_dec,), L - 1, device=dev, dtype=torch.int64)])
+    fields = dict(extend_num_tokens=chunk + n_dec,
+                  extend_seq_lens=torch.tensor(seq, device=dev, dtype=torch.int32),
+                  extend_prefix_lens=torch.tensor(pre, device=dev, dtype=torch.int32),
+                  extend_start_loc=torch.tensor(start, device=dev, dtype=torch.int32),
+                  extend_prefix_lens_cpu=pre, extend_seq_lens_cpu=seq)
+    return fields, positions
+
+
+def parse_mixed_tag(tag):
+    """'mx<C>' or 'mx<C>p<P>' -> (chunk C, prefix P)."""
+    body = tag[2:]
+    if "p" in body:
+        c, p = body.split("p", 1)
+        return int(c), int(p)
+    return int(body), 0
+
+
+def parse_verify_tag(tag):
+    """'vk<k>' -> D = k + 1 tokens per request (k draft tokens + the bonus/root token)."""
+    return int(tag[2:]) + 1
+
+
+class KDAMixedState(KDAState):
+    """MIXED step for the KDA layer: request slot 0 is the prefill chunk (chunk tokens on a
+    prefix-token context: seeded state when prefix > 0, zeroed slot for a first chunk), slots
+    1..D are decode requests at context L with the seeded recurrent state. One EXTEND forward
+    (KDAAttnBackend.forward_extend: conv1d + chunk_kda over all rows, per-request initial state)."""
+
+    def __init__(self, cfg, sa, n_dec, chunk, prefix, L, device="cuda", seed=0):
+        super().__init__(cfg, sa, n_dec + 1, device=device, seed=seed)
+        self.n_dec, self.chunk, self.prefix, self.L = int(n_dec), int(chunk), int(prefix), int(L)
+        if self.prefix == 0:
+            with torch.no_grad():
+                for t in (self.conv, self.temporal, self._conv0, self._temporal0):
+                    t[0].zero_()
+
+    def make_forward_batch(self, cfg, seq_len=None):
+        from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
+        n, C, P, L, D = self.B, self.chunk, self.prefix, self.L, self.n_dec
+        dev = "cuda"
+        T = C + D
+        ext, positions = _mixed_extend_fields(C, P, D, L, dev)
+        seq_lens = torch.tensor([P + C] + [L] * D, device=dev, dtype=torch.int64)
+        fb = ForwardBatch(
+            forward_mode=ForwardMode.EXTEND,   # MIXED is rewritten to EXTEND by the eager runner
+            batch_size=n,
+            input_ids=torch.randint(0, cfg.vocab_size, (T,), device=dev, dtype=torch.int64),
+            req_pool_indices=torch.arange(n, device=dev, dtype=torch.int64),
+            seq_lens=seq_lens, seq_lens_cpu=seq_lens.cpu(), seq_lens_sum=int(seq_lens.sum()),
+            out_cache_loc=torch.arange(T, device=dev, dtype=torch.int64),
+            positions=positions, **ext,
+        )
+        fb.req_to_token_pool = self.req_pool
+        fb.token_to_kv_pool = None
+        fb.mamba_track_indices = None
+        fb.mamba_track_mask = None
+        fb._original_batch_size = n
+        fb.spec_info = None
+        self.kda.init_forward_metadata(fb)
+        return fb
+
+
+class MLAMixedState:
+    """MIXED step for the MLA layer: request 1 = the prefill chunk (prefix cached fp8 latent-KV
+    tokens + chunk new tokens), requests 2..D+1 = decode requests with L cached tokens each (one
+    new token, written at their slot L-1). One EXTEND forward through the trtllm_mla prefill
+    backend (MHA_CHUNKED_KV): ragged causal attention over all query rows, prefix-chunk attention
+    for every request with a prefix (the decode rows have prefix L-1) merged with merge_state.
+    Production's mixed chunk does exactly this; the decode rows shrink prefix_chunk_len
+    (capacity // batch_size) and add prefix chunks -- that is the cost being measured."""
+
+    def __init__(self, cfg, mc, sa, layer_idx, n_dec, chunk, prefix, L, device="cuda",
+                 attention_backend="trtllm_mla", page_size=64, kv_dtype=torch.bfloat16, seed=0):
+        from sglang.srt.mem_cache.memory_pool import MLATokenToKVPool, ReqToTokenPool
+        from sglang.srt.mem_cache.kv_index_translator import KVIndexTranslator
+        from sglang.srt.layers.attention.attention_registry import ATTENTION_BACKENDS
+
+        D, C, P = int(n_dec), int(chunk), int(prefix)
+        self.n_dec, self.chunk, self.prefix, self.L = D, C, P, int(L)
+        self.B = D + 1
+        self.mixed = False
+        Lc = P + C
+        for name, v in (("prefix", P), ("prefix+chunk", Lc), ("L", L)):
+            assert v % page_size == 0, f"{name}={v} must be a multiple of page_size {page_size}"
+        prefill_backend = "trtllm_mla" if attention_backend == "cutedsl_mla" else attention_backend
+        self.attention_backend = prefill_backend
+        self.page_size = page_size
+        n_tokens = Lc + D * L
+        self.kv_dtype = kv_dtype
+        self.kv_pool = MLATokenToKVPool(
+            size=n_tokens, page_size=page_size, dtype=kv_dtype,
+            kv_lora_rank=cfg.kv_lora_rank, qk_rope_head_dim=cfg.qk_rope_head_dim,
+            layer_num=1, device=device, enable_memory_saver=False,
+            start_layer=layer_idx, end_layer=layer_idx + 1,
+        )
+        _sl = self.kv_pool.start_layer
+        self.kv_pool.get_v_head_dim = lambda: self.kv_pool.get_value_buffer(_sl).shape[-1]
+        gen = torch.Generator(device=device)
+        gen.manual_seed(seed + 23)
+        self.slot0 = page_size
+        # request r (r=0 chunk, r>=1 decode) owns [base_r, base_r + len_r)
+        self.bases = [self.slot0] + [self.slot0 + Lc + i * L for i in range(D)]
+        self.lens = [Lc] + [L] * D
+        with torch.no_grad():
+            kb = self.kv_pool.kv_buffer[0]
+            kb.zero_()
+            for r, (base, ctx) in enumerate(zip(self.bases, [P] + [L] * D)):
+                if ctx <= 0:
+                    continue
+                rows = kb[base:base + ctx]
+                rows.copy_(torch.randn(rows.shape, device=device, dtype=torch.bfloat16,
+                                       generator=gen) * 0.02)
+                n_plant = min(64, ctx)
+                offs = (torch.arange(n_plant, device=device) * (ctx // n_plant)
+                        + torch.randint(0, max(1, ctx // n_plant), (n_plant,), device=device,
+                                        generator=gen))
+                kb[base + offs] = (kb[base + offs].to(torch.bfloat16) * 32.0).to(kb.dtype)
+            chunk_rows = self.slot0 + P + torch.arange(C, device=device)
+            dec_rows = torch.tensor([b + L - 1 for b in self.bases[1:]], device=device,
+                                    dtype=torch.int64)
+            self.write_locs = torch.cat([chunk_rows, dec_rows])
+            self._kv0_rows = kb[self.write_locs].clone()
+        self.kv_bytes = kb.numel() * kb.element_size()
+
+        self.req_pool = ReqToTokenPool(size=self.B, max_context_len=max(Lc, L), device=device,
+                                       enable_memory_saver=False)
+        for r, (base, ln) in enumerate(zip(self.bases, self.lens)):
+            self.req_pool.req_to_token[r + 1, :ln] = base + torch.arange(ln, device=device,
+                                                                         dtype=torch.int32)
+        self.translator = KVIndexTranslator(
+            req_to_token=self.req_pool.req_to_token, token_to_kv_pool_allocator=None,
+            token_to_kv_pool=self.kv_pool, page_size=page_size, device=device,
+        )
+        model_runner = SimpleNamespace(
+            server_args=sa, device=device, gpu_id=0, is_draft_worker=False,
+            use_mla_backend=True, dtype=torch.bfloat16, max_running_requests=self.B,
+            req_to_token_pool=self.req_pool, token_to_kv_pool=self.kv_pool,
+            token_to_kv_pool_allocator=None, kv_index_translator=self.translator,
+            sliding_window_size=None, page_size=page_size, kv_cache_dtype=kv_dtype,
+            model_config=mc,
+        )
+        self.backend = ATTENTION_BACKENDS[prefill_backend](model_runner)
+        self.backend.prefill_attention_backend_str = prefill_backend
+        log(f"[mla-mixed] {type(self.backend).__name__} built (prefill backend={prefill_backend}); "
+            f"chunk={C} prefix={P} + {D} decode reqs @L={L}; kv={self.kv_bytes/1e9:.3f}GB")
+
+    def reset(self):
+        with torch.no_grad():
+            self.kv_pool.kv_buffer[0][self.write_locs] = self._kv0_rows
+
+    def state_after(self):
+        return {"kv_rows": self.kv_pool.kv_buffer[0][self.write_locs].clone()}
+
+    def make_forward_batch(self, cfg):
+        from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
+        n, C, P, L, D = self.B, self.chunk, self.prefix, self.L, self.n_dec
+        dev = "cuda"
+        T = C + D
+        ext, positions = _mixed_extend_fields(C, P, D, L, dev)
+        seq_lens = torch.tensor(self.lens, device=dev, dtype=torch.int64)
+        fb = ForwardBatch(
+            forward_mode=ForwardMode.EXTEND,
+            batch_size=n,
+            input_ids=torch.randint(0, cfg.vocab_size, (T,), device=dev, dtype=torch.int64),
+            req_pool_indices=torch.arange(n, device=dev, dtype=torch.int64) + 1,
+            seq_lens=seq_lens, seq_lens_cpu=seq_lens.cpu(), seq_lens_sum=int(seq_lens.sum()),
+            out_cache_loc=self.write_locs.clone(),
+            positions=positions, **ext,
+        )
+        fb.req_to_token_pool = self.req_pool
+        fb.token_to_kv_pool = self.kv_pool
+        fb.attn_backend = self.backend
+        fb.spec_info = None
+        self.backend.init_forward_metadata(fb)
+
+        def _pre_step():
+            fb.num_prefix_chunks = None
+            fb.prefix_chunk_len = None
+        fb._k3_pre_step = _pre_step
+        return fb
+
+    def free(self):
+        del self.backend, self.kv_pool, self.req_pool, self.translator
+        torch.cuda.empty_cache()
+
+
+def _verify_spec_info(B, D, L, dev):
+    """Chain (topk=1) EagleVerifyInput stand-in with the fields the KDA / TRT-LLM MLA verify paths
+    read (K3_MIXED_VERIFY_DRIVER_SPEC.md section 6): draft_token_num, ragged_verify_layout=None,
+    positions = L + depth, retrieve_* None (chain), num_tokens_per_req."""
+    positions = (L + torch.arange(D, device=dev, dtype=torch.int64)).repeat(B)
+    return SimpleNamespace(draft_token_num=D, ragged_verify_layout=None, positions=positions,
+                           retrieve_next_token=None, retrieve_next_sibling=None,
+                           retrieve_index=None, custom_mask=None, topk=1, spec_steps=D - 1,
+                           num_tokens_per_req=D, seq_lens_sum=None, seq_lens_cpu=None), positions
+
+
+def install_spec_config(draft_tokens):
+    """Publish the speculative-decode config the backends read via get_spec() (the KDA backend
+    and the TRT-LLM MLA backend read it at construction; the MLA dispatch reads
+    speculative_attention_mode). Uses the runtime context's sanctioned override; must run after
+    bootstrap (publish) and before any backend is built."""
+    from sglang.srt.runtime_context import get_context, get_spec
+    fields = dict(speculative_algorithm="EAGLE", speculative_num_steps=draft_tokens - 1,
+                  speculative_eagle_topk=1, speculative_num_draft_tokens=draft_tokens,
+                  speculative_attention_mode="prefill")
+    applied = {}
+    for k, v in fields.items():
+        try:
+            get_context().override("k3_driver_verify", **{k: v})
+            applied[k] = v
+        except Exception as e:      # a field not projected in this sglang build: report, go on
+            log(f"[spec] could not override {k}={v!r}: {type(e).__name__}: {e}")
+    sp = get_spec()
+    log(f"[spec] published for TARGET_VERIFY: {applied}; get_spec(): algorithm="
+        f"{getattr(sp, 'speculative_algorithm', None)} draft_tokens="
+        f"{getattr(sp, 'speculative_num_draft_tokens', None)} topk="
+        f"{getattr(sp, 'speculative_eagle_topk', None)}")
+
+
+class KDAVerifyState(KDAState):
+    """TARGET_VERIFY step for the KDA layer: B requests x D draft tokens (chain). Adds the
+    speculative scratch the verify path writes (memory_pool.MambaPool.SpeculativeState):
+    intermediate_ssm [slots, D, HV, K, V] (fp32) and intermediate_conv_window [slots, D, 3, dim].
+    The recurrent state itself is NOT updated by verify (disable_state_update) -- the post-step
+    evidence is the per-draft-token intermediate state."""
+
+    def __init__(self, cfg, sa, B, D, L, device="cuda", seed=0):
+        super().__init__(cfg, sa, B, device=device, seed=seed)
+        self.D, self.L = int(D), int(L)
+        n = self.num_slots
+        temporal_shape = tuple(self.temporal.shape[1:])
+        conv_shape = tuple(self.conv.shape[1:])
+        self.intermediate_ssm = torch.zeros((n, self.D, *temporal_shape), dtype=torch.float32,
+                                            device=device)
+        self.intermediate_conv_window = torch.zeros((n, self.D, *conv_shape),
+                                                    dtype=self.conv.dtype, device=device)
+        self.layer_cache.intermediate_ssm = self.intermediate_ssm
+        self.layer_cache.intermediate_conv_window = [self.intermediate_conv_window]
+        self.layer_cache.replayssm_rawv = None
+        self.state_bytes += (self.intermediate_ssm.numel() * 4
+                             + self.intermediate_conv_window.numel() * self.conv.element_size())
+
+    def reset(self):
+        super().reset()
+        with torch.no_grad():
+            self.intermediate_ssm.zero_()
+            self.intermediate_conv_window.zero_()
+
+    def state_after(self):
+        st = super().state_after()
+        st["intermediate_ssm"] = self.intermediate_ssm[:self.B].clone()
+        st["intermediate_conv_window"] = self.intermediate_conv_window[:self.B].clone()
+        return st
+
+    def make_forward_batch(self, cfg, seq_len=None):
+        from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
+        B, D, L = self.B, self.D, self.L
+        dev = "cuda"
+        spec, positions = _verify_spec_info(B, D, L, dev)
+        seq_lens = torch.full((B,), L, device=dev, dtype=torch.int64)
+        fb = ForwardBatch(
+            forward_mode=ForwardMode.TARGET_VERIFY,
+            batch_size=B,
+            input_ids=torch.randint(0, cfg.vocab_size, (B * D,), device=dev, dtype=torch.int64),
+            req_pool_indices=torch.arange(B, device=dev, dtype=torch.int64),
+            seq_lens=seq_lens, seq_lens_cpu=seq_lens.cpu(), seq_lens_sum=int(B * L),
+            out_cache_loc=torch.arange(B * D, device=dev, dtype=torch.int64),
+            positions=positions,
+        )
+        fb.req_to_token_pool = self.req_pool
+        fb.token_to_kv_pool = None
+        fb.mamba_track_indices = None
+        fb.mamba_track_mask = None
+        fb.mamba_track_seqlens = None
+        fb._original_batch_size = B
+        fb.spec_info = spec
+        self.kda.init_forward_metadata(fb)
+        return fb
+
+
+class MLAVerifyState(MLAState):
+    """TARGET_VERIFY step for the MLA layer: B requests with L cached tokens each verify D draft
+    tokens in one forward (absorbed MLA through the TRT-LLM/CuteDSL decode kernel with q_len=D,
+    trtllm_mla_backend.forward_extend verify branch). Each request owns L + page_size slots so the
+    D new rows land at [L, L+D); the written fp8 KV rows are the post-step evidence."""
+
+    def __init__(self, cfg, mc, sa, layer_idx, B, L, D, device="cuda",
+                 attention_backend="cutedsl_mla", page_size=64, kv_dtype=torch.bfloat16, seed=0):
+        assert D <= page_size, f"D={D} draft tokens must fit one extra page ({page_size})"
+        super().__init__(cfg, mc, sa, layer_idx, B, L + page_size, device=device,
+                         attention_backend=attention_backend, page_size=page_size,
+                         kv_dtype=kv_dtype, seed=seed, mixed=False)
+        self.D, self.L_ctx, self.L_alloc = int(D), int(L), int(L + page_size)
+        with torch.no_grad():
+            kb = self.kv_pool.kv_buffer[0]
+            r = torch.arange(B, device=device)
+            self.write_locs = (self.slot0 + r.view(B, 1) * self.L_alloc + self.L_ctx
+                               + torch.arange(self.D, device=device).view(1, self.D)).reshape(-1)
+            kb[self.write_locs] = 0
+            self._kv0_rows = kb[self.write_locs].clone()
+        # the layer dispatches TARGET_VERIFY on the PREFILL backend name (deepseek_v2.py:2006-2013);
+        # the trtllm_mla handler then takes the absorbed MLA path for it
+        self.backend.prefill_attention_backend_str = "trtllm_mla"
+
+    def make_forward_batch(self, cfg):
+        from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
+        B, D, L = self.B, self.D, self.L_ctx
+        dev = "cuda"
+        spec, positions = _verify_spec_info(B, D, L, dev)
+        seq_lens = torch.full((B,), L, device=dev, dtype=torch.int64)
+        fb = ForwardBatch(
+            forward_mode=ForwardMode.TARGET_VERIFY,
+            batch_size=B,
+            input_ids=torch.randint(0, cfg.vocab_size, (B * D,), device=dev, dtype=torch.int64),
+            req_pool_indices=torch.arange(B, device=dev, dtype=torch.int64) + 1,
+            seq_lens=seq_lens, seq_lens_cpu=seq_lens.cpu(), seq_lens_sum=int(B * L),
+            out_cache_loc=self.write_locs.clone(),
+            positions=positions,
+        )
+        fb.req_to_token_pool = self.req_pool
+        fb.token_to_kv_pool = self.kv_pool
+        fb.attn_backend = self.backend
+        fb.spec_info = spec
+        self.backend.init_forward_metadata(fb)
+        return fb
+
+
 class KDADecodeShim:
     """ForwardContext.attn_backend shim: RadixLinearAttention.forward calls
     get_attn_backend().forward(layer=, forward_batch=, mixed_qkv=, a=, b=); dispatch on the
@@ -1461,15 +1808,55 @@ def time_point(cfg, sa, layer, B, seq_len, iters, warmup, split=False,
     prefill = tag.startswith("pf")
     prefix = int(tag[2:]) if (prefill and len(tag) > 2) else 0
     mixed = (tag == "mix") and attn_type == "mla"
+    # mx<C>[p<P>]: MIXED step = B decode requests @ seq_len + one prefill chunk of C tokens on a
+    # P-token context; vk<k>: TARGET_VERIFY = B requests x (k+1) draft tokens @ seq_len.
+    mixed_pf = tag.startswith("mx")
+    verify = tag.startswith("vk")
+    mx_chunk, mx_prefix = parse_mixed_tag(tag) if mixed_pf else (0, 0)
+    draft = parse_verify_tag(tag) if verify else 0
+    eager_only = prefill or mixed_pf or verify
     res = {"B": B, "seq_len": seq_len, "ok": False, "attn_type": attn_type, "seed": seed,
-           "mixed": mixed, "tag": ("mix" if mixed else (tag if prefill else "")),
-           "prefill": prefill}
+           "mixed": mixed, "tag": ("mix" if mixed else (tag if (prefill or mixed_pf or verify) else "")),
+           "prefill": prefill or mixed_pf,
+           "kind": ("verify" if verify else "mixed" if mixed_pf else "prefill" if prefill else "decode")}
     if prefill:
         res.update(prefix_len=prefix, num_tokens=B * seq_len)
+    if mixed_pf:
+        res.update(prefix_len=mx_prefix, chunk=mx_chunk, num_tokens=mx_chunk + B, decode_requests=B)
+    if verify:
+        res.update(draft_tokens=draft, num_tokens=B * draft)
     st = None
     graph_keepalive = None
     try:
-        if prefill and attn_type == "mla":
+        if verify and attn_type == "mla":
+            st = MLAVerifyState(cfg, mc, sa, layer_idx, B, seq_len, draft,
+                                attention_backend=attention_backend, page_size=page_size,
+                                kv_dtype=kv_dtype, seed=seed)
+            res["page_size"] = page_size
+            res["kv_dtype"] = str(kv_dtype)
+            fb = st.make_forward_batch(cfg)
+            backend_for_ctx = st.backend
+            res["attention_backend"] = attention_backend
+            res["attention_backend_class"] = type(st.backend).__name__
+        elif verify:
+            st = KDAVerifyState(cfg, sa, B, draft, seq_len, seed=seed)
+            fb = st.make_forward_batch(cfg)
+            backend_for_ctx = KDADecodeShim(st.kda)
+        elif mixed_pf and attn_type == "mla":
+            st = MLAMixedState(cfg, mc, sa, layer_idx, B, mx_chunk, mx_prefix, seq_len,
+                               attention_backend=attention_backend, page_size=page_size,
+                               kv_dtype=kv_dtype, seed=seed)
+            res["page_size"] = page_size
+            res["kv_dtype"] = str(kv_dtype)
+            fb = st.make_forward_batch(cfg)
+            backend_for_ctx = st.backend
+            res["attention_backend"] = st.attention_backend
+            res["attention_backend_class"] = type(st.backend).__name__
+        elif mixed_pf:
+            st = KDAMixedState(cfg, sa, B, mx_chunk, mx_prefix, seq_len, seed=seed)
+            fb = st.make_forward_batch(cfg)
+            backend_for_ctx = KDADecodeShim(st.kda)
+        elif prefill and attn_type == "mla":
             st = MLAPrefillState(cfg, mc, sa, layer_idx, B, seq_len, prefix,
                                  attention_backend=attention_backend, page_size=page_size,
                                  kv_dtype=kv_dtype, seed=seed)
@@ -1497,7 +1884,9 @@ def time_point(cfg, sa, layer, B, seq_len, iters, warmup, split=False,
             st = KDAState(cfg, sa, B, seed=seed)
             fb = st.make_forward_batch(cfg, seq_len)
             backend_for_ctx = KDADecodeShim(st.kda)
-        n_rows = B * seq_len if prefill else B      # tokens in the step
+        # tokens in the step: prefill B*L; mixed C+B; verify B*D; decode B
+        n_rows = (B * seq_len if prefill else (mx_chunk + B) if mixed_pf
+                  else (B * draft) if verify else B)
         hidden = gen_hidden(seed, n_rows)
         positions = fb.positions
         # Production K3 runs the attention-residual stream (attn_res_block_size=12);
@@ -1550,18 +1939,20 @@ def time_point(cfg, sa, layer, B, seq_len, iters, warmup, split=False,
             res["peak_gb"] = torch.cuda.max_memory_allocated() / 1e9
             res["ok"] = True
 
-            if split and prefill:
-                log("[split] eager attn/moe/norms split is decode-only; skipped for a prefill point")
+            if split and eager_only:
+                log("[split] eager attn/moe/norms split is decode-only; skipped for a prefill/mixed/verify point")
             elif split:
                 res.update(time_split(layer, fb, positions, hidden, iters, warmup,
                                       attn_type=attn_type))
                 if attn_type == "mla" and "us_attn" in res and res["floor_us"] > 0:
                     res["attn_over_floor"] = res["us_attn"] / res["floor_us"]
 
-        if cuda_graph and prefill:
-            # sglang does not graph-capture chunked prefill; the eager step is the metric.
+        if cuda_graph and eager_only:
+            # sglang does not graph-capture chunked prefill / mixed batches; TARGET_VERIFY is graph-
+            # eligible in production (decode graph runner at the captured draft width) but this
+            # harness times it eagerly (same metric on both sides of a comparison).
             res["graph_ok"] = False
-            res["graph_skipped"] = "prefill points are timed eagerly"
+            res["graph_skipped"] = f"{res['kind']} points are timed eagerly"
         elif cuda_graph:
             # After eager + split so their metadata/timing are untouched by the
             # static graph buffers. Failure is reported, never silently downgraded.
@@ -1641,7 +2032,8 @@ def time_point(cfg, sa, layer, B, seq_len, iters, warmup, split=False,
                              for k in state}
                 state_ok = all((not c["nan"]) and c["max_rel_err"] <= tol
                                for c in state_chk.values())
-                if prefill:
+                if prefill or mixed_pf:
+                    # (mixed steps carry a 16k-row chunk: same rule)
                     # Prefill steps are not bit-reproducible across PROCESSES (the MXFP4 MoE /
                     # GEMM autotuners pick among near-equal tactics at m = thousands; the
                     # resulting ~0.3% numeric drift flips the top-k routing of ~0.1% of the
@@ -1926,9 +2318,16 @@ def main():
             tag = parts[2].strip().lower() if len(parts) > 2 else ""
             if tag in ("mixed", "true", "1"):
                 tag = "mix"
-            assert tag == "" or tag == "mix" or tag.startswith("pf"), f"unknown point tag {tag!r}"
+            assert tag == "" or tag == "mix" or tag.startswith(("pf", "mx", "vk")), \
+                f"unknown point tag {tag!r} (decode | mix | pf[<prefix>] | mx<chunk>[p<prefix>] | vk<k>)"
             pts.append((B, L, tag))
         rungs = [("adhoc", pts)]
+        drafts = {parse_verify_tag(t) for _, _, t in pts if t.startswith("vk")}
+        if drafts:
+            # TARGET_VERIFY points: the backends read the speculative config at construction, so
+            # publish it once for the process (one draft width per run: the judge keeps one case).
+            assert len(drafts) == 1, f"one draft width per run, got {sorted(drafts)}"
+            install_spec_config(drafts.pop())
     else:
         rungs = default_ladder(attn_type=args.attn_type)
         if args.only:
@@ -1954,7 +2353,8 @@ def main():
             results["points"].append(r)
             # Machine-readable per-point line (what the judge parses).
             summary = {k: r.get(k) for k in (
-                "B", "seq_len", "mixed", "tag", "prefill", "prefix_len", "num_tokens", "ok",
+                "B", "seq_len", "mixed", "tag", "prefill", "kind", "prefix_len", "chunk",
+                "draft_tokens", "decode_requests", "num_tokens", "ok",
                 "latency_us", "latency_mode", "us_step",
                 "us_step_graph", "us_attn", "us_moe", "us_norms", "finite",
                 "graph_finite", "attention_backend", "attn_heads", "seed", "error")}

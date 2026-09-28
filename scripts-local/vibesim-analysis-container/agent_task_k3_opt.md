@@ -7,8 +7,10 @@ You are optimizing a **real $FRAMEWORK checkout** at `$CHECKOUT` (the Python pac
 - **Model:** $MODEL_NAME.
 - **Workload:** $WORKLOAD.
 - **Objective:** **minimize $METRIC**. Change the real source so the layer's step runs faster
-  (decode points: CUDA-graph replay time; chunked-prefill points `B,L,pf[<prefix>]`: eager step
-  time, since sglang does not graph-capture prefill), and prove the change **does not alter the
+  (decode points: CUDA-graph replay time; chunked-prefill points `B,L,pf[<prefix>]`, mixed
+  prefill-chunk + decode points `B,L,mx<chunk>[p<prefix>]` and speculative-verify points `B,L,vk<k>`:
+  eager step time, since sglang does not graph-capture prefill / mixed batches and this harness times
+  verify eagerly on both sides), and prove the change **does not alter the
   layer's numerical output or its post-step state** (KDA conv/recurrent state, MLA written KV rows).
 
 You are NOT told which operator, kernel, or code path to change, and NOT given a target
