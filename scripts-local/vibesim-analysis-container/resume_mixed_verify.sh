@@ -28,7 +28,9 @@ if v.get("verdict") == "PASS":
     shutil.rmtree(f"{o}/best_tree.prev", ignore_errors=True); os.rename(f"{o}/best_tree", f"{o}/best_tree.prev"); shutil.copytree(f"{o}/trial_1_tree_judged", f"{o}/best_tree", symlinks=True); print("promoted")
 PY
 fi
-for spec in "kda_verify_claude 2 2" "mla_verify_claude 1 3" "kda_mixed_claude 2 2" "mla_mixed_claude 1 3"; do
+# mla_mixed gets 4 because its r1 (slurm 2150, FAIL +0.04%) was a wasted round: the agent's tree came back byte-identical
+# to the seed -- it never got past iter_00 while its GPU requests sat behind the placeholders.
+for spec in "kda_verify_claude 2 2" "mla_verify_claude 1 3" "kda_mixed_claude 2 2" "mla_mixed_claude 1 4"; do
   set -- $spec; c="$1"; k0="$2"; n="$3"
   # skip rounds that already have a verdict (an in-flight trial may have finished after the pause)
   while [ -f "$HERE/iter_opt_eval_k3_${c}/trial_${k0}_verdict.json" ] && [ "$n" -gt 0 ]; do k0=$((k0+1)); n=$((n-1)); done

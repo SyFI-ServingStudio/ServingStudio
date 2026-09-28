@@ -1,0 +1,75 @@
+==== slurm_gpu.sh on cayenne job=2162 ====
+CUDA_VISIBLE_DEVICES=0
+allocated GPU UUID(s): GPU-c09878e8-fb6a-ff0c-3c33-05993065d679
+0, GPU-c09878e8-fb6a-ff0c-3c33-05993065d679, 0 MiB
+==== exec: /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/k3_slurm_step.sh --docker --shm-size 32g -e CUDA_VISIBLE_DEVICES=0 -e HF_HUB_OFFLINE=1 -e SGLANG_OPT_FUSED_KDA_VERIFY=0 -e TOKENIZERS_PARALLELISM=false -v /raid/yilegu/flashinfer_cache:/root/.cache/flashinfer -v /raid/hf/hub:/raid/hf/hub:ro -v /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/k3_vkgraph_dev:/work --workdir /work lmsysorg/sglang:v0.5.20 bash /work/test_vkgraph.sh ====
+--- Wrapper: Applying owner=yilegu, memory=432834647654 bytes, and cpus=28.8 ---
+
+==========
+== CUDA ==
+==========
+
+CUDA Version 13.0.3
+
+Container image Copyright (c) 2016-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
+This container image and its contents are governed by the NVIDIA Deep Learning Container License.
+By pulling and using the container, you accept the terms and conditions of this license:
+https://developer.nvidia.com/ngc/nvidia-deep-learning-container-license
+
+A copy of this license is made available in this container at /NGC-DL-CONTAINER-LICENSE for your convenience.
+
+===== kda: graph-mode capture + replay (64,8192,vk3;4,8192,vk3)
+kimi_single_layer_decode v3 (K3/KDA)  experts=112 EP=8 local_topk=2 hidden_scale=1.0 layer_idx=5 iters=40 warmup=10 split=False moe_backend=flashinfer_mxfp4 attention_backend=n/a page_size=1 attn_heads=12 cuda_graph=True kv_cache_dtype=bf16 mamba_ssm_dtype=bfloat16 bf16_gemm_init=True flashinfer_autotune=True
+saved golden -> /work/out/kda_vkgraph_B64_L8192vk3.pt
+JSON {"B": 64, "seq_len": 8192, "mixed": false, "tag": "vk3", "prefill": false, "kind": "verify", "prefix_len": null, "chunk": null, "draft_tokens": 4, "decode_requests": null, "num_tokens": 256, "ok": true, "latency_us": 501.18398666381836, "latency_mode": "graph", "us_step": 1193.3759450912476, "us_step_graph": 501.18398666381836, "us_attn": null, "us_moe": null, "us_norms": null, "finite": true
+saved golden -> /work/out/kda_vkgraph_B4_L8192vk3.pt
+JSON {"B": 4, "seq_len": 8192, "mixed": false, "tag": "vk3", "prefill": false, "kind": "verify", "prefix_len": null, "chunk": null, "draft_tokens": 4, "decode_requests": null, "num_tokens": 16, "ok": true, "latency_us": 208.22399854660034, "latency_mode": "graph", "us_step": 1342.7519798278809, "us_step_graph": 208.22399854660034, "us_attn": null, "us_moe": null, "us_norms": null, "finite": true, 
+adhoc            64      8192    1193.38     4.662   239.017  ok  graph=501.2us (x2.38) meta=38.6
+adhoc             4      8192    1342.75    83.922    18.386  ok  graph=208.2us (x6.45) meta=39.0
+kimi_single_layer_decode v3 (K3/KDA)  experts=112 EP=8 local_topk=2 hidden_scale=1.0 layer_idx=5 iters=40 warmup=10 split=False moe_backend=flashinfer_mxfp4 attention_backend=n/a page_size=1 attn_heads=12 cuda_graph=True kv_cache_dtype=bf16 mamba_ssm_dtype=bfloat16 bf16_gemm_init=True flashinfer_autotune=True
+CHECK {"max_abs_err": 0.0, "max_rel_err": 0.0, "mean_rel_err": 0.0, "nan": false, "rows": 256, "rows_over_tol": 0, "frac_rows_over_tol": 0.0, "p99_row_rel_err": 0.0, "rule": "max_rel_err<=tol", "state_ok": true, "rel_err_max": 0.02, "pass": true}
+JSON {"B": 64, "seq_len": 8192, "mixed": false, "tag": "vk3", "prefill": false, "kind": "verify", "prefix_len": null, "chunk": null, "draft_tokens": 4, "decode_requests": null, "num_tokens": 256, "ok": true, "latency_us": 502.0800232887268, "latency_mode": "graph", "us_step": 1420.5119609832764, "us_step_graph": 502.0800232887268, "us_attn": null, "us_moe": null, "us_norms": null, "finite": true, 
+CHECK {"max_abs_err": 0.0, "max_rel_err": 0.0, "mean_rel_err": 0.0, "nan": false, "rows": 16, "rows_over_tol": 0, "frac_rows_over_tol": 0.0, "p99_row_rel_err": 0.0, "rule": "max_rel_err<=tol", "state_ok": true, "rel_err_max": 0.02, "pass": true}
+JSON {"B": 4, "seq_len": 8192, "mixed": false, "tag": "vk3", "prefill": false, "kind": "verify", "prefix_len": null, "chunk": null, "draft_tokens": 4, "decode_requests": null, "num_tokens": 16, "ok": true, "latency_us": 208.19200575351715, "latency_mode": "graph", "us_step": 1562.1440410614014, "us_step_graph": 208.19200575351715, "us_attn": null, "us_moe": null, "us_norms": null, "finite": true, 
+adhoc            64      8192    1420.51     5.549   239.017  ok  graph=502.1us (x2.83) meta=46.7
+adhoc             4      8192    1562.14    97.634    18.386  ok  graph=208.2us (x7.50) meta=48.6
+===== kda: EAGER replay against the graph golden (numerics graph vs eager)
+CHECK {"max_abs_err": 0.0, "max_rel_err": 0.0, "mean_rel_err": 0.0, "nan": false, "rows": 256, "rows_over_tol": 0, "frac_rows_over_tol": 0.0, "p99_row_rel_err": 0.0, "rule": "max_rel_err<=tol", "state_ok": true, "rel_err_max": 0.02, "pass": true}
+JSON {"B": 64, "seq_len": 8192, "mixed": false, "tag": "vk3", "prefill": false, "kind": "verify", "prefix_len": null, "chunk": null, "draft_tokens": 4, "decode_requests": null, "num_tokens": 256, "ok": true, "latency_us": 1354.0799617767334, "latency_mode": "eager", "us_step": 1354.0799617767334, "us_step_graph": null, "us_attn": null, "us_moe": null, "us_norms": null, "finite": true, "graph_finit
+CHECK {"max_abs_err": 0.0, "max_rel_err": 0.0, "mean_rel_err": 0.0, "nan": false, "rows": 16, "rows_over_tol": 0, "frac_rows_over_tol": 0.0, "p99_row_rel_err": 0.0, "rule": "max_rel_err<=tol", "state_ok": true, "rel_err_max": 0.02, "pass": true}
+JSON {"B": 4, "seq_len": 8192, "mixed": false, "tag": "vk3", "prefill": false, "kind": "verify", "prefix_len": null, "chunk": null, "draft_tokens": 4, "decode_requests": null, "num_tokens": 16, "ok": true, "latency_us": 1466.2400484085083, "latency_mode": "eager", "us_step": 1466.2400484085083, "us_step_graph": null, "us_attn": null, "us_moe": null, "us_norms": null, "finite": true, "graph_finite"
+===== kda: 5 graph-mode reps at the primary point (sigma)
+rep 501.24800205230713 graph 1165.727972984314
+rep 501.151978969574 graph 1191.3280487060547
+rep 501.151978969574 graph 1178.015947341919
+rep 502.1439790725708 graph 1379.7760009765625
+rep 502.0480155944824 graph 1194.4639682769775
+===== mla: graph-mode capture + replay (64,8192,vk3;4,8192,vk3)
+kimi_single_layer_decode v3 (K3/MLA)  experts=112 EP=8 local_topk=2 hidden_scale=1.0 layer_idx=4 iters=40 warmup=10 split=False moe_backend=flashinfer_mxfp4 attention_backend=cutedsl_mla page_size=64 attn_heads=12 cuda_graph=True kv_cache_dtype=fp8_e4m3 mamba_ssm_dtype=float32 bf16_gemm_init=True flashinfer_autotune=True
+saved golden -> /work/out/mla_vkgraph_B64_L8192vk3.pt
+JSON {"B": 64, "seq_len": 8192, "mixed": false, "tag": "vk3", "prefill": false, "kind": "verify", "prefix_len": null, "chunk": null, "draft_tokens": 4, "decode_requests": null, "num_tokens": 256, "ok": true, "latency_us": 492.92799830436707, "latency_mode": "graph", "us_step": 1523.0400562286377, "us_step_graph": 492.92799830436707, "us_attn": null, "us_moe": null, "us_norms": null, "finite": true
+saved golden -> /work/out/mla_vkgraph_B4_L8192vk3.pt
+JSON {"B": 4, "seq_len": 8192, "mixed": false, "tag": "vk3", "prefill": false, "kind": "verify", "prefix_len": null, "chunk": null, "draft_tokens": 4, "decode_requests": null, "num_tokens": 16, "ok": true, "latency_us": 216.35200083255768, "latency_mode": "graph", "us_step": 1632.9920291900635, "us_step_graph": 216.35200083255768, "us_attn": null, "us_moe": null, "us_norms": null, "finite": true, 
+adhoc            64      8192    1523.04     5.949     0.304  ok  graph=492.9us (x3.09) meta=42.8
+adhoc             4      8192    1632.99   102.062     0.019  ok  graph=216.4us (x7.55) meta=40.1
+kimi_single_layer_decode v3 (K3/MLA)  experts=112 EP=8 local_topk=2 hidden_scale=1.0 layer_idx=4 iters=40 warmup=10 split=False moe_backend=flashinfer_mxfp4 attention_backend=cutedsl_mla page_size=64 attn_heads=12 cuda_graph=True kv_cache_dtype=fp8_e4m3 mamba_ssm_dtype=float32 bf16_gemm_init=True flashinfer_autotune=True
+CHECK {"max_abs_err": 0.0, "max_rel_err": 0.0, "mean_rel_err": 0.0, "nan": false, "rows": 256, "rows_over_tol": 0, "frac_rows_over_tol": 0.0, "p99_row_rel_err": 0.0, "rule": "max_rel_err<=tol", "state_ok": true, "rel_err_max": 0.02, "pass": true}
+JSON {"B": 64, "seq_len": 8192, "mixed": false, "tag": "vk3", "prefill": false, "kind": "verify", "prefix_len": null, "chunk": null, "draft_tokens": 4, "decode_requests": null, "num_tokens": 256, "ok": true, "latency_us": 493.02399158477783, "latency_mode": "graph", "us_step": 1416.6719913482666, "us_step_graph": 493.02399158477783, "us_attn": null, "us_moe": null, "us_norms": null, "finite": true
+CHECK {"max_abs_err": 0.0, "max_rel_err": 0.0, "mean_rel_err": 0.0, "nan": false, "rows": 16, "rows_over_tol": 0, "frac_rows_over_tol": 0.0, "p99_row_rel_err": 0.0, "rule": "max_rel_err<=tol", "state_ok": true, "rel_err_max": 0.02, "pass": true}
+JSON {"B": 4, "seq_len": 8192, "mixed": false, "tag": "vk3", "prefill": false, "kind": "verify", "prefix_len": null, "chunk": null, "draft_tokens": 4, "decode_requests": null, "num_tokens": 16, "ok": true, "latency_us": 216.2880003452301, "latency_mode": "graph", "us_step": 1626.7839670181274, "us_step_graph": 216.2880003452301, "us_attn": null, "us_moe": null, "us_norms": null, "finite": true, "g
+adhoc            64      8192    1416.67     5.534     0.304  ok  graph=493.0us (x2.87) meta=43.9
+adhoc             4      8192    1626.78   101.674     0.019  ok  graph=216.3us (x7.52) meta=40.4
+===== mla: EAGER replay against the graph golden (numerics graph vs eager)
+CHECK {"max_abs_err": 0.0, "max_rel_err": 0.0, "mean_rel_err": 0.0, "nan": false, "rows": 256, "rows_over_tol": 0, "frac_rows_over_tol": 0.0, "p99_row_rel_err": 0.0, "rule": "max_rel_err<=tol", "state_ok": true, "rel_err_max": 0.02, "pass": true}
+JSON {"B": 64, "seq_len": 8192, "mixed": false, "tag": "vk3", "prefill": false, "kind": "verify", "prefix_len": null, "chunk": null, "draft_tokens": 4, "decode_requests": null, "num_tokens": 256, "ok": true, "latency_us": 1465.6959772109985, "latency_mode": "eager", "us_step": 1465.6959772109985, "us_step_graph": null, "us_attn": null, "us_moe": null, "us_norms": null, "finite": true, "graph_finit
+CHECK {"max_abs_err": 0.0, "max_rel_err": 0.0, "mean_rel_err": 0.0, "nan": false, "rows": 16, "rows_over_tol": 0, "frac_rows_over_tol": 0.0, "p99_row_rel_err": 0.0, "rule": "max_rel_err<=tol", "state_ok": true, "rel_err_max": 0.02, "pass": true}
+JSON {"B": 4, "seq_len": 8192, "mixed": false, "tag": "vk3", "prefill": false, "kind": "verify", "prefix_len": null, "chunk": null, "draft_tokens": 4, "decode_requests": null, "num_tokens": 16, "ok": true, "latency_us": 1689.3759965896606, "latency_mode": "eager", "us_step": 1689.3759965896606, "us_step_graph": null, "us_attn": null, "us_moe": null, "us_norms": null, "finite": true, "graph_finite"
+===== mla: 5 graph-mode reps at the primary point (sigma)
+rep 492.99201369285583 graph 1353.0240058898926
+rep 492.92799830436707 graph 1372.607946395874
+rep 492.96000599861145 graph 1356.1919927597046
+rep 492.92799830436707 graph 1365.3440475463867
+rep 492.92799830436707 graph 2001.2478828430176
+TEST_RC=0
+[step] EXIT_RC=0

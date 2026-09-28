@@ -7,10 +7,11 @@ You are optimizing a **real $FRAMEWORK checkout** at `$CHECKOUT` (the Python pac
 - **Model:** $MODEL_NAME.
 - **Workload:** $WORKLOAD.
 - **Objective:** **minimize $METRIC**. Change the real source so the layer's step runs faster
-  (decode points: CUDA-graph replay time; chunked-prefill points `B,L,pf[<prefix>]`, mixed
-  prefill-chunk + decode points `B,L,mx<chunk>[p<prefix>]` and speculative-verify points `B,L,vk<k>`:
-  eager step time, since sglang does not graph-capture prefill / mixed batches and this harness times
-  verify eagerly on both sides), and prove the change **does not alter the
+  (decode points: CUDA-graph replay time; chunked-prefill points `B,L,pf[<prefix>]` and mixed
+  prefill-chunk + decode points `B,L,mx<chunk>[p<prefix>]`: eager step time, since sglang does not
+  graph-capture prefill / mixed batches; speculative-verify points `B,L,vk<k>`: CUDA-graph replay
+  time when the fixed flags include `--verify-graph` (production captures TARGET_VERIFY at the draft
+  width), else eager step time), and prove the change **does not alter the
   layer's numerical output or its post-step state** (KDA conv/recurrent state, MLA written KV rows).
 
 You are NOT told which operator, kernel, or code path to change, and NOT given a target
@@ -76,8 +77,9 @@ python3 /tmp/kimi_single_layer_decode.py --point "$POINTS" $ARGS --capture /work
 python3 /tmp/kimi_single_layer_decode.py --point "$POINTS" $ARGS --replay /workspace/opt_run/golden.pt
 ```
 - Every point prints a `JSON {"latency_us": ..., "latency_mode": "graph"|"eager", ...}` line; the
-  judged number is `latency_us` (graph mode for decode points, eager for prefill points, whose
-  `point` carries the `pf<prefix>` tag). `--split` adds eager attn/moe/norms times (decode only).
+  judged number is `latency_us` (graph mode for decode points and, with `--verify-graph`, for `vk`
+  verify points; eager for prefill / mixed points, whose `point` carries the `pf<prefix>` / `mx` tag).
+  `--split` adds eager attn/moe/norms times (decode only).
 - **Measure before and after with the IDENTICAL command** (same flags, same points, same
   `--iters/--warmup`), and treat a run that also carries `--split` or `--profile-kernels` as a
   *diagnostic*, not a timing reference: those extra phases perturb the graph-replay number by

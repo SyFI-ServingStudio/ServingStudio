@@ -1522,8 +1522,10 @@ class AttnResState:
 
 
 def graph_capture_and_time(layer, backend, backend_for_ctx, fb, positions, hidden,
-                           iters, B, warmup=3, ar=None):
-    """Capture ONE decode step of the layer in a CUDA graph and time replays.
+                           iters, B, warmup=3, ar=None, num_tokens=None):
+    """Capture ONE decode (or TARGET_VERIFY) step of the layer in a CUDA graph and time replays.
+    num_tokens: query rows in the step (B for decode, B*(k+1) for a verify point) -> the
+    backends' max_num_tokens, i.e. the captured draft width (num_tokens // B).
 
     Mirrors DecodeCudaGraphRunner (model_executor/runner/decode_cuda_graph_runner.py):
       init_cuda_graph_state(max_bs, max_num_tokens)          # static per-bs buffers
@@ -1540,7 +1542,7 @@ def graph_capture_and_time(layer, backend, backend_for_ctx, fb, positions, hidde
     from sglang.srt.model_executor.runner_utils.capture_mode import model_capture_mode
 
     out = {"graph_ok": False}
-    backend.init_cuda_graph_state(B, B)
+    backend.init_cuda_graph_state(B, num_tokens or B)
     backend.init_forward_metadata_out_graph(fb, in_capture=True)
 
     def run_once():
@@ -1799,8 +1801,11 @@ def time_split(layer, fb, positions, hidden, iters, warmup, attn_type="kda"):
 def time_point(cfg, sa, layer, B, seq_len, iters, warmup, split=False,
                attn_type="kda", mc=None, layer_idx=5, attention_backend="triton",
                cuda_graph=False, page_size=1, kv_dtype=torch.bfloat16, seed=0,
-               golden=None, profile_kernels_out=None, nvtx_align=None, tag=""):
+               golden=None, profile_kernels_out=None, nvtx_align=None, tag="",
+               verify_graph=False):
     """golden: None | {"mode": "capture"|"replay", "path": str, "rel_err_max": float}.
+    verify_graph: with cuda_graph, capture vk<k> (TARGET_VERIFY) points in a CUDA graph at the
+    draft width k+1 (production: DecodeCudaGraphRunner); else they are timed eagerly.
     tag: "" (uniform decode) | "mix" (MLA only: per-request context lengths L, 3L/4, L/2, L/4,
     see MLAState) | "pf" / "pf<prefix>" (chunked prefill: B requests x seq_len NEW tokens each
     on a <prefix>-token cached context, see KDAPrefillState / MLAPrefillState; timed eagerly)."""
@@ -1814,7 +1819,7 @@ def time_point(cfg, sa, layer, B, seq_len, iters, warmup, split=False,
     verify = tag.startswith("vk")
     mx_chunk, mx_prefix = parse_mixed_tag(tag) if mixed_pf else (0, 0)
     draft = parse_verify_tag(tag) if verify else 0
-    eager_only = prefill or mixed_pf or verify
+    eager_only = prefill or mixed_pf or (verify and not verify_graph)
     res = {"B": B, "seq_len": seq_len, "ok": False, "attn_type": attn_type, "seed": seed,
            "mixed": mixed, "tag": ("mix" if mixed else (tag if (prefill or mixed_pf or verify) else "")),
            "prefill": prefill or mixed_pf,
@@ -1824,7 +1829,7 @@ def time_point(cfg, sa, layer, B, seq_len, iters, warmup, split=False,
     if mixed_pf:
         res.update(prefix_len=mx_prefix, chunk=mx_chunk, num_tokens=mx_chunk + B, decode_requests=B)
     if verify:
-        res.update(draft_tokens=draft, num_tokens=B * draft)
+        res.update(draft_tokens=draft, num_tokens=B * draft, verify_graph=bool(verify_graph))
     st = None
     graph_keepalive = None
     try:
@@ -1949,21 +1954,23 @@ def time_point(cfg, sa, layer, B, seq_len, iters, warmup, split=False,
 
         if cuda_graph and eager_only:
             # sglang does not graph-capture chunked prefill / mixed batches; TARGET_VERIFY is graph-
-            # eligible in production (decode graph runner at the captured draft width) but this
-            # harness times it eagerly (same metric on both sides of a comparison).
+            # eligible in production (decode graph runner at the captured draft width) and is
+            # captured here only with --verify-graph (else timed eagerly, same metric on both sides).
             res["graph_ok"] = False
-            res["graph_skipped"] = f"{res['kind']} points are timed eagerly"
+            res["graph_skipped"] = (f"{res['kind']} points are timed eagerly"
+                                    + (" (no --verify-graph)" if verify else ""))
         elif cuda_graph:
             # After eager + split so their metadata/timing are untouched by the
             # static graph buffers. Failure is reported, never silently downgraded.
             try:
                 gbackend = st.backend if attn_type == "mla" else st.kda
                 g = graph_capture_and_time(layer, gbackend, backend_for_ctx, fb,
-                                           positions, hidden, iters, B, ar=ar)
+                                           positions, hidden, iters, B, ar=ar,
+                                           num_tokens=n_rows)
                 graph_keepalive = (g.pop("_graph"), g.pop("_static_out"))
                 res.update(g)
                 res["graph_speedup"] = res["us_step"] / res["us_step_graph"]
-                res["us_token_graph"] = res["us_step_graph"] / B
+                res["us_token_graph"] = res["us_step_graph"] / n_rows
             except Exception as e:
                 res["graph_ok"] = False
                 res["graph_error"] = f"{type(e).__name__}: {e}"
@@ -2166,6 +2173,12 @@ def main():
     ap.add_argument("--cuda-graph", action="store_true",
                     help="also capture the decode step in a CUDA graph and time "
                          "replays (us_step_graph); eager us_step is still reported")
+    ap.add_argument("--verify-graph", action="store_true",
+                    help="with --cuda-graph: capture TARGET_VERIFY (vk<k>) points in a CUDA graph too, "
+                         "as production's DecodeCudaGraphRunner does at the captured draft width "
+                         "(max_num_tokens = B*(k+1)); the judged latency becomes the graph replay. "
+                         "Without it verify points are timed eagerly (host-bound at ~1.2 ms/step: the "
+                         "eager step is 60%% CPU launch overhead, sigma ~90 us under CPU contention)")
     ap.add_argument("--bf16-gemm-init", action="store_true",
                     help="call sglang's initialize_bf16_gemm_config() as the production scheduler "
                          "does (auto -> cutedsl TGV/split-K dispatch on SM100 for eligible bf16 GEMM "
@@ -2348,7 +2361,7 @@ def main():
                            profile_kernels_out=args.profile_kernels,
                            nvtx_align=({"dir": args.nvtx_align, "steps": args.nvtx_align_steps}
                                        if args.nvtx_align else None),
-                           tag=tag)
+                           tag=tag, verify_graph=args.verify_graph)
             r["rung"] = name
             results["points"].append(r)
             # Machine-readable per-point line (what the judge parses).

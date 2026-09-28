@@ -1,0 +1,118 @@
+{
+  "sglang_version": "0.5.20",
+  "moe_backend": "flashinfer_mxfp4",
+  "hidden_act": "situ",
+  "moe_method": {
+    "class": "Mxfp4MoEMethod",
+    "use_flashinfer": true,
+    "use_marlin": false,
+    "_fi_kernel": "trtllm_sm100",
+    "flashinfer_mxfp4_moe_precision": "default"
+  },
+  "experts": 112,
+  "ep": 8,
+  "layer_idx": 5,
+  "local_topk": 2,
+  "hidden_scale": 1.0,
+  "attn_type": "kda",
+  "attention_backend": null,
+  "page_size": null,
+  "attn_heads": 12,
+  "cuda_graph": true,
+  "kv_cache_dtype": null,
+  "mamba_ssm_dtype": "bfloat16",
+  "num_attention_heads": 64,
+  "config": {
+    "num_experts": 112,
+    "num_experts_per_token": 2,
+    "num_shared_experts": 2,
+    "moe_intermediate_size": 3072,
+    "routed_expert_hidden_size": 3584,
+    "hidden_size": 7168
+  },
+  "mla": null,
+  "kda": {
+    "num_heads": 12,
+    "head_dim": 128,
+    "short_conv_kernel": 4,
+    "gate_lower_bound": -5.0
+  },
+  "points": [
+    {
+      "B": 64,
+      "seq_len": 8192,
+      "ok": true,
+      "attn_type": "kda",
+      "seed": 0,
+      "mixed": false,
+      "tag": "vk3",
+      "prefill": false,
+      "kind": "verify",
+      "draft_tokens": 4,
+      "num_tokens": 256,
+      "verify_graph": true,
+      "attn_res": {
+        "block_num": 8,
+        "valid_blocks": 1,
+        "write_layer": false
+      },
+      "out_shape": [
+        256,
+        7168
+      ],
+      "finite": true,
+      "us_step": 1193.3759450912476,
+      "us_token": 4.661624785512686,
+      "state_mb": 239.01696,
+      "peak_gb": 6.970517504,
+      "graph_ok": true,
+      "us_meta_prep": 38.55999931693077,
+      "us_step_graph": 501.18398666381836,
+      "graph_finite": true,
+      "graph_speedup": 2.381113476978933,
+      "us_token_graph": 1.9577499479055405,
+      "latency_us": 501.18398666381836,
+      "latency_mode": "graph",
+      "golden_path": "/work/out/kda_vkgraph_B64_L8192vk3.pt",
+      "rung": "adhoc"
+    },
+    {
+      "B": 4,
+      "seq_len": 8192,
+      "ok": true,
+      "attn_type": "kda",
+      "seed": 0,
+      "mixed": false,
+      "tag": "vk3",
+      "prefill": false,
+      "kind": "verify",
+      "draft_tokens": 4,
+      "num_tokens": 16,
+      "verify_graph": true,
+      "attn_res": {
+        "block_num": 8,
+        "valid_blocks": 1,
+        "write_layer": false
+      },
+      "out_shape": [
+        16,
+        7168
+      ],
+      "finite": true,
+      "us_step": 1342.7519798278809,
+      "us_token": 83.92199873924255,
+      "state_mb": 18.38592,
+      "peak_gb": 3.105229312,
+      "graph_ok": true,
+      "us_meta_prep": 38.975998759269714,
+      "us_step_graph": 208.22399854660034,
+      "graph_finite": true,
+      "graph_speedup": 6.448593770171858,
+      "us_token_graph": 13.013999909162521,
+      "latency_us": 208.22399854660034,
+      "latency_mode": "graph",
+      "golden_path": "/work/out/kda_vkgraph_B4_L8192vk3.pt",
+      "rung": "adhoc"
+    }
+  ]
+}

@@ -1,0 +1,175 @@
+{
+  "sglang_version": "0.5.20",
+  "moe_backend": "flashinfer_mxfp4",
+  "hidden_act": "situ",
+  "moe_method": {
+    "class": "Mxfp4MoEMethod",
+    "use_flashinfer": true,
+    "use_marlin": false,
+    "_fi_kernel": "trtllm_sm100",
+    "flashinfer_mxfp4_moe_precision": "default"
+  },
+  "experts": 112,
+  "ep": 8,
+  "layer_idx": 4,
+  "local_topk": 2,
+  "hidden_scale": 1.0,
+  "attn_type": "mla",
+  "attention_backend": "cutedsl_mla",
+  "page_size": 64,
+  "attn_heads": 12,
+  "cuda_graph": true,
+  "kv_cache_dtype": "fp8_e4m3",
+  "mamba_ssm_dtype": null,
+  "num_attention_heads": 12,
+  "config": {
+    "num_experts": 112,
+    "num_experts_per_token": 2,
+    "num_shared_experts": 2,
+    "moe_intermediate_size": 3072,
+    "routed_expert_hidden_size": 3584,
+    "hidden_size": 7168
+  },
+  "mla": {
+    "num_attention_heads": 12,
+    "kv_lora_rank": 512,
+    "qk_nope_head_dim": 128,
+    "qk_rope_head_dim": 64,
+    "v_head_dim": 128,
+    "q_lora_rank": 1536,
+    "kv_cache_dim": 576
+  },
+  "kda": null,
+  "points": [
+    {
+      "B": 64,
+      "seq_len": 8192,
+      "ok": true,
+      "attn_type": "mla",
+      "seed": 0,
+      "mixed": false,
+      "tag": "vk3",
+      "prefill": false,
+      "kind": "verify",
+      "draft_tokens": 4,
+      "num_tokens": 256,
+      "verify_graph": true,
+      "page_size": 64,
+      "kv_dtype": "torch.float8_e4m3fn",
+      "attention_backend": "cutedsl_mla",
+      "attention_backend_class": "CuteDslMLABackend",
+      "attn_res": {
+        "block_num": 8,
+        "valid_blocks": 1,
+        "write_layer": false
+      },
+      "out_shape": [
+        256,
+        7168
+      ],
+      "finite": true,
+      "us_step": 1416.6719913482666,
+      "us_token": 5.533874966204166,
+      "kv_gb": 0.304386048,
+      "mla_kv_read_bytes": 301989888,
+      "floor_us": 43.141412571428575,
+      "peak_gb": 6.946937856,
+      "graph_ok": true,
+      "us_meta_prep": 43.90399903059006,
+      "us_step_graph": 493.02399158477783,
+      "graph_finite": true,
+      "graph_speedup": 2.873434184804094,
+      "us_token_graph": 1.9258749671280384,
+      "latency_us": 493.02399158477783,
+      "latency_mode": "graph",
+      "correctness": {
+        "max_abs_err": 0.0,
+        "max_rel_err": 0.0,
+        "mean_rel_err": 0.0,
+        "nan": false,
+        "rows": 256,
+        "rows_over_tol": 0,
+        "frac_rows_over_tol": 0.0,
+        "p99_row_rel_err": 0.0,
+        "rule": "max_rel_err<=tol",
+        "state": {
+          "kv_rows": {
+            "max_abs_err": 0.0,
+            "max_rel_err": 0.0,
+            "mean_rel_err": 0.0,
+            "nan": false
+          }
+        },
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "rung": "adhoc"
+    },
+    {
+      "B": 4,
+      "seq_len": 8192,
+      "ok": true,
+      "attn_type": "mla",
+      "seed": 0,
+      "mixed": false,
+      "tag": "vk3",
+      "prefill": false,
+      "kind": "verify",
+      "draft_tokens": 4,
+      "num_tokens": 16,
+      "verify_graph": true,
+      "page_size": 64,
+      "kv_dtype": "torch.float8_e4m3fn",
+      "attention_backend": "cutedsl_mla",
+      "attention_backend_class": "CuteDslMLABackend",
+      "attn_res": {
+        "block_num": 8,
+        "valid_blocks": 1,
+        "write_layer": false
+      },
+      "out_shape": [
+        16,
+        7168
+      ],
+      "finite": true,
+      "us_step": 1626.7839670181274,
+      "us_token": 101.67399793863297,
+      "kv_gb": 0.019058688,
+      "mla_kv_read_bytes": 18874368,
+      "floor_us": 2.696338285714286,
+      "peak_gb": 3.76055808,
+      "graph_ok": true,
+      "us_meta_prep": 40.41599854826927,
+      "us_step_graph": 216.2880003452301,
+      "graph_finite": true,
+      "graph_speedup": 7.521378737708615,
+      "us_token_graph": 13.518000021576881,
+      "latency_us": 216.2880003452301,
+      "latency_mode": "graph",
+      "correctness": {
+        "max_abs_err": 0.0,
+        "max_rel_err": 0.0,
+        "mean_rel_err": 0.0,
+        "nan": false,
+        "rows": 16,
+        "rows_over_tol": 0,
+        "frac_rows_over_tol": 0.0,
+        "p99_row_rel_err": 0.0,
+        "rule": "max_rel_err<=tol",
+        "state": {
+          "kv_rows": {
+            "max_abs_err": 0.0,
+            "max_rel_err": 0.0,
+            "mean_rel_err": 0.0,
+            "nan": false
+          }
+        },
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "rung": "adhoc"
+    }
+  ]
+}

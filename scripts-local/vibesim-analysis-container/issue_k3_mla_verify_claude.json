@@ -1,5 +1,5 @@
 {
-  "_note": "SPECULATIVE-DECODE VERIFY campaign (user 2026-09-27, follow-up #4). One MLA decoder layer, one B200 rank of the cookbook TP8/EP8 recipe. Points `B,L,vk<k>` = ForwardMode.TARGET_VERIFY: B requests at context L each verify k+1 tokens (k draft + bonus, chain / topk=1) in one forward, as EAGLE/MTP verification does. MLA takes the absorbed path: the TRT-LLM/CuteDSL decode kernel with q_len = k+1 per request over the L+k+1 fp8 latent-KV tokens (trtllm_mla_backend.forward_extend verify branch), writing the k+1 new KV rows. Primary: 64 requests x 4 tokens @8k; secondaries: 128 x 4 @8k and 16 x 4 @64k. Metric = eager step time (production graph-captures verify; this harness times both sides eagerly). Correctness = strict max-rel rule on all B*(k+1) output rows + post-step state. Oracle: the decode prediction at the same B/L (VibeSim has no verify branch; the verify step is ~ a decode step with k+1 query rows). GPU mode: slurm.",
+  "_note": "SPECULATIVE-DECODE VERIFY campaign (user 2026-09-27, follow-up #4). One MLA decoder layer, one B200 rank of the cookbook TP8/EP8 recipe. Points `B,L,vk<k>` = ForwardMode.TARGET_VERIFY: B requests at context L each verify k+1 tokens (k draft + bonus, chain / topk=1) in one forward, as EAGLE/MTP verification does. MLA takes the absorbed path: the TRT-LLM/CuteDSL decode kernel with q_len = k+1 per request over the L+k+1 fp8 latent-KV tokens (trtllm_mla_backend.forward_extend verify branch), writing the k+1 new KV rows. Primary: 64 requests x 4 tokens @8k; secondaries: 128 x 4 @8k and 16 x 4 @64k. Metric = CUDA-graph replay time of the verify step (--verify-graph, 2026-09-28: production's DecodeCudaGraphRunner captures TARGET_VERIFY at the draft width; the eager verify step is ~60% host launch overhead with sigma ~90 us under CPU contention, which made the 3-sigma gate reject a -14.7% KDA round). Correctness = strict max-rel rule on all B*(k+1) output rows + post-step state. Oracle: the decode prediction at the same B/L (VibeSim has no verify branch; the verify step is ~ a decode step with k+1 query rows). GPU mode: slurm.",
   "case": "k3_mla_verify_claude",
   "mode": "open_ended",
   "framework": "sglang",
@@ -8,7 +8,7 @@
   "driver": "kimi_single_layer_decode.py",
   "codex_image": "rga-local/sglang-k3:v0520-claude",
   "before_image": "lmsysorg/sglang:v0.5.20",
-  "driver_args": "--attn-type mla --moe-backend flashinfer_mxfp4 --attention-backend cutedsl_mla --attn-heads 12 --kv-cache-dtype fp8_e4m3 --experts 112 --ep 8 --local-topk 2 --hidden-scale 1.0 --cuda-graph --iters 40 --warmup 10 --bf16-gemm-init --flashinfer-autotune",
+  "driver_args": "--attn-type mla --moe-backend flashinfer_mxfp4 --attention-backend cutedsl_mla --attn-heads 12 --kv-cache-dtype fp8_e4m3 --experts 112 --ep 8 --local-topk 2 --hidden-scale 1.0 --cuda-graph --iters 40 --warmup 10 --bf16-gemm-init --flashinfer-autotune --verify-graph",
   "points": {
     "primary": [
       64,
@@ -44,15 +44,15 @@
   "agent": "claude",
   "claude_model": "us.anthropic.claude-opus-5-5",
   "render": {
-    "METRIC": "eager TARGET_VERIFY step latency of one Kimi-K3 MLA decoder layer (speculative decoding, 4 tokens per request)",
+    "METRIC": "CUDA-graph replay latency of one TARGET_VERIFY step of one Kimi-K3 MLA decoder layer (speculative decoding, 4 tokens per request)",
     "FRAMEWORK": "sglang",
     "CHECKOUT": "/sgl-workspace/sglang",
     "MODEL_NAME": "Kimi-K3 (moonshotai/Kimi-K3): one MLA (dense multi-head latent attention) decoder layer, as it runs on one B200 of the production TP8/EP8 deployment (12 attention heads, trtllm_mla chunked-prefill attention over a paged fp8 latent KV, 112 local mxfp4 experts)",
     "WORKLOAD": "speculative-decode verification (ForwardMode.TARGET_VERIFY, chain, topk=1): B=64 requests at context 8,192 each verifying 4 tokens (3 draft + 1 bonus) in one forward (primary: 256 query tokens; MLA runs the absorbed decode kernel with 4 query rows per request over 8,196 cached fp8 latent tokens), plus B=128 x 4 @8k and B=16 x 4 @65,536 (must not regress)",
-    "DRIVER_ARGS": "--attn-type mla --moe-backend flashinfer_mxfp4 --attention-backend cutedsl_mla --attn-heads 12 --kv-cache-dtype fp8_e4m3 --experts 112 --ep 8 --local-topk 2 --hidden-scale 1.0 --cuda-graph --iters 40 --warmup 10 --bf16-gemm-init --flashinfer-autotune",
+    "DRIVER_ARGS": "--attn-type mla --moe-backend flashinfer_mxfp4 --attention-backend cutedsl_mla --attn-heads 12 --kv-cache-dtype fp8_e4m3 --experts 112 --ep 8 --local-topk 2 --hidden-scale 1.0 --cuda-graph --iters 40 --warmup 10 --bf16-gemm-init --flashinfer-autotune --verify-graph",
     "POINTS": "64,8192,vk3;128,8192,vk3;16,65536,vk3",
     "INSTALL_CMD": "true",
-    "REBUILD_CMD": "find /sgl-workspace/sglang/python/sglang -name __pycache__ -prune -exec rm -rf {} + ; cd /workspace/opt_run && python3 /tmp/kimi_single_layer_decode.py --point 4,8192,vk3 --attn-type mla --moe-backend flashinfer_mxfp4 --attn-heads 12 --attention-backend cutedsl_mla --kv-cache-dtype fp8_e4m3 --experts 112 --ep 8 --local-topk 2 --hidden-scale 1.0 --cuda-graph --iters 5 --warmup 2 --bf16-gemm-init --flashinfer-autotune && echo LAYER_SMOKE_OK",
+    "REBUILD_CMD": "find /sgl-workspace/sglang/python/sglang -name __pycache__ -prune -exec rm -rf {} + ; cd /workspace/opt_run && python3 /tmp/kimi_single_layer_decode.py --point 4,8192,vk3 --attn-type mla --moe-backend flashinfer_mxfp4 --attn-heads 12 --attention-backend cutedsl_mla --kv-cache-dtype fp8_e4m3 --experts 112 --ep 8 --local-topk 2 --hidden-scale 1.0 --cuda-graph --iters 5 --warmup 2 --bf16-gemm-init --flashinfer-autotune --verify-graph && echo LAYER_SMOKE_OK",
     "ORACLE_URL": "http://172.17.0.1:8802",
     "OPT_HISTORY": "/workspace/opt_history"
   }

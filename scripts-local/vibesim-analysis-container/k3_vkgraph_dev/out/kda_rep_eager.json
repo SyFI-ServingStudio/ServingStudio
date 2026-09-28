@@ -1,0 +1,188 @@
+{
+  "sglang_version": "0.5.20",
+  "moe_backend": "flashinfer_mxfp4",
+  "hidden_act": "situ",
+  "moe_method": {
+    "class": "Mxfp4MoEMethod",
+    "use_flashinfer": true,
+    "use_marlin": false,
+    "_fi_kernel": "trtllm_sm100",
+    "flashinfer_mxfp4_moe_precision": "default"
+  },
+  "experts": 112,
+  "ep": 8,
+  "layer_idx": 5,
+  "local_topk": 2,
+  "hidden_scale": 1.0,
+  "attn_type": "kda",
+  "attention_backend": null,
+  "page_size": null,
+  "attn_heads": 12,
+  "cuda_graph": true,
+  "kv_cache_dtype": null,
+  "mamba_ssm_dtype": "bfloat16",
+  "num_attention_heads": 64,
+  "config": {
+    "num_experts": 112,
+    "num_experts_per_token": 2,
+    "num_shared_experts": 2,
+    "moe_intermediate_size": 3072,
+    "routed_expert_hidden_size": 3584,
+    "hidden_size": 7168
+  },
+  "mla": null,
+  "kda": {
+    "num_heads": 12,
+    "head_dim": 128,
+    "short_conv_kernel": 4,
+    "gate_lower_bound": -5.0
+  },
+  "points": [
+    {
+      "B": 64,
+      "seq_len": 8192,
+      "ok": true,
+      "attn_type": "kda",
+      "seed": 0,
+      "mixed": false,
+      "tag": "vk3",
+      "prefill": false,
+      "kind": "verify",
+      "draft_tokens": 4,
+      "num_tokens": 256,
+      "verify_graph": false,
+      "attn_res": {
+        "block_num": 8,
+        "valid_blocks": 1,
+        "write_layer": false
+      },
+      "out_shape": [
+        256,
+        7168
+      ],
+      "finite": true,
+      "us_step": 1354.0799617767334,
+      "us_token": 5.289374850690365,
+      "state_mb": 239.01696,
+      "peak_gb": 6.970517504,
+      "graph_ok": false,
+      "graph_skipped": "verify points are timed eagerly (no --verify-graph)",
+      "latency_us": 1354.0799617767334,
+      "latency_mode": "eager",
+      "correctness": {
+        "max_abs_err": 0.0,
+        "max_rel_err": 0.0,
+        "mean_rel_err": 0.0,
+        "nan": false,
+        "rows": 256,
+        "rows_over_tol": 0,
+        "frac_rows_over_tol": 0.0,
+        "p99_row_rel_err": 0.0,
+        "rule": "max_rel_err<=tol",
+        "state": {
+          "conv": {
+            "max_abs_err": 0.0,
+            "max_rel_err": 0.0,
+            "mean_rel_err": 0.0,
+            "nan": false
+          },
+          "temporal": {
+            "max_abs_err": 0.0,
+            "max_rel_err": 0.0,
+            "mean_rel_err": 0.0,
+            "nan": false
+          },
+          "intermediate_ssm": {
+            "max_abs_err": 0.0,
+            "max_rel_err": 0.0,
+            "mean_rel_err": 0.0,
+            "nan": false
+          },
+          "intermediate_conv_window": {
+            "max_abs_err": 0.0,
+            "max_rel_err": 0.0,
+            "mean_rel_err": 0.0,
+            "nan": false
+          }
+        },
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "rung": "adhoc"
+    },
+    {
+      "B": 4,
+      "seq_len": 8192,
+      "ok": true,
+      "attn_type": "kda",
+      "seed": 0,
+      "mixed": false,
+      "tag": "vk3",
+      "prefill": false,
+      "kind": "verify",
+      "draft_tokens": 4,
+      "num_tokens": 16,
+      "verify_graph": false,
+      "attn_res": {
+        "block_num": 8,
+        "valid_blocks": 1,
+        "write_layer": false
+      },
+      "out_shape": [
+        16,
+        7168
+      ],
+      "finite": true,
+      "us_step": 1466.2400484085083,
+      "us_token": 91.64000302553177,
+      "state_mb": 18.38592,
+      "peak_gb": 3.306800128,
+      "graph_ok": false,
+      "graph_skipped": "verify points are timed eagerly (no --verify-graph)",
+      "latency_us": 1466.2400484085083,
+      "latency_mode": "eager",
+      "correctness": {
+        "max_abs_err": 0.0,
+        "max_rel_err": 0.0,
+        "mean_rel_err": 0.0,
+        "nan": false,
+        "rows": 16,
+        "rows_over_tol": 0,
+        "frac_rows_over_tol": 0.0,
+        "p99_row_rel_err": 0.0,
+        "rule": "max_rel_err<=tol",
+        "state": {
+          "conv": {
+            "max_abs_err": 0.0,
+            "max_rel_err": 0.0,
+            "mean_rel_err": 0.0,
+            "nan": false
+          },
+          "temporal": {
+            "max_abs_err": 0.0,
+            "max_rel_err": 0.0,
+            "mean_rel_err": 0.0,
+            "nan": false
+          },
+          "intermediate_ssm": {
+            "max_abs_err": 0.0,
+            "max_rel_err": 0.0,
+            "mean_rel_err": 0.0,
+            "nan": false
+          },
+          "intermediate_conv_window": {
+            "max_abs_err": 0.0,
+            "max_rel_err": 0.0,
+            "mean_rel_err": 0.0,
+            "nan": false
+          }
+        },
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "rung": "adhoc"
+    }
+  ]
+}
