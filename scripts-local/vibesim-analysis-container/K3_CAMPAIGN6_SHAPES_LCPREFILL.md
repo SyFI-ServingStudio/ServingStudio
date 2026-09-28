@@ -285,7 +285,68 @@ appended in §9.6 when they land. **Blocker at launch:** GPUs 0/5/6/7 were taken
 the transfer checks sat in PENDING (Resources) until a GPU was released.
 
 ### 9.6 Mixed / verify campaign results
-(pending)
+
+**GPU starvation (2026-09-27 20:40 → 2026-09-28 01:39).** The user's 4-GPU job plus four `slurm-manager` placeholder
+jobs (`gpumgmt-ph-cayenne-gpu*`, partition `placeholder`, priority tier 10) held all eight GPUs for five hours; every
+measurement request of the running agents queued. Consequences, all recorded in the cases' `rounds.jsonl`:
+- KDA mixed r1: first verdict "non-compiling" was false (the rebuild smoke timed out after 90 min in the queue); the
+  re-judge showed the agent had edited blind and made the tree +52–77% slower → FAIL.
+- MLA mixed r1 (judged 01:46, slurm 2150): FAIL null, +0.04% — the agent tree is byte-identical to the seed; it never
+  got past `iter_00`. The round is a no-op, so MLA mixed runs rounds 2–4.
+- Both campaigns were paused (runner loops killed, in-flight judges kept) and resumed at 01:55 with
+  `finish_and_resume.sh` → `resume_mixed_verify.sh` once the placeholders released the GPUs.
+
+**Harness fidelity bug: the eager verify metric is host-bound.** KDA verify r1 measured −21%/−16%/−22% at 5 reps and
+−14.7%/−12.8%/−10.7% at 15 reps (slurm 2152), all points CHECK-exact, and was rejected twice: the pristine baseline's
+σ was 92 µs on a 1259 µs step (3σ floor 22%); r2 (−21.7%/−21.9%/−20.5% eager, exact) hit σ = 418 µs → a 99% floor.
+Cause: the eager TARGET_VERIFY step is ~65% CPU launch overhead (KDA 64×8k vk3: 1420 µs eager vs 502 µs as a CUDA
+graph; MLA 1523 vs 493), so its wall time follows host contention, not the kernels. Production graph-captures verify
+(`DecodeCudaGraphRunner` at the captured draft width). Fix (commit `fa5067a`): driver flag `--verify-graph` —
+`graph_capture_and_time` takes `num_tokens = B·(k+1)` so the backends' `init_cuda_graph_state(max_bs, max_num_tokens)`
+sees the draft width; the judged `latency_us` becomes the graph replay. GPU smoke on the pristine image (slurm 2162,
+`k3_vkgraph_dev/out/test.slurm.out`): graph replay is bit-exact against the eager step on both layers (golden captured
+in graph mode, replayed eagerly: max rel err 0.0, state ok), and 5 graph-mode reps span 501.2–502.1 µs (KDA) /
+492.9–493.0 µs (MLA) — σ ≈ 0.05 µs instead of 90–400 µs. Both verify cases carry the flag from KDA r3 / MLA r1 on
+(the KDA r2 judge had already snapshotted the old driver; the swap waited for it — `k3_vkgraph_dev/swap_vkgraph_driver.sh`).
+The KDA r1 and r2 trees are re-judged in graph mode (slurm 2199, `rejudge_vkgraph_trial_{1,2}_verdict.json`).
+
+**KDA verify (`k3_kda_verify_claude`, seed = the shapes tree; graph metric, 5 reps, pristine goldens).**
+
+| round | metric | primary 64×8k vk3 | 128×8k vk3 | 16×64k vk3 | verdict |
+|---|---|---|---|---|---|
+| seed (shapes tree) vs pristine | eager | −12.0% | −10.7% | +3.6% | transfer check only |
+| r1 | eager 5 / 15 reps | −21.1% / −14.7% | −16.3% / −12.8% | −22.4% / −10.7% | FAIL (3σ floor 29% / 22%) |
+| r1 tree re-judged | graph | −0.05% | 0.0% | 0.0% | null — the eager gain was host time only |
+| r2 | eager | −21.7% | −21.9% | −20.5% | FAIL (σ 418 µs → 99% floor) |
+| r2 tree re-judged | graph | 490.0 → 486.9 µs (−0.62%) | −0.15% | −1.06% | PASS, superseded by r3 (separate branch) |
+| r3 | graph | 490.0 → **472.5 µs (−3.55%)** | 651.7 → 620.1 (−4.85%) | 298.5 → 292.3 (−2.08%) | **PASS**, promoted |
+
+r3 changed 14 files incl. a new `kda_verify_recurrent.{cuh,py}` JIT kernel, `kda_backend.py`, `kda_triton.py`,
+`kda_fused_decode`, `attn_res`, `l2_prefetch`. Best tree: `iter_opt_eval_k3_kda_verify_claude/best_tree`
+(= `trial_3_tree_judged`).
+
+**MLA verify (`k3_mla_verify_claude`, from PRISTINE — every accepted MLA tree regressed the verify step (§9.4); graph
+metric, 5 reps).**
+
+| round | primary 64×8k vk3 | 128×8k vk3 | 16×64k vk3 | verdict |
+|---|---|---|---|---|
+| r1 | 492.9 → **472.4 µs (−4.15%)** | 658.7 → 626.1 (−4.96%) | 425.3 → 400.6 (−5.80%) | **PASS**, promoted (2 files: `set_mla_kv_concat_q.cuh`, `kimi_k3.py`) |
+| r2 | 483.7 → 484.6 (−0.18%) | −0.01% | −0.04% | FAIL null (variants of the same KV-concat kernel) |
+| r3 | 483.7 → **473.6 µs (−2.09%)** | 628.1 → 626.1 (−0.31%) | 399.6 → 396.6 (−0.76%) | **PASS**, promoted (+ `attn_res` fused TMA path, 5 files) |
+
+(Each round's "before" is the judge's own re-measurement of the then-best tree in the same slurm job — the 472.4 → 483.7
+shift between r1's after and r2/r3's before is the between-job spread of the graph replay on different GPUs, ~2%;
+comparisons within a round are same-job. Cumulative vs pristine ≈ −6%; the seed recheck at the end gives the exact number.)
+
+**KDA mixed (`k3_kda_mixed_claude`, seed = the KDA lcprefill tree, transfer check −13.4/−18.2/−12.7% vs pristine; eager
+metric — sglang runs mixed batches eagerly; 5 reps).**
+
+| round | primary 64 dec @8k + 16k chunk | 128 dec @8k + 4k chunk | 64 dec + 16k chunk @ 48k prefix | verdict |
+|---|---|---|---|---|
+| r1 | +76% | +52% | +77% | FAIL (edited blind while GPU-starved) |
+| r2 | 8659 → **8361 µs (−3.44%)** | 2766 → 2764 (−0.08%) | 8775 → 8382 (−4.48%) | **PASS**, promoted (22 files: KDA chunk/conv/l2norm JIT kernels, `kda_ptx_prefill`, `situ_and_mul`) |
+
+KDA mixed r3, MLA mixed r2–r4: (pending — rounds in flight since 07:00)
 
 ### 9.5 Seed rechecks of the final KDA lcprefill tree (slurm job 2101, fresh pristine goldens per seed)
 All 8 points PASS, max rel 0.0074.
