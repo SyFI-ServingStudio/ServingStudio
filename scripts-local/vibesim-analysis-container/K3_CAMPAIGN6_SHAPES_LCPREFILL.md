@@ -356,9 +356,10 @@ metric — sglang runs mixed batches eagerly; 5 reps).**
 | round | primary 64 dec @8k + 16k chunk | 128 dec @8k + 4k chunk | 64 dec + 16k chunk @ 48k prefix | verdict |
 |---|---|---|---|---|
 | r1 | +76% | +52% | +77% | FAIL (edited blind while GPU-starved) |
-| r2 | 8659 → **8361 µs (−3.44%)** | 2766 → 2764 (−0.08%) | 8775 → 8382 (−4.48%) | **PASS**, promoted (22 files: KDA chunk/conv/l2norm JIT kernels, `kda_ptx_prefill`, `situ_and_mul`) |
+| r2 | 8659 → **8361 µs (−3.44%)** | 2766 → 2764 (−0.08%) | 8775 → 8382 (−4.48%) | **PASS**, promoted (incremental patch vs the lcprefill seed: 4 files, 70 lines — the one-wave guard on the CUDA `kda_chunk_h` scan lifted for mixed batches) |
+| r3 (two voided starts: Bedrock 503) | 8302 → 8368 (−0.8%) | 2695 → 2720 (−0.9%) | 8565 → 8429 (+1.6%) | FAIL null (agent lost Bedrock after 133 turns at iter_01) |
 
-KDA mixed r3, MLA mixed r2–r4: (pending — rounds in flight since 07:00)
+MLA mixed r2–r4: (pending — in flight since 09:13, Bedrock flapping)
 
 ### 9.5 Seed rechecks of the final KDA lcprefill tree (slurm job 2101, fresh pristine goldens per seed)
 All 8 points PASS, max rel 0.0074.
