@@ -29,5 +29,27 @@ while :; do
   [ "$ok" -ge "${NEED_OK:-5}" ] && break
   sleep $([ "$ok" -ge 1 ] && echo 60 || echo 120)
 done
-echo "$(date +%F_%T) Bedrock healthy (${NEED_OK:-5} consecutive probes) -> resuming"
+echo "$(date +%F_%T) Bedrock healthy (${NEED_OK:-5} consecutive probes)"
+# 12:40: also require a schedulable GPU. slurm-manager placeholders (partition `placeholder`, 24 h) plus the user's
+# 4-GPU job held all eight GPUs at 12:25 and the MLA mixed r2 agent edited blind while its request queued. Probe: a
+# 5-second sbatch on partition main must start within GPU_PROBE_WAIT s; otherwise cancel it, wait, re-check Bedrock once.
+gpu_probe() {
+  local j st t=0
+  j="$(sbatch --parsable --partition=main --job-name=k3_gpu_probe --output=/dev/null --wrap "sleep 5" | cut -d';' -f1)"
+  while [ "$t" -lt "${GPU_PROBE_WAIT:-90}" ]; do
+    st="$(squeue -h -j "$j" -o %T 2>/dev/null)"
+    case "$st" in RUNNING|COMPLETING|"") return 0 ;; esac
+    sleep 10; t=$((t + 10))
+  done
+  scancel "$j" 2>/dev/null; return 1
+}
+while :; do
+  if gpu_probe; then
+    out="$(probe 2>&1 | tail -n 1)"; echo "$(date +%F_%T) GPU schedulable; final Bedrock probe: $out"
+    case "$out" in OK*) break ;; esac
+    echo "$(date +%F_%T) Bedrock flipped -> back to the Bedrock streak"; exec "$0"
+  fi
+  echo "$(date +%F_%T) no schedulable GPU (all held) -> retry in 5 min"; sleep 300
+done
+echo "$(date +%F_%T) Bedrock + GPU available -> resuming"
 exec "$HERE/resume_mixed_verify.sh"

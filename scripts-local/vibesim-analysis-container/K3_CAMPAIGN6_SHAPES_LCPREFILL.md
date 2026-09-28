@@ -359,7 +359,26 @@ metric — sglang runs mixed batches eagerly; 5 reps).**
 | r2 | 8659 → **8361 µs (−3.44%)** | 2766 → 2764 (−0.08%) | 8775 → 8382 (−4.48%) | **PASS**, promoted (incremental patch vs the lcprefill seed: 4 files, 70 lines — the one-wave guard on the CUDA `kda_chunk_h` scan lifted for mixed batches) |
 | r3 (two voided starts: Bedrock 503) | 8302 → 8368 (−0.8%) | 2695 → 2720 (−0.9%) | 8565 → 8429 (+1.6%) | FAIL null (agent lost Bedrock after 133 turns at iter_01) |
 
-MLA mixed r2–r4: (pending — in flight since 09:13, Bedrock flapping)
+**MLA mixed (`k3_mla_mixed_claude`, seed = the MLA lcprefill tree, transfer check −29.0/−54.4/−17.0% vs pristine; eager
+metric; 5 reps).** Two starts of r2 were voided (09:13 Bedrock 503 storm; 12:20 all 8 GPUs held) before it ran 12:53–13:32.
+
+| round | primary 64 dec @8k + 16k chunk | 128 dec @8k + 4k chunk | 64 dec + 16k chunk @ 48k prefix | verdict |
+|---|---|---|---|---|
+| r1 | +0.04% | 0.0% | 0.0% | VOID (tree identical to the seed; GPU-starved) |
+| r2 | 15065 → **8248 µs (−45.2%)** | 11512 → 2590 (−77.5%) | 37898 → 13166 (−65.3%) | **PASS**, promoted (3 files, 224 lines: `trtllm_mla_backend.py`, `forward_batch_deepseek_mha_mixin.py`, `forward_mha.py`) |
+
+r2's lever: in a MIXED (EXTEND) batch the decode rows — 1-token extends with an 8k prefix each — went through the chunked-prefix
+MHA path (prefix_chunk_len = capacity // batch_size, so 64–128 tiny MHA prefix passes per layer); the agent routes them to
+the absorbed MLA decode kernel (trtllm-gen) and keeps the chunked-prefix MHA only for the prefill request. CHECK: max rel
+0.013, 0 of 16,448 rows over tolerance, state ok. A variant merging the prefix into one big chunk was faster still
+(11095 µs @ p49152) but FAILED CHECK — log2-LSE vs ln `merge_state` makes the output chunk-dependent — and was reverted.
+**Production relevance (checked in the pristine v0.5.20 source):** `handle_attention_trtllm_mla` in
+`srt/models/deepseek_common/attention_backend_handler.py` returns `MHA_CHUNKED_KV` for every `is_extend_without_speculative()`
+batch (unless chunked-prefix caching is disabled), with no per-row split — so in a real server a mixed chunk's decode rows
+take the same chunked-prefix MHA path the harness's seed took. The lever applies whenever the deployment forms mixed
+prefill+decode batches (sglang `--enable-mixed-chunk`); it is a no-op for pure-decode and pure-prefill batches.
+
+MLA mixed r3–r4: (pending — in flight since 13:32)
 
 ### 9.5 Seed rechecks of the final KDA lcprefill tree (slurm job 2101, fresh pristine goldens per seed)
 All 8 points PASS, max rel 0.0074.
