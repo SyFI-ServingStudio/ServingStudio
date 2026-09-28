@@ -57,3 +57,19 @@ runs the ragged/paged prefill kernels plus the fp8 KV write.
   the sglang tree.
 - Correctness is always vs the ORIGINAL model's output; rel_err ≤ 0.02 on output and post-step
   state, every point.
+- Verify (`vk`) points are judged as CUDA-graph replays (`--verify-graph`). Anything that only
+  removes host launch work (fewer Python ops, fewer launches) is worth exactly 0 there: the KDA
+  verify r1 tree showed −14.7% in eager mode and −0.05% under the graph metric. Measure with the
+  same flags the judge uses; if `latency_mode` says `graph`, optimize GPU time only.
+
+## E. Speculative-verify (TARGET_VERIFY, 4 tokens/request) and mixed prefill+decode batches
+
+| # | lever | where | effect | notes |
+|---|---|---|---|---|
+| E1 | CUDA JIT verify recurrence kernel replacing the Triton `fused_recurrent` verify path (KDA) | `kernels/jit/csrc/attention/kda_verify_recurrent.cuh` + `kernels/ops/attention/kda_verify_recurrent.py`, `kda_backend.py` | −3.55% @64×8k vk3, −4.85% @128×8k | the Triton verify scan was 2× off its roofline; store-policy / occupancy / TMA variants of the new kernel were neutral |
+| E2 | satfinite fp8 cvt in `set_mla_kv_concat_q` + shared/routed alt-stream overlap + MLA output-gate `g_proj` enqueued after the MLA node (fork event at `forward_absorb_core`, overlap up to 512 tokens) (MLA) | `kernels/jit/csrc/elementwise/set_mla_kv_concat_q.cuh`, `srt/models/kimi_k3.py` | −4.15% @64×8k vk3, −5.8% @16×64k, bit-exact | from PRISTINE: every accepted MLA decode tree regressed verify (+5.8…+31%), so verify cases must not inherit them blindly |
+| E3 | residual add fused into the attn_res TMA aggregate + SM carveout on the shared-expert down GEMM so the MoE routing kernel is not blocked (MLA) | `kernels/jit/csrc/kimi_k3/attn_res/fused_tma.cuh`, `srt/layers/attn_residual.py`, `srt/models/kimi_k3.py` | −2.09% @64×8k vk3 | forking the shared experts after topk was worse (482.5 vs 474.5) |
+| E4 | Lift the one-wave dispatch guard (`cdiv(V,16)*N*H <= #SMs`) so the 4-stage cp.async CUDA `kda_chunk_h` scan also serves mixed batches with many short sequences (N = 65/129) (KDA mixed) | `kernels/ops/attention/kda_chunk_h.py` / `fla/chunk_delta_h.py` | −3.4% @64 dec + 16k chunk, −4.5% @48k prefix | the guard was measured on the old single-stage kernel; the Triton h-scan cost 645 µs in the mixed batch |
+
+Dead ends here: trtllm-gen MLA at q_len=4 (2× slower than CuteDSL, microbench); MLA split_kv override,
+TGV / deep_gemm GEMM swaps at these m; variants of the KV-concat kernel beyond E2 (±0).
