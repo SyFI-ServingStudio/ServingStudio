@@ -256,9 +256,36 @@ Verdict files: `iter_opt_eval_k3_{kda,mla}_lcprefill_claude/best_tree_seed{1,2}_
   KDA cumulative on the primary vs pristine: **9.03 → 8.13 ms (−10.0%)**. Patch `<base>/claude/kda_lcprefill_03_r4.patch`
   (7 files, 853 lines); chain r1→r2→r4 validated. Seed rechecks of the final tree: slurm job 2101 (results in 9.5).
 
-### 9.4 Mixed prefill+decode and speculative verify (driver extension)
-Survey and field-by-field spec in `K3_MIXED_VERIFY_DRIVER_SPEC.md`; implementation follows once no trial is running (a driver
-edit re-keys every case's goldens).
+### 9.4 Mixed prefill+decode and speculative verify (driver extension, commit `a8452d8`)
+Survey and field-by-field spec in `K3_MIXED_VERIFY_DRIVER_SPEC.md`. The driver gained two step kinds:
+- `B,L,mx<C>[p<P>]` — **MIXED**: B decode requests at context L (one token each) + one prefill chunk of C tokens on a P-token
+  prefix, built as the scheduler does (prefill rows first, decode rows as 1-token extends with prefix L−1; the eager runner
+  runs MIXED as EXTEND). `KDAMixedState` (slot 0 = chunk, slots 1..B = decode; per-request initial state) and `MLAMixedState`
+  (KV pool with the chunk range + B decode ranges; `MHA_CHUNKED_KV` with the decode rows counted in `prefix_chunk_len =
+  capacity // batch_size`). Eager metric; row-wise correctness rule over all C+B rows + post-step state.
+- `B,L,vk<k>` — **TARGET_VERIFY**: B requests × (k+1) tokens, chain (topk=1). `KDAVerifyState` adds the speculative scratch
+  (`intermediate_ssm` [slots, D, HV, K, V] fp32, `intermediate_conv_window` [slots, D, 3, dim]) the non-fused verify path writes
+  (`causal_conv1d_update` + Triton `target_verify` with `disable_state_update`, `lower_bound` gate); `MLAVerifyState` gives each
+  request L + page_size slots and runs the absorbed decode kernel with q_len = k+1 (`trtllm_mla_backend.forward_extend` verify
+  branch). The speculative config (`speculative_algorithm=EAGLE`, `speculative_num_draft_tokens=k+1`, `speculative_eagle_topk=1`,
+  `speculative_attention_mode=prefill`) is published through `RuntimeContext.override` before any backend is built. Strict
+  max-rel rule; eager metric (production graph-captures verify; both sides of a comparison are eager here).
+
+Smoke on the pristine tree (slurm jobs 2102–2105): all four kinds run and **replay bit-exact** against their goldens.
+Reference eager steps at B=8 @8k: KDA mixed (4k chunk) 2.84 ms, KDA verify ×4 1.58 ms, MLA mixed (4k chunk @ prefix 4k)
+3.50 ms, MLA verify ×4 1.47 ms.
+
+Cases: `issue_k3_{kda,mla}_mixed_claude.json` (primary 64×8k + 16k first chunk; 128×8k + 4k chunk; 64×8k + 16k chunk @ prefix
+49,152; oracles 8809/8810 = new VibeSim mixed-batch predictions, e.g. MLA 64×8k+16k predicted 8.1 ms) and
+`issue_k3_{kda,mla}_verify_claude.json` (primary 64×4 @8k; 128×4 @8k; 16×4 @64k; oracle = the decode prediction at the same
+B/L, since VibeSim has no verify branch — stated in the prompt). Seeds: mixed ← lcprefill best trees, verify ← shape-matched best
+trees, transfer-checked. Campaigns launched 18:51 (`run_k3_pair_slurm.sh mixed_claude 1 3`, `… verify_claude 1 3`); results
+appended in §9.6 when they land. **Blocker at launch:** GPUs 0/5/6/7 were taken by `slurm-manager` placeholder jobs
+(`gpumgmt-ph-cayenne-gpu*`, partition `placeholder`, 24 h limit, PreemptMode=OFF) at 18:46, the other four by a 3-day job, so
+the transfer checks sat in PENDING (Resources) until a GPU was released.
+
+### 9.6 Mixed / verify campaign results
+(pending)
 
 ### 9.5 Seed rechecks of the final KDA lcprefill tree (slurm job 2101, fresh pristine goldens per seed)
 All 8 points PASS, max rel 0.0074.
