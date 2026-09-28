@@ -1,0 +1,1051 @@
+diff -ruN -x __pycache__ -x '*.pyc' a/kernels/jit/csrc/attention/kda_chunk_h.cuh b/kernels/jit/csrc/attention/kda_chunk_h.cuh
+--- a/kernels/jit/csrc/attention/kda_chunk_h.cuh	2026-09-27 02:31:40.809299002 -0700
++++ b/kernels/jit/csrc/attention/kda_chunk_h.cuh	2026-09-27 15:20:37.589882776 -0700
+@@ -40,10 +40,11 @@
+ constexpr int kBT = 64;       // chunk length (tokens)
+ constexpr int kK = 128;       // key head dim
+ constexpr int kBV = 16;       // V columns per CTA
+-constexpr int kWarps = 8;     // warp j: tokens [8j, 8j + 8) of v, K columns [16j, 16j + 16) of h
+-constexpr int kThreads = kWarps * 32;
++constexpr int kComputeWarps = 4;  // warp c: tokens [16c, 16c + 16) of v, K columns [32c, 32c + 32) of h
++constexpr int kLoadWarps = 4;     // cp.async ring fill + h_out / v_new stores
++constexpr int kThreads = (kComputeWarps + kLoadWarps) * 32;
+ constexpr int kRowChunks = kK * 2 / 16;      // 16 B chunks per 128-wide bf16 row
+-constexpr int kLoadRows = kThreads / kRowChunks;  // w/k rows covered by one pass of the CTA
++constexpr int kLoadRows = kLoadWarps * 32 / kRowChunks;  // w/k rows covered by one pass of the loaders
+ constexpr int kVtPitch = kBT + 8;  // [16 v][64 tok] pitch (144 B rows: ldmatrix conflict-free)
+ 
+ /// Shared-memory ring stage: the h-independent operands of one chunk.
+@@ -120,6 +121,10 @@
+ /**
+  * \brief One CTA scans all chunks of one (sequence, head) for a 16-column V slice.
+  *
++ * Warps 0-3 compute (warp c: tokens [16c, 16c + 16) of w @ h^T, K columns [32c, 32c + 32) of the state);
++ * warps 4-7 only move data (cp.async ring fill, h_out / v_new stores), so the compute warps' step is
++ * just the two dots plus the smem exchanges of the h snapshot and v.
++ *
+  * \tparam InT     Initial state dtype (bf16_t | fp32_t)
+  * \tparam OutT    Final state dtype (bf16_t | fp32_t)
+  * \tparam kStages cp.async ring depth
+@@ -183,220 +188,260 @@
+   const int64_t stride_k = static_cast<int64_t>(Hg) * kK;
+   const int64_t stride_v = static_cast<int64_t>(H) * V;
+ 
+-  // Loader lanes: thread owns 16 B chunk `ld_ch` of w/k rows ld_row + kLoadRows * i,
+-  // tid < 128 also one u half-row, tid in [128, 160) one 16 B chunk of the gk row.
+-  const int ld_ch = tid % kRowChunks;
+-  const int ld_row = tid / kRowChunks;
+-  const bf16_t* w_ld = w + (bos + ld_row) * stride_w + static_cast<int64_t>(i_h) * kK + ld_ch * 8;
+-  const bf16_t* k_ld = k + (bos + ld_row) * stride_k + static_cast<int64_t>(i_h / (H / Hg)) * kK + ld_ch * 8;
+-  const int u_row = (tid >> 1) & (kBT - 1);
+-  const bf16_t* u_ld = u + (bos + u_row) * stride_v + static_cast<int64_t>(i_h) * V + i_v * kBV + (tid & 1) * 8;
+-  const float* gk_ld = gk + bos * stride_w + static_cast<int64_t>(i_h) * kK + (tid & 31) * 4;
+-  const uint32_t sm_base = smem_addr(&sm);
+-  const uint32_t w_dst0 = smem_addr(&sm.stage[0].w[swz(ld_row, ld_ch)]) - sm_base;
+-  const uint32_t k_dst0 = smem_addr(&sm.stage[0].k[swz(ld_row, ld_ch)]) - sm_base;
+-  const uint32_t u_dst0 = smem_addr(&sm.stage[0].u[u_row * kBV + (tid & 1) * 8]) - sm_base;
+-  const uint32_t gk_dst0 = smem_addr(&sm.stage[0].gk[(tid & 31) * 4]) - sm_base;
+-
+-  auto issue = [&](int i_t) {
+-    if (i_t < NT) {
+-      const uint32_t st = sm_base + (i_t % kStages) * sizeof(Stage);
+-      const int t0 = i_t * kBT;
+-      const int rem = T - t0;
+-      const int64_t w_off = static_cast<int64_t>(t0) * stride_w;
+-      const int64_t k_off = static_cast<int64_t>(t0) * stride_k;
+-#pragma unroll
+-      for (int i = 0; i < kBT / kLoadRows; ++i) {
+-        const bool ok = ld_row + kLoadRows * i < rem;
+-        cp_async16(st + w_dst0 + i * kLoadRows * kK * 2, w_ld + w_off + i * kLoadRows * stride_w, ok);
+-        cp_async16(st + k_dst0 + i * kLoadRows * kK * 2, k_ld + k_off + i * kLoadRows * stride_k, ok);
+-      }
+-      if (tid < 2 * kBT) {
++  device::PDLWaitPrimary<kUsePDL>();
++
++  if (warp >= kComputeWarps) {
++    // ---------------------------------------------------------------- data mover
++    const int p = tid - kComputeWarps * 32;
++    // w/k: 16 B chunk `ld_ch` of rows ld_row + kLoadRows * i; u: half-row p; gk: p < 32.
++    const int ld_ch = p % kRowChunks;
++    const int ld_row = p / kRowChunks;
++    const bf16_t* w_ld = w + (bos + ld_row) * stride_w + static_cast<int64_t>(i_h) * kK + ld_ch * 8;
++    const bf16_t* k_ld = k + (bos + ld_row) * stride_k + static_cast<int64_t>(i_h / (H / Hg)) * kK + ld_ch * 8;
++    const int u_row = p >> 1;
++    const bf16_t* u_ld = u + (bos + u_row) * stride_v + static_cast<int64_t>(i_h) * V + i_v * kBV + (p & 1) * 8;
++    const float* gk_ld = gk + bos * stride_w + static_cast<int64_t>(i_h) * kK + (p & 31) * 4;
++    const uint32_t sm_base = smem_addr(&sm);
++    const uint32_t w_dst0 = smem_addr(&sm.stage[0].w[swz(ld_row, ld_ch)]);
++    const uint32_t k_dst0 = smem_addr(&sm.stage[0].k[swz(ld_row, ld_ch)]);
++    const uint32_t u_dst0 = smem_addr(&sm.stage[0].u[u_row * kBV + (p & 1) * 8]);
++    const uint32_t gk_dst0 = smem_addr(&sm.stage[0].gk[(p & 31) * 4]);
++    (void)sm_base;
++
++    auto issue = [&](int i_t) {
++      if (i_t < NT) {
++        const uint32_t st = (i_t % kStages) * sizeof(Stage);
++        const int t0 = i_t * kBT;
++        const int rem = T - t0;
++        const bf16_t* wp = w_ld + static_cast<int64_t>(t0) * stride_w;
++        const bf16_t* kp = k_ld + static_cast<int64_t>(t0) * stride_k;
++        if (rem >= kBT) {
++#pragma unroll
++          for (int i = 0; i < kBT / kLoadRows; ++i) {
++            cp_async16(st + w_dst0 + i * kLoadRows * kK * 2, wp + i * kLoadRows * stride_w, true);
++            cp_async16(st + k_dst0 + i * kLoadRows * kK * 2, kp + i * kLoadRows * stride_k, true);
++          }
++        } else {
++#pragma unroll
++          for (int i = 0; i < kBT / kLoadRows; ++i) {
++            const bool ok = ld_row + kLoadRows * i < rem;
++            cp_async16(st + w_dst0 + i * kLoadRows * kK * 2, wp + i * kLoadRows * stride_w, ok);
++            cp_async16(st + k_dst0 + i * kLoadRows * kK * 2, kp + i * kLoadRows * stride_k, ok);
++          }
++        }
+         cp_async16(st + u_dst0, u_ld + static_cast<int64_t>(t0) * stride_v, u_row < rem);
+-      } else if (tid < 2 * kBT + kK / 4) {
+-        const int64_t last = min(kBT, rem) - 1 + t0;
+-        cp_async16(st + gk_dst0, gk_ld + last * stride_w, true);
++        if (p < kK / 4) {
++          const int64_t last = min(kBT, rem) - 1 + t0;
++          cp_async16(st + gk_dst0, gk_ld + last * stride_w, true);
++        }
+       }
+-    }
+-    cp_async_commit();
+-  };
++      cp_async_commit();
++    };
+ 
+-  // State fragments: hs[nt] covers v rows {g, g + 8}, K columns 16 * warp + 8 * nt + 2 * tig + {0, 1}.
+-  float hs[2][4];
+-#pragma unroll
+-  for (int nt = 0; nt < 2; ++nt)
+-#pragma unroll
+-    for (int e = 0; e < 4; ++e) hs[nt][e] = 0.f;
++    bf16_t* h_st = h_out + boh * H * V * kK + (static_cast<int64_t>(i_h) * V + i_v * kBV) * kK;
++    const int hs_row = p / kRowChunks;  // rows hs_row, hs_row + 8 of the [16 v][K] snapshot
++    const int hs_ch = p % kRowChunks;
++    bf16_t* vn_st = v_new + bos * stride_v + static_cast<int64_t>(i_h) * V + i_v * kBV + (p & 1) * 8;
+ 
+-  const int64_t slot_off = static_cast<int64_t>(i_h) * V * kK + static_cast<int64_t>(i_v) * kBV * kK;
+-  const int32_t index = state != nullptr ? state_indices[i_n] : -1;
+-  const InT* slot = index >= 0 ? state + index * state_stride + slot_off : nullptr;
+-  const int32_t final_index = final_state != nullptr ? final_indices[i_n] : -1;
+-  OutT* final_slot = final_index >= 0 ? final_state + final_index * final_stride + slot_off : nullptr;
++#pragma unroll
++    for (int s = 0; s < kStages - 1; ++s) issue(s);
++    cp_async_wait<kStages - 2>();
++    __syncthreads();  // P: stage 0 landed
+ 
+-  device::PDLWaitPrimary<kUsePDL>();
++    for (int i_t = 0; i_t < NT; ++i_t) {
++      __syncthreads();  // B1: snapshot of step i_t in sm.h; stage (i_t - 1) % kStages free
++      issue(i_t + kStages - 1);
++      const uint4 h0 = *reinterpret_cast<const uint4*>(&sm.h[swz(hs_row, hs_ch)]);
++      const uint4 h1 = *reinterpret_cast<const uint4*>(&sm.h[swz(hs_row + 8, hs_ch)]);
++      bf16_t* hp = h_st + static_cast<int64_t>(i_t) * H * V * kK + hs_row * kK + hs_ch * 8;
++      *reinterpret_cast<uint4*>(hp) = h0;
++      *reinterpret_cast<uint4*>(hp + 8 * kK) = h1;
++      cp_async_wait<kStages - 2>();
++      __syncthreads();  // B2: v of step i_t in sm.vn / sm.vt; stage i_t + 1 landed
++      if (i_t * kBT + u_row < T) {
++        *reinterpret_cast<uint4*>(vn_st + static_cast<int64_t>(i_t * kBT + u_row) * stride_v) =
++            *reinterpret_cast<const uint4*>(&sm.vn[u_row * kBV + (p & 1) * 8]);
++      }
++    }
++    cp_async_wait<0>();
++  } else {
++    // ---------------------------------------------------------------- compute
++    const int c = warp;
++    // State fragments: hs[j] covers v rows {g, g + 8}, K columns 32c + 8j + 2tig + {0, 1}.
++    float hs[4][4];
++#pragma unroll
++    for (int j = 0; j < 4; ++j)
++#pragma unroll
++      for (int e = 0; e < 4; ++e) hs[j][e] = 0.f;
++
++    const int64_t slot_off = static_cast<int64_t>(i_h) * V * kK + static_cast<int64_t>(i_v) * kBV * kK;
++    const int32_t index = state != nullptr ? state_indices[i_n] : -1;
++    const InT* slot = index >= 0 ? state + index * state_stride + slot_off : nullptr;
++    const int32_t final_index = final_state != nullptr ? final_indices[i_n] : -1;
++    OutT* final_slot = final_index >= 0 ? final_state + final_index * final_stride + slot_off : nullptr;
++
++    if (slot != nullptr) {
++#pragma unroll
++      for (int j = 0; j < 4; ++j) {
++        const int col = 32 * c + 8 * j + 2 * tig;
++#pragma unroll
++        for (int r = 0; r < 2; ++r) {
++          const InT* ptr = slot + (g + 8 * r) * kK + col;
++          float2 x;
++          if constexpr (std::is_same_v<InT, float>) {
++            x = *reinterpret_cast<const float2*>(ptr);
++          } else {
++            x = __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162*>(ptr));
++          }
++          hs[j][2 * r] = x.x;
++          hs[j][2 * r + 1] = x.y;
++        }
++      }
++    }
+ 
++    const int mi = lane >> 3;
++    const int l7 = lane & 7;
++    // A = h [v][K]: row lane & 15, chunk 2kk + (lane >> 4).
++    uint32_t h_a[kK / 16];
++#pragma unroll
++    for (int kk = 0; kk < kK / 16; ++kk) h_a[kk] = smem_addr(&sm.h[swz(lane & 15, 2 * kk + (lane >> 4))]);
++    // B = w [tok][K] non-trans: tok 16c + 8nt + l7, chunk 4q + mi.
++    uint32_t w_b[2][kK / 32];
+ #pragma unroll
+-  for (int s = 0; s < kStages - 1; ++s) issue(s);
++    for (int nt = 0; nt < 2; ++nt)
++#pragma unroll
++      for (int q = 0; q < kK / 32; ++q) w_b[nt][q] = 2 * swz(16 * c + 8 * nt + l7, 4 * q + mi);
++    // A = v^T [v][tok]; B = k [tok][K] trans: tok 16kk + 8 * (mi & 1) + l7, chunk 4c + 2pp + (mi >> 1).
++    const uint32_t vt_a = smem_addr(&sm.vt[(lane & 15) * kVtPitch + (lane >> 4) * 8]);
++    uint32_t k_b[2];
++#pragma unroll
++    for (int pp = 0; pp < 2; ++pp) k_b[pp] = 2 * swz(8 * (mi & 1) + l7, 4 * c + 2 * pp + (mi >> 1));
+ 
+-  if (slot != nullptr) {
++    // h-independent operands of the next chunk, read from its stage one step early.
++    uint32_t wb[2][kK / 32][4];
++    uint32_t kb[kBT / 16][2][4];
++    uint32_t ur[2][2][2];  // raw bf16 u: [nt][r][tok, tok + 1]
++    float2 gg[4];
++    auto prefetch = [&](int i_t) {
++      const Stage& st = sm.stage[i_t % kStages];
++      const uint32_t st_w = smem_addr(st.w);
++      const uint32_t st_k = smem_addr(st.k);
+ #pragma unroll
+-    for (int nt = 0; nt < 2; ++nt) {
+-      const int col = 16 * warp + 8 * nt + 2 * tig;
++      for (int nt = 0; nt < 2; ++nt)
+ #pragma unroll
+-      for (int r = 0; r < 2; ++r) {
+-        const InT* p = slot + (g + 8 * r) * kK + col;
+-        float2 x;
+-        if constexpr (std::is_same_v<InT, float>) {
+-          x = *reinterpret_cast<const float2*>(p);
+-        } else {
+-          x = __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162*>(p));
++        for (int q = 0; q < kK / 32; ++q) ldsm_x4(wb[nt][q], st_w + w_b[nt][q]);
++#pragma unroll
++      for (int kk = 0; kk < kBT / 16; ++kk)
++#pragma unroll
++        for (int pp = 0; pp < 2; ++pp) ldsm_x4_t(kb[kk][pp], st_k + k_b[pp] + kk * 16 * kK * 2);
++#pragma unroll
++      for (int nt = 0; nt < 2; ++nt) {
++        const int tok = 16 * c + 8 * nt + 2 * tig;
++#pragma unroll
++        for (int r = 0; r < 2; ++r) {
++          ur[nt][r][0] = *reinterpret_cast<const uint16_t*>(&st.u[tok * kBV + g + 8 * r]);
++          ur[nt][r][1] = *reinterpret_cast<const uint16_t*>(&st.u[(tok + 1) * kBV + g + 8 * r]);
+         }
+-        hs[nt][2 * r] = x.x;
+-        hs[nt][2 * r + 1] = x.y;
+       }
+-    }
+-  }
+-
+-  // Per-lane ldmatrix byte offsets, relative to the buffer.
+-  const int mi = lane >> 3;
+-  const int l7 = lane & 7;
+-  // A = h [v][K]: row lane & 15, chunk 2kk + (lane >> 4).
+-  uint32_t h_a[kK / 16];
+-#pragma unroll
+-  for (int kk = 0; kk < kK / 16; ++kk) h_a[kk] = smem_addr(&sm.h[swz(lane & 15, 2 * kk + (lane >> 4))]);
+-  // B = w [tok][K] non-trans: tok 8 * warp + l7, chunk 4q + mi.
+-  uint32_t w_b[kK / 32];
+-#pragma unroll
+-  for (int q = 0; q < kK / 32; ++q) w_b[q] = 2 * swz(8 * warp + l7, 4 * q + mi);
+-  // A = v^T [v][tok]; B = k [tok][K] trans: tok 16kk + 8 * (mi & 1) + l7, chunk 2 * warp + (mi >> 1).
+-  const uint32_t vt_a = smem_addr(&sm.vt[(lane & 15) * kVtPitch + (lane >> 4) * 8]);
+-  const uint32_t k_b = 2 * swz(8 * (mi & 1) + l7, 2 * warp + (mi >> 1));
+-  const int tok = 8 * warp + 2 * tig;
+-
+-  // h-independent operands of the next chunk, read from its stage one step early
+-  // so that only the h snapshot sits between the two barriers of a step.
+-  uint32_t wb[kK / 32][4];
+-  uint32_t kb[kBT / 16][4];
+-  float uu[2][2];
+-  float dec[2][2];
+-  auto prefetch = [&](int i_t) {
+-    const Stage& st = sm.stage[i_t % kStages];
+-    const uint32_t st_w = smem_addr(st.w);
+-    const uint32_t st_k = smem_addr(st.k);
+-#pragma unroll
+-    for (int q = 0; q < kK / 32; ++q) ldsm_x4(wb[q], st_w + w_b[q]);
+-#pragma unroll
+-    for (int kk = 0; kk < kBT / 16; ++kk) ldsm_x4_t(kb[kk], st_k + k_b + kk * 16 * kK * 2);
+-#pragma unroll
+-    for (int r = 0; r < 2; ++r) {
+-      uu[r][0] = __bfloat162float(st.u[tok * kBV + g + 8 * r]);
+-      uu[r][1] = __bfloat162float(st.u[(tok + 1) * kBV + g + 8 * r]);
+-    }
+ #pragma unroll
+-    for (int nt = 0; nt < 2; ++nt) {
+-      const float2 gg = *reinterpret_cast<const float2*>(&st.gk[16 * warp + 8 * nt + 2 * tig]);
+-      dec[nt][0] = ex2_approx(gg.x);
+-      dec[nt][1] = ex2_approx(gg.y);
+-    }
+-  };
+-
+-  cp_async_wait<kStages - 2>();
+-  __syncthreads();
+-  prefetch(0);
+-
+-  for (int i_t = 0; i_t < NT; ++i_t) {
+-    // bf16 snapshot of h -> smem.
++      for (int j = 0; j < 4; ++j) gg[j] = *reinterpret_cast<const float2*>(&st.gk[32 * c + 8 * j + 2 * tig]);
++    };
++    auto snapshot = [&]() {
++#pragma unroll
++      for (int j = 0; j < 4; ++j)
++#pragma unroll
++        for (int r = 0; r < 2; ++r)
++          *reinterpret_cast<uint32_t*>(&sm.h[swz(g + 8 * r, 4 * c + j) + 2 * tig]) =
++              pack_bf16(hs[j][2 * r], hs[j][2 * r + 1]);
++    };
++
++    __syncthreads();  // P: stage 0 landed
++    prefetch(0);
++    snapshot();
++
++    for (int i_t = 0; i_t < NT; ++i_t) {
++      __syncthreads();  // B1
++      // v^T[v][tok] = sum_K h[v][K] * w[tok][K] for tokens 16c + 8nt + [0, 8), one chain over K each.
++      float acc[2][4] = {{0.f, 0.f, 0.f, 0.f}, {0.f, 0.f, 0.f, 0.f}};
++      {
++        uint32_t ha[kK / 16][4];
+ #pragma unroll
+-    for (int nt = 0; nt < 2; ++nt) {
++        for (int kk = 0; kk < kK / 16; ++kk) ldsm_x4(ha[kk], h_a[kk]);
+ #pragma unroll
+-      for (int r = 0; r < 2; ++r) {
+-        *reinterpret_cast<uint32_t*>(&sm.h[swz(g + 8 * r, 2 * warp + nt) + 2 * tig]) =
+-            pack_bf16(hs[nt][2 * r], hs[nt][2 * r + 1]);
++        for (int kk = 0; kk < kK / 16; ++kk)
++#pragma unroll
++          for (int nt = 0; nt < 2; ++nt)
++            mma_bf16(acc[nt], ha[kk], wb[nt][kk / 2][2 * (kk % 2)], wb[nt][kk / 2][2 * (kk % 2) + 1]);
+       }
+-    }
+-    __syncthreads();
+-
+-    // v^T[v][tok] = sum_K h[v][K] * w[tok][K] for tokens [8 * warp, 8 * warp + 8), one chain over K.
+-    // Independent work below is placed after the chain (in-order issue fills its latency).
+-    float acc[4] = {0.f, 0.f, 0.f, 0.f};
+-    {
+-      uint32_t ha[kK / 16][4];
++      float dec[4][2];
+ #pragma unroll
+-      for (int kk = 0; kk < kK / 16; ++kk) ldsm_x4(ha[kk], h_a[kk]);
++      for (int j = 0; j < 4; ++j) {
++        dec[j][0] = ex2_approx(gg[j].x);
++        dec[j][1] = ex2_approx(gg[j].y);
++      }
+ #pragma unroll
+-      for (int kk = 0; kk < kK / 16; ++kk) mma_bf16(acc, ha[kk], wb[kk / 2][2 * (kk % 2)], wb[kk / 2][2 * (kk % 2) + 1]);
+-    }
+-    // The stage refilled here was last read by prefetch(i_t - 1), before the barrier above.
+-    issue(i_t + kStages - 1);
+-
+-    // h_out[t] (coalesced 16 B rows from the snapshot).
+-    {
+-      const int row = tid / kRowChunks;
+-      const int ch = tid % kRowChunks;
+-      *reinterpret_cast<uint4*>(h_out + (boh + i_t) * H * V * kK + (static_cast<int64_t>(i_h) * V + i_v * kBV) * kK +
+-                                row * kK + ch * 8) = *reinterpret_cast<const uint4*>(&sm.h[swz(row, ch)]);
+-    }
++      for (int nt = 0; nt < 2; ++nt) {
++        const int tok = 16 * c + 8 * nt + 2 * tig;
+ #pragma unroll
+-    for (int nt = 0; nt < 2; ++nt) {
+-      hs[nt][0] = __fmul_rn(hs[nt][0], dec[nt][0]);
+-      hs[nt][1] = __fmul_rn(hs[nt][1], dec[nt][1]);
+-      hs[nt][2] = __fmul_rn(hs[nt][2], dec[nt][0]);
+-      hs[nt][3] = __fmul_rn(hs[nt][3], dec[nt][1]);
+-    }
++        for (int r = 0; r < 2; ++r) {
++          const int vv = g + 8 * r;
++          const float u0 = __uint_as_float(ur[nt][r][0] << 16);
++          const float u1 = __uint_as_float(ur[nt][r][1] << 16);
++          const __nv_bfloat162 x = __floats2bfloat162_rn(u0 - acc[nt][2 * r], u1 - acc[nt][2 * r + 1]);
++          *reinterpret_cast<__nv_bfloat162*>(&sm.vt[vv * kVtPitch + tok]) = x;
++          sm.vn[tok * kBV + vv] = x.x;
++          sm.vn[(tok + 1) * kBV + vv] = x.y;
++        }
++      }
+ #pragma unroll
+-    for (int r = 0; r < 2; ++r) {
+-      const int vv = g + 8 * r;
+-      const __nv_bfloat162 x = __floats2bfloat162_rn(uu[r][0] - acc[2 * r], uu[r][1] - acc[2 * r + 1]);
+-      *reinterpret_cast<__nv_bfloat162*>(&sm.vt[vv * kVtPitch + tok]) = x;
+-      sm.vn[tok * kBV + vv] = x.x;
+-      sm.vn[(tok + 1) * kBV + vv] = x.y;
+-    }
+-    // Stage i_t + 1 must be complete for the prefetch after this barrier.
+-    cp_async_wait<kStages - 2>();
+-    __syncthreads();
+-
+-    // h = h * exp2(gk_last) + (k^T @ v)^T; d[v][K] = sum_tok v^T[v][tok] * k[tok][K], fresh chain over tokens.
+-    float d[2][4] = {{0.f, 0.f, 0.f, 0.f}, {0.f, 0.f, 0.f, 0.f}};
+-    {
+-      uint32_t va[kBT / 16][4];
+-#pragma unroll
+-      for (int kk = 0; kk < kBT / 16; ++kk) ldsm_x4(va[kk], vt_a + kk * 32);
+-#pragma unroll
+-      for (int kk = 0; kk < kBT / 16; ++kk) {
+-        mma_bf16(d[0], va[kk], kb[kk][0], kb[kk][1]);
+-        mma_bf16(d[1], va[kk], kb[kk][2], kb[kk][3]);
++      for (int j = 0; j < 4; ++j) {
++        hs[j][0] = __fmul_rn(hs[j][0], dec[j][0]);
++        hs[j][1] = __fmul_rn(hs[j][1], dec[j][1]);
++        hs[j][2] = __fmul_rn(hs[j][2], dec[j][0]);
++        hs[j][3] = __fmul_rn(hs[j][3], dec[j][1]);
+       }
+-    }
+-    if (i_t + 1 < NT) prefetch(i_t + 1);
++      __syncthreads();  // B2
+ 
+-    // v_new[t] (32 B token rows).
+-    if (tid < 2 * kBT) {
+-      const int row = tid >> 1;
+-      if (i_t * kBT + row < T) {
+-        *reinterpret_cast<uint4*>(v_new + (bos + i_t * kBT + row) * stride_v + static_cast<int64_t>(i_h) * V +
+-                                  i_v * kBV + (tid & 1) * 8) =
+-            *reinterpret_cast<const uint4*>(&sm.vn[row * kBV + (tid & 1) * 8]);
++      // h = h * exp2(gk_last) + (k^T @ v)^T; d[v][K] = sum_tok v^T[v][tok] * k[tok][K], fresh chain over tokens.
++      float d[4][4];
++#pragma unroll
++      for (int j = 0; j < 4; ++j)
++#pragma unroll
++        for (int e = 0; e < 4; ++e) d[j][e] = 0.f;
++      {
++        uint32_t va[kBT / 16][4];
++#pragma unroll
++        for (int kk = 0; kk < kBT / 16; ++kk) ldsm_x4(va[kk], vt_a + kk * 32);
++#pragma unroll
++        for (int kk = 0; kk < kBT / 16; ++kk)
++#pragma unroll
++          for (int pp = 0; pp < 2; ++pp) {
++            mma_bf16(d[2 * pp], va[kk], kb[kk][pp][0], kb[kk][pp][1]);
++            mma_bf16(d[2 * pp + 1], va[kk], kb[kk][pp][2], kb[kk][pp][3]);
++          }
+       }
+-    }
+ #pragma unroll
+-    for (int nt = 0; nt < 2; ++nt)
++      for (int j = 0; j < 4; ++j)
+ #pragma unroll
+-      for (int e = 0; e < 4; ++e) hs[nt][e] = __fadd_rn(hs[nt][e], d[nt][e]);
+-  }
+-  cp_async_wait<0>();
++        for (int e = 0; e < 4; ++e) hs[j][e] = __fadd_rn(hs[j][e], d[j][e]);
++      if (i_t + 1 < NT) {
++        snapshot();
++        prefetch(i_t + 1);
++      }
++    }
+ 
+-  if (final_slot != nullptr) {
++    if (final_slot != nullptr) {
+ #pragma unroll
+-    for (int nt = 0; nt < 2; ++nt) {
+-      const int col = 16 * warp + 8 * nt + 2 * tig;
++      for (int j = 0; j < 4; ++j) {
++        const int col = 32 * c + 8 * j + 2 * tig;
+ #pragma unroll
+-      for (int r = 0; r < 2; ++r) {
+-        OutT* p = final_slot + (g + 8 * r) * kK + col;
+-        if constexpr (std::is_same_v<OutT, float>) {
+-          *reinterpret_cast<float2*>(p) = make_float2(hs[nt][2 * r], hs[nt][2 * r + 1]);
+-        } else {
+-          *reinterpret_cast<uint32_t*>(p) = pack_bf16(hs[nt][2 * r], hs[nt][2 * r + 1]);
++        for (int r = 0; r < 2; ++r) {
++          OutT* ptr = final_slot + (g + 8 * r) * kK + col;
++          if constexpr (std::is_same_v<OutT, float>) {
++            *reinterpret_cast<float2*>(ptr) = make_float2(hs[j][2 * r], hs[j][2 * r + 1]);
++          } else {
++            *reinterpret_cast<uint32_t*>(ptr) = pack_bf16(hs[j][2 * r], hs[j][2 * r + 1]);
++          }
+         }
+       }
+     }
+@@ -406,6 +451,7 @@
+ 
+ }  // namespace kda_chunk_h
+ 
++
+ /// \brief Host launcher for the KDA chunked h-scan (see file header).
+ template <int kStages, bool kUsePDL>
+ struct KdaChunkHKernel {
+diff -ruN -x __pycache__ -x '*.pyc' a/kernels/jit/csrc/attention/kda_conv_l2norm.cuh b/kernels/jit/csrc/attention/kda_conv_l2norm.cuh
+--- a/kernels/jit/csrc/attention/kda_conv_l2norm.cuh	1969-12-31 16:00:00.000000000 -0800
++++ b/kernels/jit/csrc/attention/kda_conv_l2norm.cuh	2026-09-27 15:47:33.195171557 -0700
+@@ -0,0 +1,317 @@
++// Fused KDA prefill front: depthwise causal conv1d (width 4) + SiLU over the
++// packed [T, q | k | v] pre-conv activations, then a per-head l2norm of q and k.
++// Replaces causal_conv1d_fn followed by two l2norm_fwd_strided_heads calls.
++//
++// Each thread owns 8 consecutive channels and walks a strip of tokens with the
++// three previous inputs in registers, so every input row is read once and
++// every output row written once (16B per thread). A 128-channel head spans 16
++// lanes; its l2norm is a 16-lane butterfly.
++//
++// Arithmetic matches the Triton kernels instruction for instruction: fp32 taps
++// accumulated from 0, where (as Triton's BLOCK_N = 256 / 2-warp build lowers
++// it) odd channels of each 4-channel group round taps 2 and 3 as mul + add and
++// every other tap is an fma; SiLU as
++// x / (1 + ex2.approx(-x * log2e)) with div.full, bf16 round; the l2norm sums
++// x1^2 then fma x0, x2..x7 per thread, butterflies xor 8/4/2/1, adds eps, and
++// divides by sqrt.approx.ftz with div.full.
++//
++// The conv state [slot, 3, dim] is read (as the left halo of the sequence) and
++// then overwritten with the last 3 inputs by the thread that owns the strip at
++// token 0, so no other thread touches it.
++
++#include <sgl_kernel/tensor.h>
++#include <sgl_kernel/utils.h>
++
++#include <sgl_kernel/type.cuh>
++#include <sgl_kernel/utils.cuh>
++
++#include <dlpack/dlpack.h>
++#include <tvm/ffi/container/tensor.h>
++
++#include <cstdint>
++#include <cuda_bf16.h>
++
++namespace sglang {
++
++namespace kda_conv_l2norm {
++
++constexpr int kWidth = 4;
++constexpr int kVec = 8;                     // channels per thread
++constexpr int kWarpChannels = 32 * kVec;    // 256
++constexpr int kHeadDim = 128;               // 16 lanes
++constexpr int kWarps = 4;
++constexpr int kThreads = 32 * kWarps;
++constexpr int kStrip = 32;                  // tokens per warp
++constexpr int kUnroll = 8;                  // token rows loaded ahead
++
++SGL_DEVICE uint4 zero_vec() {
++  return make_uint4(0u, 0u, 0u, 0u);
++}
++
++SGL_DEVICE uint4 load_vec(const __nv_bfloat16* p) {
++  return *reinterpret_cast<const uint4*>(p);
++}
++
++SGL_DEVICE void store_vec(__nv_bfloat16* p, const uint4& r) {
++  *reinterpret_cast<uint4*>(p) = r;
++}
++
++SGL_DEVICE float ex2_approx_ftz(float x) {
++  float y;
++  asm("ex2.approx.ftz.f32 %0, %1;" : "=f"(y) : "f"(x));
++  return y;
++}
++
++SGL_DEVICE float rcp_approx_ftz(float x) {
++  float y;
++  asm("rcp.approx.ftz.f32 %0, %1;" : "=f"(y) : "f"(x));
++  return y;
++}
++
++SGL_DEVICE float sqrt_approx_ftz(float x) {
++  float y;
++  asm("sqrt.approx.ftz.f32 %0, %1;" : "=f"(y) : "f"(x));
++  return y;
++}
++
++// div.full.f32 a / b for b >= 1, as ptxas expands it: rescale both operands
++// by 1/4 when |b| > 2^126 (the small-|b| branch cannot fire), then a * rcp(b).
++SGL_DEVICE float div_full_ge1(float a, float b) {
++  if (b > 0x1p126f) {
++    a = __fmul_rn(a, 0.25f);
++    b = __fmul_rn(b, 0.25f);
++  }
++  return __fmul_rn(a, rcp_approx_ftz(b));
++}
++
++SGL_DEVICE float bf16_lo(uint32_t v) {
++  return __uint_as_float(v << 16);
++}
++
++SGL_DEVICE float bf16_hi(uint32_t v) {
++  return __uint_as_float(v & 0xffff0000u);
++}
++
++SGL_DEVICE uint32_t pack_bf16x2(float lo, float hi) {
++  const __nv_bfloat162 r = __floats2bfloat162_rn(lo, hi);
++  return *reinterpret_cast<const uint32_t*>(&r);
++}
++
++/**
++ * \brief One output row: conv taps over (x[t-3], x[t-2], x[t-1], x[t]), SiLU,
++ *        bf16 round, and (for q/k) the head l2norm.
++ */
++SGL_DEVICE uint4 conv_row(
++    const uint4& x0, const uint4& x1, const uint4& x2, const uint4& x3,
++    const float (&w)[kVec][kWidth], bool normalize, float eps) {
++  const uint32_t* xp[kWidth] = {&x0.x, &x1.x, &x2.x, &x3.x};
++  float y[kVec];
++#pragma unroll
++  for (int p = 0; p < kVec / 2; ++p) {
++    float lo = 0.0f;
++    float hi = 0.0f;
++#pragma unroll
++    for (int j = 0; j < kWidth; ++j) {
++      lo = __fmaf_rn(w[2 * p][j], bf16_lo(xp[j][p]), lo);
++      hi = j < 2 ? __fmaf_rn(w[2 * p + 1][j], bf16_hi(xp[j][p]), hi)
++                 : __fadd_rn(hi, __fmul_rn(w[2 * p + 1][j], bf16_hi(xp[j][p])));
++    }
++    // x / (1 + exp(-x)); exp lowers to ex2(-x * log2e). ftz is exact here:
++    // a denormal ex2 result leaves 1 + e == 1.
++    y[2 * p] = div_full_ge1(lo, __fadd_rn(ex2_approx_ftz(__fmul_rn(lo, -1.44269502162933349609375f)), 1.0f));
++    y[2 * p + 1] = div_full_ge1(hi, __fadd_rn(ex2_approx_ftz(__fmul_rn(hi, -1.44269502162933349609375f)), 1.0f));
++  }
++  uint4 out;
++  uint32_t* op = &out.x;
++#pragma unroll
++  for (int p = 0; p < kVec / 2; ++p) op[p] = pack_bf16x2(y[2 * p], y[2 * p + 1]);
++  if (normalize) {
++    float f[kVec];
++#pragma unroll
++    for (int p = 0; p < kVec / 2; ++p) {
++      f[2 * p] = bf16_lo(op[p]);
++      f[2 * p + 1] = bf16_hi(op[p]);
++    }
++    float s = __fmul_rn(f[1], f[1]);
++    s = __fmaf_rn(f[0], f[0], s);
++#pragma unroll
++    for (int i = 2; i < kVec; ++i) s = __fmaf_rn(f[i], f[i], s);
++#pragma unroll
++    for (int m = 8; m >= 1; m >>= 1) s = __fadd_rn(s, __shfl_xor_sync(0xffffffffu, s, m));
++    // div.full by r in [sqrt(eps), 2^126] is f * rcp(r)
++    const float rr = rcp_approx_ftz(sqrt_approx_ftz(__fadd_rn(eps, s)));
++#pragma unroll
++    for (int p = 0; p < kVec / 2; ++p) op[p] = pack_bf16x2(__fmul_rn(f[2 * p], rr), __fmul_rn(f[2 * p + 1], rr));
++  }
++  return out;
++}
++
++/**
++ * \brief grid (dim / 256, strips of kWarps * kStrip tokens, num_seqs), kThreads threads.
++ * \param x          [T, dim] pre-conv packed qkv rows (row stride x_stride)
++ * \param w          [dim, 4] fp32 conv weights
++ * \param out        [3, T, group]: l2norm(q), l2norm(k), v
++ * \param conv_state [slots, 3, dim] (slot pitch state_stride), read then updated
++ */
++__global__ void __launch_bounds__(kThreads) kda_conv_l2norm_kernel(
++    const __nv_bfloat16* __restrict__ x,
++    const float* __restrict__ w,
++    __nv_bfloat16* conv_state,
++    const int32_t* __restrict__ cache_indices,
++    const uint8_t* __restrict__ has_initial_state,
++    const int32_t* __restrict__ query_start_loc,
++    __nv_bfloat16* __restrict__ out,
++    int64_t x_stride,
++    int64_t state_stride,
++    int32_t num_tokens,
++    int32_t dim,
++    int32_t group,
++    float eps) {
++  const int lane = threadIdx.x & 31;
++  const int warp = threadIdx.x >> 5;
++  const int seq = blockIdx.z;
++  const int bos = query_start_loc[seq];
++  const int seqlen = query_start_loc[seq + 1] - bos;
++  const int t0 = (blockIdx.y * kWarps + warp) * kStrip;
++  if (t0 >= seqlen) return;
++
++  const int c = blockIdx.x * kWarpChannels + lane * kVec;
++  const int g = c / group;  // warp-uniform: group is a multiple of 256
++  const bool normalize = g < 2;
++
++  float wt[kVec][kWidth];
++#pragma unroll
++  for (int i = 0; i < kVec; ++i) *reinterpret_cast<float4*>(wt[i]) = *reinterpret_cast<const float4*>(w + int64_t(c + i) * kWidth);
++
++  const __nv_bfloat16* xs = x + int64_t(bos) * x_stride + c;
++  const int32_t slot = cache_indices[seq];
++  const bool valid = slot >= 0;
++  const bool load_init = valid && has_initial_state != nullptr && has_initial_state[seq] != 0;
++  __nv_bfloat16* state = conv_state + int64_t(valid ? slot : 0) * state_stride + c;
++
++  // Left halo x[t0-3 .. t0-1]; before the sequence it is the conv state.
++  uint4 h[kWidth - 1];
++#pragma unroll
++  for (int k = 0; k < kWidth - 1; ++k) {
++    const int r = t0 - (kWidth - 1) + k;
++    if (r >= 0 && r < seqlen) {
++      h[k] = load_vec(xs + int64_t(r) * x_stride);
++    } else if (r < 0 && load_init) {
++      h[k] = load_vec(state + int64_t(kWidth - 1 + r) * dim);
++    } else {
++      h[k] = zero_vec();
++    }
++  }
++
++  if (t0 == 0 && valid) {
++    // new state[i] = concat(old state, x)[seqlen + i]
++    uint4 ns[kWidth - 1];
++#pragma unroll
++    for (int i = 0; i < kWidth - 1; ++i) {
++      const int p = seqlen + i;
++      if (p < kWidth - 1) {
++        ns[i] = load_init ? h[p] : zero_vec();
++      } else {
++        ns[i] = load_vec(xs + int64_t(p - (kWidth - 1)) * x_stride);
++      }
++    }
++#pragma unroll
++    for (int i = 0; i < kWidth - 1; ++i) store_vec(state + int64_t(i) * dim, ns[i]);
++  }
++
++  __nv_bfloat16* os = out + int64_t(g) * num_tokens * group + int64_t(bos) * group + (c - g * group);
++  const int t_end = min(t0 + kStrip, seqlen);
++#pragma unroll 1
++  for (int tb = t0; tb < t_end; tb += kUnroll) {
++    // rows past the strip re-read its last row; their outputs are not stored
++    uint4 xr[kUnroll];
++#pragma unroll
++    for (int u = 0; u < kUnroll; ++u) xr[u] = load_vec(xs + int64_t(min(tb + u, t_end - 1)) * x_stride);
++#pragma unroll
++    for (int u = 0; u < kUnroll; ++u) {
++      const uint4 y = conv_row(h[0], h[1], h[2], xr[u], wt, normalize, eps);
++      if (tb + u < t_end) store_vec(os + int64_t(tb + u) * group, y);
++      h[0] = h[1];
++      h[1] = h[2];
++      h[2] = xr[u];
++    }
++  }
++}
++
++}  // namespace kda_conv_l2norm
++
++struct KdaConvL2normKernel {
++  static void run(
++      const tvm::ffi::TensorView x,
++      const tvm::ffi::TensorView w,
++      const tvm::ffi::TensorView conv_state,
++      const tvm::ffi::TensorView cache_indices,
++      const tvm::ffi::TensorView has_initial_state,
++      const tvm::ffi::TensorView query_start_loc,
++      const tvm::ffi::TensorView out,
++      int64_t max_seqlen,
++      double eps,
++      bool has_init) {
++    using namespace host;
++    using namespace kda_conv_l2norm;
++
++    auto T_ = SymbolicSize{"num_tokens"};
++    auto Dim_ = SymbolicSize{"dim"};
++    auto G_ = SymbolicSize{"group"};
++    auto Slots_ = SymbolicSize{"slots"};
++    auto N_ = SymbolicSize{"num_seqs"};
++    auto Q_ = SymbolicSize{"num_seqs_plus_1"};
++    auto device = SymbolicDevice{};
++    device.set_options<kDLCUDA>();
++
++    TensorMatcher({T_, Dim_}).with_strides({-1, 1}).with_dtype<bf16_t>().with_device(device).verify(x);
++    TensorMatcher({Dim_, kWidth}).with_strides({kWidth, 1}).with_dtype<fp32_t>().with_device(device).verify(w);
++    TensorMatcher({3, T_, G_}).with_dtype<bf16_t>().with_device(device).verify(out);
++    const int64_t dim = Dim_.unwrap();
++    TensorMatcher({Slots_, kWidth - 1, Dim_})
++        .with_strides({-1, dim, 1})
++        .with_dtype<bf16_t>()
++        .with_device(device)
++        .verify(conv_state);
++    TensorMatcher({N_}).with_dtype<int32_t>().with_device(device).verify(cache_indices);
++    TensorMatcher({Q_}).with_dtype<int32_t>().with_device(device).verify(query_start_loc);
++    const int64_t T = T_.unwrap();
++    const int64_t group = G_.unwrap();
++    const int64_t N = N_.unwrap();
++    CHECK_HOST(Q_.unwrap() == N + 1) << "kda_conv_l2norm: query_start_loc must have num_seqs + 1 entries";
++    CHECK_HOST(dim == 3 * group && group % kWarpChannels == 0 && group % kHeadDim == 0)
++        << "kda_conv_l2norm: dim must be 3 * group with group % 256 == 0, got dim " << dim;
++    CHECK_HOST(x.stride(0) % kVec == 0) << "kda_conv_l2norm: x row stride must be a multiple of 8";
++    CHECK_HOST(conv_state.stride(0) % kVec == 0) << "kda_conv_l2norm: conv state slot pitch must be a multiple of 8";
++    const uint8_t* init_ptr = nullptr;
++    if (has_init) {
++      CHECK_HOST(has_initial_state.numel() == N && has_initial_state.dtype().bits == 8)
++          << "kda_conv_l2norm: has_initial_state must be [num_seqs] bool";
++      init_ptr = static_cast<const uint8_t*>(has_initial_state.data_ptr());
++    }
++    if (N == 0 || max_seqlen <= 0) return;
++
++    const int64_t strip_tokens = kWarps * kStrip;
++    const dim3 grid(
++        static_cast<uint32_t>(dim / kWarpChannels),
++        static_cast<uint32_t>((max_seqlen + strip_tokens - 1) / strip_tokens),
++        static_cast<uint32_t>(N));
++    LaunchKernel(grid, dim3(kThreads), device.unwrap())(
++        kda_conv_l2norm_kernel,
++        static_cast<const __nv_bfloat16*>(x.data_ptr()),
++        static_cast<const float*>(w.data_ptr()),
++        static_cast<__nv_bfloat16*>(conv_state.data_ptr()),
++        static_cast<const int32_t*>(cache_indices.data_ptr()),
++        init_ptr,
++        static_cast<const int32_t*>(query_start_loc.data_ptr()),
++        static_cast<__nv_bfloat16*>(out.data_ptr()),
++        x.stride(0),
++        conv_state.stride(0),
++        static_cast<int32_t>(T),
++        static_cast<int32_t>(dim),
++        static_cast<int32_t>(group),
++        static_cast<float>(eps));
++  }
++};
++
++}  // namespace sglang
+diff -ruN -x __pycache__ -x '*.pyc' a/kernels/ops/attention/fla/chunk_intra.py b/kernels/ops/attention/fla/chunk_intra.py
+--- a/kernels/ops/attention/fla/chunk_intra.py	2026-09-18 02:16:55.000000000 -0700
++++ b/kernels/ops/attention/fla/chunk_intra.py	2026-09-27 15:56:39.669675028 -0700
+@@ -29,6 +29,17 @@
+ ################################################################################
+ 
+ 
++def _prune_inter_solve_configs(configs, named_args, **kwargs):
++    # The key omits T, so the first call's length picks the config for all.
++    # Measured on B200 over T = 1.5k..64k: without the fused recompute, BK=32
++    # on one warp is fastest or within 1 us everywhere (2 warps: up to +20%).
++    if kwargs.get("FUSE_RECOMPUTE"):
++        return configs
++    return [
++        c for c in configs if c.kwargs["BK"] == 32 and c.num_warps == 1
++    ] or configs
++
++
+ @triton.heuristics(
+     {
+         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
+@@ -41,6 +52,7 @@
+         for num_warps in [1, 2, 4]
+     ],
+     key=["H", "K", "BC", "V", "FUSE_RECOMPUTE", "FUSE_DIAGONAL"],
++    prune_configs_by={"early_config_prune": _prune_inter_solve_configs},
+     **autotune_cache_kwargs,
+ )
+ @triton.jit(do_not_specialize=["T"])
+diff -ruN -x __pycache__ -x '*.pyc' a/kernels/ops/attention/kda_chunk_h.py b/kernels/ops/attention/kda_chunk_h.py
+--- a/kernels/ops/attention/kda_chunk_h.py	2026-09-27 02:31:40.810298919 -0700
++++ b/kernels/ops/attention/kda_chunk_h.py	2026-09-27 15:20:37.590882693 -0700
+@@ -23,7 +23,7 @@
+ if TYPE_CHECKING:
+     from tvm_ffi.module import Module
+ 
+-_STAGES = 3
++_STAGES = 4
+ 
+ 
+ @cache_once
+diff -ruN -x __pycache__ -x '*.pyc' a/kernels/ops/attention/kda_conv_l2norm.py b/kernels/ops/attention/kda_conv_l2norm.py
+--- a/kernels/ops/attention/kda_conv_l2norm.py	1969-12-31 16:00:00.000000000 -0800
++++ b/kernels/ops/attention/kda_conv_l2norm.py	2026-09-27 15:47:48.438901650 -0700
+@@ -0,0 +1,97 @@
++"""Fused KDA prefill front: packed-qkv causal conv1d + SiLU + q/k l2norm.
++
++Replaces causal_conv1d_fn over the packed [T, q | k | v] width followed by two
++l2norm_fwd_strided_heads calls, bit-identically (see
++csrc/attention/kda_conv_l2norm.cuh). ``covered()`` gates the inputs; the caller
++keeps the unfused path for everything else.
++"""
++
++from __future__ import annotations
++
++from typing import TYPE_CHECKING, List, Optional, Tuple
++
++import torch
++
++from sglang.kernels.jit.utils import cache_once, load_jit
++
++if TYPE_CHECKING:
++    from tvm_ffi.module import Module
++
++
++@cache_once
++def _jit_kda_conv_l2norm_module() -> Module:
++    return load_jit(
++        "kda_conv_l2norm",
++        cuda_files=["attention/kda_conv_l2norm.cuh"],
++        cuda_wrappers=[("run", "KdaConvL2normKernel::run")],
++        extra_cuda_cflags=["-O3"],
++    )
++
++
++def covered(
++    x: torch.Tensor,
++    weight: torch.Tensor,
++    bias: Optional[torch.Tensor],
++    conv_state: torch.Tensor,
++    cache_indices: Optional[torch.Tensor],
++    q_dim: int,
++    k_dim: int,
++    v_dim: int,
++    head_dim: int,
++) -> bool:
++    """x: [T, q_dim + k_dim + v_dim]; conv_state: [slots, 3, dim] (the pool's
++    native layout, not the transposed view causal_conv1d_fn takes)."""
++    dim = x.shape[-1]
++    return (
++        x.is_cuda
++        and x.dim() == 2
++        and x.stride(1) == 1
++        and x.stride(0) % 8 == 0
++        and x.data_ptr() % 16 == 0
++        and x.dtype == torch.bfloat16
++        and weight.dtype == torch.float32
++        and weight.shape == (dim, 4)
++        and weight.is_contiguous()
++        and bias is None
++        and conv_state.dtype == torch.bfloat16
++        and conv_state.dim() == 3
++        and conv_state.shape[1:] == (3, dim)
++        and conv_state.stride(2) == 1
++        and conv_state.stride(1) == dim
++        and conv_state.stride(0) % 8 == 0
++        and cache_indices is not None
++        and cache_indices.dtype == torch.int32
++        and head_dim == 128
++        and q_dim == k_dim == v_dim
++        and q_dim % 256 == 0
++        and dim == q_dim + k_dim + v_dim
++    )
++
++
++def kda_conv_l2norm(
++    x: torch.Tensor,
++    weight: torch.Tensor,
++    conv_state: torch.Tensor,
++    cache_indices: torch.Tensor,
++    has_initial_state: Optional[torch.Tensor],
++    query_start_loc: torch.Tensor,
++    seq_lens_cpu: List[int],
++    eps: float = 1e-6,
++) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
++    """Returns contiguous (l2norm(q), l2norm(k), v), each [T, dim / 3], and
++    updates conv_state in place. Caller must have checked covered()."""
++    T, dim = x.shape
++    out = x.new_empty(3, T, dim // 3)
++    _jit_kda_conv_l2norm_module().run(
++        x,
++        weight,
++        conv_state,
++        cache_indices,
++        has_initial_state if has_initial_state is not None else cache_indices,
++        query_start_loc,
++        out,
++        max(seq_lens_cpu) if len(seq_lens_cpu) > 0 else 0,
++        eps,
++        has_initial_state is not None,
++    )
++    return out[0], out[1], out[2]
+diff -ruN -x __pycache__ -x '*.pyc' a/srt/layers/attention/linear/kda_backend.py b/srt/layers/attention/linear/kda_backend.py
+--- a/srt/layers/attention/linear/kda_backend.py	2026-09-25 05:47:07.300429639 -0700
++++ b/srt/layers/attention/linear/kda_backend.py	2026-09-27 15:47:48.438901650 -0700
+@@ -3,7 +3,11 @@
+ 
+ import torch
+ 
+-from sglang.kernels.ops.attention import kda_fused_decode, kda_fused_decode_aiter_hip
++from sglang.kernels.ops.attention import (
++    kda_conv_l2norm,
++    kda_fused_decode,
++    kda_fused_decode_aiter_hip,
++)
+ from sglang.kernels.ops.mamba.causal_conv1d_triton import (
+     causal_conv1d_fn,
+     causal_conv1d_update,
+@@ -846,20 +850,47 @@
+                 self.forward_metadata.conv_states_mask_indices
+             ] = mixed_qkv[self.forward_metadata.track_conv_indices]
+ 
+-        # Depthwise conv is channel-independent, so one packed call over the
+-        # full qkv width matches the decode path and saves two kernel launches.
+-        qkv = causal_conv1d_fn(
+-            mixed_qkv.transpose(0, 1),
++        # The Triton chunk kernel l2-normalizes q/k itself unless the fused
++        # conv front already did (same bits either way).
++        qk_l2normed = isinstance(
++            self.kernel_dispatcher.effective_extend_kernel(layer.lower_bound),
++            TritonKDAKernel,
++        ) and kda_conv_l2norm.covered(
++            mixed_qkv,
+             layer.conv_weights,
+             layer.bias,
+-            activation="silu",
+-            conv_states=conv_states,
+-            has_initial_state=has_initial_state,
+-            cache_indices=cache_indices,
+-            query_start_loc=query_start_loc,
+-            seq_lens_cpu=forward_batch.extend_seq_lens_cpu,
+-        ).transpose(0, 1)
+-        q, k, v = qkv.split([layer.q_dim, layer.k_dim, layer.v_dim], dim=-1)
++            mamba_cache_params.conv[0],
++            cache_indices,
++            layer.q_dim,
++            layer.k_dim,
++            layer.v_dim,
++            layer.head_k_dim,
++        )
++        if qk_l2normed:
++            q, k, v = kda_conv_l2norm.kda_conv_l2norm(
++                mixed_qkv,
++                layer.conv_weights,
++                mamba_cache_params.conv[0],
++                cache_indices,
++                has_initial_state,
++                query_start_loc,
++                forward_batch.extend_seq_lens_cpu,
++            )
++        else:
++            # Depthwise conv is channel-independent, so one packed call over the
++            # full qkv width matches the decode path and saves two kernel launches.
++            qkv = causal_conv1d_fn(
++                mixed_qkv.transpose(0, 1),
++                layer.conv_weights,
++                layer.bias,
++                activation="silu",
++                conv_states=conv_states,
++                has_initial_state=has_initial_state,
++                cache_indices=cache_indices,
++                query_start_loc=query_start_loc,
++                seq_lens_cpu=forward_batch.extend_seq_lens_cpu,
++            ).transpose(0, 1)
++            q, k, v = qkv.split([layer.q_dim, layer.k_dim, layer.v_dim], dim=-1)
+ 
+         q = q.unflatten(-1, (-1, layer.head_q_dim)).unsqueeze(0)  # n (h d) -> 1 n h d
+         k = k.unflatten(-1, (-1, layer.head_k_dim)).unsqueeze(0)  # n (h d) -> 1 n h d
+@@ -924,6 +955,7 @@
+             ),
+             track_state=h_track_buf,
+             track_chunk_idx=(track_chunk_idx if h_track_buf is not None else None),
++            **({"qk_l2normed": True} if qk_l2normed else {}),
+         )
+         if track_ssm:
+             # Snapshot the SSM state at the last track-aligned chunk boundary
+diff -ruN -x __pycache__ -x '*.pyc' a/srt/layers/attention/linear/kernels/kda_triton.py b/srt/layers/attention/linear/kernels/kda_triton.py
+--- a/srt/layers/attention/linear/kernels/kda_triton.py	2026-09-27 03:08:00.423823219 -0700
++++ b/srt/layers/attention/linear/kernels/kda_triton.py	2026-09-27 15:40:34.947047595 -0700
+@@ -232,6 +232,7 @@
+         lower_bound: Optional[float] = None,
+         beta_is_raw: bool = False,
+         return_intermediate_states: bool = False,
++        qk_l2normed: bool = False,
+         **kwargs,
+     ) -> tuple[torch.Tensor, torch.Tensor | None]:
+         if __import__("os").environ.get("K3_PTX", "0") == "1":  # TMP_AB
+@@ -247,7 +248,7 @@
+             beta=beta,
+             initial_state=ssm_states,
+             initial_state_indices=cache_indices,
+-            use_qk_l2norm_in_kernel=True,
++            use_qk_l2norm_in_kernel=not qk_l2normed,
+             cu_seqlens=query_start_loc,
+             A_log=A_log,
+             dt_bias=dt_bias,

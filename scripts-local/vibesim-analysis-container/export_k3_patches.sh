@@ -103,7 +103,7 @@ fi
 echo "== sglang Claude LONG-CONTEXT PREFILL chains (seed = the prefill Claude best tree; slurm mode)"
 for c in kda mla; do
   CB="$HERE/iter_opt_eval_k3_${c}_lcprefill_claude"; prev="$HERE/iter_opt_eval_k3_${c}_prefill_claude/best_tree"; n=0; chain=()
-  for k in 1 2 3; do
+  for k in 1 2 3 4 5 6; do
     t="$CB/trial_${k}_tree_judged"; v="$CB/trial_${k}_verdict.json"
     [ -d "$t" ] && [ -f "$v" ] && grep -q '"verdict": "PASS"' "$v" || continue
     n=$((n+1)); p="$OUT/sglang/claude/${c}_lcprefill_0${n}_r${k}.patch"; tree_diff "$prev" "$t" "$p"; chain+=("$p"); prev="$t"

@@ -209,3 +209,58 @@ All 16 points PASS (4 points × 2 seeds × 2 layers); MLA bit-exact on every poi
 
 Verdict files: `iter_opt_eval_k3_{kda,mla}_lcprefill_claude/best_tree_seed{1,2}_verdict.json`; shape-matched trees:
 `iter_opt_eval_k3_{kda,mla}_shapes_claude/best_tree_seed{1,2}_verdict.json` (§3).
+
+## 9. Follow-ups (user 2026-09-27 13:45: "lets do 1-4 one by one")
+
+### 9.1 Long-context prefill oracle + MLA rounds 4–6
+- **Oracle.** New VibeSim presets `predict_kimi_k3_b200_rank1_layer_{kda,mla}_lcprefill` (cases = the four lcprefill points) were
+  predicted and baked as oracles 8807 (KDA) / 8808 (MLA). Comparing the first bake with the measured kernel tables showed the
+  **prefill model itself was wrong in composition**: the MLA prefix-attention cost did not scale with prefix length (9.4 ms at
+  both 128k and 245k; measured 8.9 / 16.7 ms), the merged-front GEMM row was 5.6 ms vs 2.3 measured, the MXFP4 MoE row 2.9 vs
+  1.2 ms, and the KDA step predicted 16.9 vs 9.0 ms. The totals had happened to land near the measured MLA step at 245k, which
+  hid it (and the earlier "predictions within 3%" claim for the ≤48k prefill oracles was wrong: they predicted 16.5 / 18.3 ms
+  against 9.07 / 12.12 measured).
+- **Codex B12c** (`codex_tasks/b12c_k3_lcprefill_fidelity.md`, VibeSim commit `427d75f8` on `kimi-k3-arch`, fast-forwarded to
+  `kimi-k3`): the MLA prefix runner profiles one FlashInfer launch per prefix chunk with `prefix_len`/`num_prefix_chunks` in
+  the row key (rows 9.38 ms @16k/128k, 17.63 @16k/245k, 31.36 @32k/229k); the fp32-output and bf16 GEMM runners use the sglang
+  cuBLAS path; the MXFP4 MoE prefill row was fixed; decode rows untouched. All 14 prefill cases now within ±5%
+  (`doc/alignment/kimi_k3_b12c_prefill.md` in the VibeSim repo), prefix attention ranked first for every long-context MLA point
+  (67% at 245k vs 66% measured). GPU work for the fix went through slurm jobs only. Image re-baked (`rebake_prefill_oracles_b12c.sh`),
+  oracles 8805–8808 restarted (8808 between the MLA rounds so the running agent was not interrupted).
+- **MLA lcprefill rounds 4–6** (round 4 on the first bake, 5 on it too, 6 on the corrected oracle):
+
+| round | verdict | primary 16k @ 245k | other points | change |
+|---|---|---|---|---|
+| 4 | null | 20.93 → 20.86 ms (−0.4%) | flat | agent spent its budget on one hypothesis |
+| 5 | PASS | 20.84 → 20.61 (−1.1%) | 16k@128k −0.7%, 32k flat (bit-exact) | fp8 packing of the prefix-chunk `kv_b_proj` output fused into the GEMM epilogue (`mla_kv_b_proj_pack_fp8`, `dense_gemm_sm100_fp8_via_bf16_epilogue`); a single-launch prefix FMHA was tried and reverted (neutral) |
+| 6 | PASS | 20.79 → 20.45 (−1.6%) | 16k@128k −0.8%, 32k@128k −0.6% (bit-exact) | causal in-chunk attention pass issued on the attention alt stream, overlapping the prefix passes; join before `merge_state` |
+
+  MLA cumulative on the primary vs pristine: **27.69 → 20.45 ms (−26.1%)**; seed rechecks 1/2 of the final tree: all 8 points
+  bit-exact (−25.4% / −25.7% on the primary). Patches: `<base>/claude/mla_lcprefill_03_r5.patch` (4 files, 1289 lines),
+  `<base>/claude/mla_lcprefill_04_r6.patch` (4 files, 319 lines); chain r1→r2→r5→r6 validated.
+
+### 9.2 Near-miss re-judging at 15 reps (`rejudge_near_misses.sh`)
+| round | 5-rep judge | 15-rep re-judge | outcome |
+|---|---|---|---|
+| KDA B=512 r2 (fused-decode prologue hoist + quad-row reduction) | +1.4% vs 3.65% floor (σ 7.3 µs) | 599.5 → 593.5 µs @512 (−1.0%), −1.1% @256, −0.5% @128; σ 0.3 µs; rel 0.017 | **accepted**, promoted; KDA @512 cumulative 675.2 → 593.5 (−12.1%); patch `<base>/claude/kda_b512_02_r2_fused_decode_prologue_hoist_quad_row_reduction.patch` |
+| KDA lcprefill r3 | +0.7% vs 3σ | −0.9% vs 1.31% floor (prefill σ ≈0.4% is intrinsic) | not accepted |
+| KDA lcprefill r5 (see 9.3) | −1.2% vs 3σ | −1.1% vs 3.09% floor (σ 85 µs, noisy window) | not accepted |
+
+### 9.3 KDA long-context prefill rounds 4–6 (60-min agent budget, corrected oracle 8807)
+| round | verdict | primary 16k @ 245k | other points | change |
+|---|---|---|---|---|
+| 4 | PASS | 8.26 → 8.13 ms (−1.6%) | 32k@229k −1.6%, 16k@128k −3.5%, 32k@128k −1.9% (rel 0.007) | warp-specialized 4-stage `kda_chunk_h` (taken from the rejected r3 tree) + pinned BK32 / 1-warp config for the Triton inter-chunk solve |
+| 5 | FAIL (3σ) | 8.02 → 7.93 (−1.2%) | −1.4% / −3.2% / −1.4% (rel 0.017) | consistent but sub-floor even at 15 reps |
+| 6 | FAIL (3σ) | 8.24 → 8.15 (−1.2%) | −1.6% / −3.0% / −2.5% | new fused conv+l2norm and chunk-intra CUDA kernels; passes the row-wise rule but max_rel 0.30 — a numerics-changing rewrite |
+
+  KDA cumulative on the primary vs pristine: **9.03 → 8.13 ms (−10.0%)**. Patch `<base>/claude/kda_lcprefill_03_r4.patch`
+  (7 files, 853 lines); chain r1→r2→r4 validated. Seed rechecks of the final tree: slurm job 2101 (results in 9.5).
+
+### 9.4 Mixed prefill+decode and speculative verify (driver extension)
+Survey and field-by-field spec in `K3_MIXED_VERIFY_DRIVER_SPEC.md`; implementation follows once no trial is running (a driver
+edit re-keys every case's goldens).
+
+### 9.5 Seed rechecks of the final KDA lcprefill tree
+(pending — slurm job 2101)
+
+`<base>` = `/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/patches/sglang`.

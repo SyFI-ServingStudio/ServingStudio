@@ -1,0 +1,492 @@
+diff -ruN -x __pycache__ -x '*.pyc' a/kernels/ops/attention/cute_dsl_fmha_fp8.py b/kernels/ops/attention/cute_dsl_fmha_fp8.py
+--- a/kernels/ops/attention/cute_dsl_fmha_fp8.py	2026-09-27 15:15:04.748507506 -0700
++++ b/kernels/ops/attention/cute_dsl_fmha_fp8.py	2026-09-27 15:59:57.513212819 -0700
+@@ -11,6 +11,7 @@
+ 
+ import functools
+ import math
++from typing import Optional
+ 
+ import torch
+ import triton
+@@ -51,6 +52,26 @@
+     )
+ 
+ 
++@functools.lru_cache(maxsize=64)
++def _chunk_split_indptrs(
++    num_q: int, chunk_lens: tuple, chunk_splits: tuple, device: torch.device
++):
++    # Per chunk, the KV splits _split_indptrs gives a launch over that chunk
++    # alone, laid out back to back so one launch covers every chunk.
++    cu_kv, max_step, start = [0], 0, 0
++    for kv_len, splits in zip(chunk_lens, chunk_splits):
++        step = -(-kv_len // (splits * 128)) * 128
++        max_step = max(max_step, step)
++        cu_kv += [start + min((i + 1) * step, kv_len) for i in range(splits)]
++        start += kv_len
++    cu_q = [i * num_q for i in range(sum(chunk_splits) + 1)]
++    return (
++        torch.tensor(cu_q, dtype=torch.int32, device=device),
++        torch.tensor(cu_kv, dtype=torch.int32, device=device),
++        max_step,
++    )
++
++
+ @triton.jit
+ def _merge_kv_splits_kernel(
+     o_ptr,  # [S * T, H, D] bf16
+@@ -452,43 +473,21 @@
+         # grows S-fold while K/V stay in place; the partial states are then
+         # merged like chunked-prefix partials (fp32, log2-domain LSE).
+         cu_q, cu_kv, step = _split_indptrs(num_q, max_kv_len, splits, q.device)
+-        q_rep = q.new_empty((splits, *q.shape))
+-        for i in range(splits):
+-            # Contiguous same-dtype copies are plain D2D memcpys; an expanded
+-            # fp8 source would take aten's slow non-vectorized copy kernel.
+-            q_rep[i].copy_(q)
+-        q_rep = q_rep.view(-1, *q.shape[1:])
+-        o_rep = out.new_empty((splits * num_q, num_heads, out.shape[-1]))
+-        lse_rep = lse.new_empty((splits * num_q, num_heads))
+-        cute_dsl_fmha_ragged_prefill(
+-            q=q_rep,
++        o_rep, lse_rep = _split_launch(
++            kernel_fn=kernel_fn,
++            q=q,
+             k=k,
+             v=v,
+-            o=o_rep,
+-            qo_indptr=cu_q,
+-            kv_indptr=cu_kv,
+-            is_causal=False,
+-            sm_scale=sm_scale,
+-            lse=lse_rep,
+-            scale_v=v_scale,
+-            max_qo_len=num_q,
++            out=out,
++            lse=lse,
++            cu_q=cu_q,
++            cu_kv=cu_kv,
++            num_entries=splits,
+             max_kv_len=step,
+-            kernel_fn=kernel_fn,
+-        )
+-        _merge_kv_splits_kernel[(num_q,)](
+-            o_rep,
+-            lse_rep,
+-            out,
+-            lse,
+-            num_q,
+-            out.stride(0),
+-            out.stride(1),
+-            H=num_heads,
+-            D=out.shape[-1],
+-            S=splits,
+-            BLOCK_H=triton.next_power_of_2(num_heads),
+-            num_warps=4,
++            sm_scale=sm_scale,
++            v_scale=v_scale,
+         )
++        _merge_kv_splits(o_rep=o_rep, lse_rep=lse_rep, out=out, lse=lse, splits=splits)
+         return
+     cute_dsl_fmha_ragged_prefill(
+         q=q,
+@@ -505,3 +504,130 @@
+         max_kv_len=max_kv_len,
+         kernel_fn=kernel_fn,
+     )
++
++
++def _split_launch(
++    *,
++    kernel_fn,
++    q: torch.Tensor,
++    k: torch.Tensor,
++    v: torch.Tensor,
++    out: torch.Tensor,
++    lse: torch.Tensor,
++    cu_q: torch.Tensor,
++    cu_kv: torch.Tensor,
++    num_entries: int,
++    max_kv_len: int,
++    sm_scale: float,
++    v_scale: float,
++) -> tuple[torch.Tensor, torch.Tensor]:
++    from flashinfer.attention.cute_dsl.fmha import cute_dsl_fmha_ragged_prefill
++
++    num_q, num_heads = q.shape[0], q.shape[1]
++    q_rep = q.new_empty((num_entries, *q.shape))
++    for i in range(num_entries):
++        # Contiguous same-dtype copies are plain D2D memcpys; an expanded
++        # fp8 source would take aten's slow non-vectorized copy kernel.
++        q_rep[i].copy_(q)
++    q_rep = q_rep.view(-1, *q.shape[1:])
++    o_rep = out.new_empty((num_entries * num_q, num_heads, out.shape[-1]))
++    lse_rep = lse.new_empty((num_entries * num_q, num_heads))
++    cute_dsl_fmha_ragged_prefill(
++        q=q_rep,
++        k=k,
++        v=v,
++        o=o_rep,
++        qo_indptr=cu_q,
++        kv_indptr=cu_kv,
++        is_causal=False,
++        sm_scale=sm_scale,
++        lse=lse_rep,
++        scale_v=v_scale,
++        max_qo_len=num_q,
++        max_kv_len=max_kv_len,
++        kernel_fn=kernel_fn,
++    )
++    return o_rep, lse_rep
++
++
++def _merge_kv_splits(
++    *,
++    o_rep: torch.Tensor,
++    lse_rep: torch.Tensor,
++    out: torch.Tensor,
++    lse: torch.Tensor,
++    splits: int,
++) -> None:
++    num_q, num_heads = out.shape[0], out.shape[1]
++    _merge_kv_splits_kernel[(num_q,)](
++        o_rep,
++        lse_rep,
++        out,
++        lse,
++        num_q,
++        out.stride(0),
++        out.stride(1),
++        H=num_heads,
++        D=out.shape[-1],
++        S=splits,
++        BLOCK_H=triton.next_power_of_2(num_heads),
++        num_warps=4,
++    )
++
++
++def prefix_chunk_splits(
++    *, num_q: int, num_heads: int, chunk_lens: tuple, device: torch.device
++) -> Optional[tuple]:
++    """KV splits per chunk for ``cute_dsl_fmha_fp8_prefix_chunks``, or None
++    when a single launch over every chunk is not expected to pay off."""
++    num_ctas = -(-num_q // _CTA_Q_ROWS) * num_heads
++    num_sms = _num_sms(device.index)
++    # Measured on B200: only the <= 6-wave (S = 4) grids gain from sharing
++    # one launch; the 32k-query S = 2 grids are neutral.
++    if len(chunk_lens) < 2 or num_ctas > 6 * num_sms:
++        return None
++    splits = tuple(_num_kv_splits(num_ctas, n, num_sms) for n in chunk_lens)
++    return splits if min(splits) > 1 else None
++
++
++def cute_dsl_fmha_fp8_prefix_chunks(
++    *,
++    q: torch.Tensor,
++    k: torch.Tensor,
++    v: torch.Tensor,
++    chunk_lens: tuple,
++    chunk_splits: tuple,
++    outs: list,
++    lses: list,
++    sm_scale: float,
++    v_scale: float,
++) -> None:
++    """One request's Q against every prefix chunk (packed back to back in
++    k/v) in one launch; chunk c's state lands in outs[c]/lses[c], bit-identical
++    to a ``cute_dsl_fmha_fp8_ragged_prefill`` call per chunk."""
++    kernel_fn = _compile(q.shape[1], q.shape[2], v.shape[2], False)
++    num_q = q.shape[0]
++    cu_q, cu_kv, max_step = _chunk_split_indptrs(
++        num_q, tuple(chunk_lens), tuple(chunk_splits), q.device
++    )
++    o_rep, lse_rep = _split_launch(
++        kernel_fn=kernel_fn,
++        q=q,
++        k=k,
++        v=v,
++        out=outs[0],
++        lse=lses[0],
++        cu_q=cu_q,
++        cu_kv=cu_kv,
++        num_entries=sum(chunk_splits),
++        max_kv_len=max_step,
++        sm_scale=sm_scale,
++        v_scale=v_scale,
++    )
++    first = 0
++    for splits, out, lse in zip(chunk_splits, outs, lses):
++        rows = slice(first * num_q, (first + splits) * num_q)
++        _merge_kv_splits(
++            o_rep=o_rep[rows], lse_rep=lse_rep[rows], out=out, lse=lse, splits=splits
++        )
++        first += splits
+diff -ruN -x __pycache__ -x '*.pyc' a/srt/layers/attention/tokenspeed_mla_backend.py b/srt/layers/attention/tokenspeed_mla_backend.py
+--- a/srt/layers/attention/tokenspeed_mla_backend.py	2026-09-18 02:16:55.000000000 -0700
++++ b/srt/layers/attention/tokenspeed_mla_backend.py	2026-09-27 16:12:27.017883554 -0700
+@@ -466,6 +466,7 @@
+         return_lse: bool,
+         out_buffer: torch.Tensor,
+         o_sf_scale: float = 1.0,
++        seq_lens_cpu: Optional[torch.Tensor] = None,
+     ):  # Q/K/V arrive already in FP8 via the model-side fused path
+         # (prepare_prefill_qkv / pack_prefix_chunk_kv); no quantize here.
+         # Hybrid MLA models resolve the model-side hook through the outer
+diff -ruN -x __pycache__ -x '*.pyc' a/srt/layers/attention/trtllm_mla_backend.py b/srt/layers/attention/trtllm_mla_backend.py
+--- a/srt/layers/attention/trtllm_mla_backend.py	2026-09-27 15:30:49.063115292 -0700
++++ b/srt/layers/attention/trtllm_mla_backend.py	2026-09-27 16:13:01.496016791 -0700
+@@ -197,6 +197,9 @@
+     cum_seq_lens: torch.Tensor
+     seq_lens: torch.Tensor
+     fallback_to_flashinfer_impl: bool = False
++    # Host mirror of seq_lens; lets the causal trtllm-gen call skip its
++    # device-side empty-row probe (a D2H sync) when every row is active.
++    seq_lens_cpu: Optional[torch.Tensor] = None
+ 
+ 
+ from sglang.kernels.jit.utils import is_arch_support_pdl
+@@ -874,6 +877,9 @@
+                 cum_seq_lens_q,
+                 seq_lens,
+                 fallback_to_flashinfer_impl,
++                seq_lens_cpu=torch.tensor(
++                    forward_batch.extend_seq_lens_cpu, dtype=torch.int32
++                ),
+             )
+         elif (
+             forward_batch.forward_mode.is_decode_or_idle()
+@@ -1127,6 +1133,24 @@
+             **extra_kwargs,
+         )
+ 
++    def can_overlap_causal_with_prefix(self) -> bool:
++        # Only the cute-dsl prefix pass may run next to the causal trtllm-gen
++        # pass; two trtllm-gen launches would share self.workspace_buffer.
++        return (
++            self.data_type == torch.float8_e4m3fn
++            and _cute_dsl_fp8_prefill_ok
++            and cute_dsl_fmha_fp8.is_supported()
++        )
++
++    def _causal_seq_lens_cpu(
++        self, q: torch.Tensor, k: torch.Tensor
++    ) -> Optional[torch.Tensor]:
++        # flashinfer validates the mirror against the ragged token counts.
++        lens = self.forward_prefill_metadata.seq_lens_cpu
++        if lens is None or not q.shape[0] == k.shape[0] == int(lens.sum()):
++            return None
++        return lens
++
+     def _run_prefill_kernel(
+         self,
+         q: torch.Tensor,
+@@ -1143,6 +1167,7 @@
+         return_lse: bool,
+         out_buffer: torch.Tensor,
+         o_sf_scale: float = 1.0,
++        seq_lens_cpu: Optional[torch.Tensor] = None,
+     ):
+         """Hook for subclasses to swap the ragged prefill kernel. Q/K/V arrive
+         in model-native dtype; subclasses do any kernel-specific quantization.
+@@ -1171,6 +1196,9 @@
+                     return (out_buffer, lse) if return_lse else out_buffer
+                 except Exception as e:
+                     _disable_cute_dsl_fp8_prefill(e)
++                    # A causal pass overlapped on the alt stream may still be
++                    # using self.workspace_buffer.
++                    torch.cuda.synchronize()
+         return flashinfer.prefill.trtllm_ragged_attention_deepseek(
+             query=q,
+             key=k,
+@@ -1191,6 +1219,8 @@
+             o_sf_scale=o_sf_scale,
+             out=out_buffer,
+             skip_softmax_threshold_scale_factor=envs.SGLANG_SKIP_SOFTMAX_PREFILL_THRESHOLD_SCALE_FACTOR.get(),
++            q_seq_lens_cpu=seq_lens_cpu,
++            kv_seq_lens_cpu=seq_lens_cpu,
+         )
+ 
+     def _packs_fp8_prefill_kv(self, forward_batch: ForwardBatch) -> bool:
+@@ -1954,6 +1984,7 @@
+                 return_lse=forward_batch.mha_return_lse,
+                 out_buffer=out,
+                 o_sf_scale=1.0,
++                seq_lens_cpu=self._causal_seq_lens_cpu(q, k),
+             )
+ 
+ 
+diff -ruN -x __pycache__ -x '*.pyc' a/srt/models/deepseek_common/attention_forward_methods/forward_mha.py b/srt/models/deepseek_common/attention_forward_methods/forward_mha.py
+--- a/srt/models/deepseek_common/attention_forward_methods/forward_mha.py	2026-09-27 15:30:49.064115209 -0700
++++ b/srt/models/deepseek_common/attention_forward_methods/forward_mha.py	2026-09-27 16:18:53.549742971 -0700
+@@ -30,6 +30,9 @@
+ from sglang.srt.runtime_context import get_exec, get_parallel, get_schedule
+ from sglang.srt.utils import BumpAllocator, next_power_of_2
+ 
++import os as _os
++_EXP_CAUSAL_FIRST = _os.environ.get("K3_EXP_CAUSAL_FIRST", "0") == "1"
++
+ if TYPE_CHECKING:
+     from sglang.srt.models.deepseek_v2 import DeepseekV2AttentionMLA
+ 
+@@ -382,18 +385,28 @@
+         forward_batch.mha_return_lse = has_extend_prefix
+         # Do mha for extended part without prefix
+         forward_batch.set_attn_attend_prefix_cache(False)
+-        attn_output = self.attn_mha(q, k, v, forward_batch, save_kv_cache=False)
+-
+-        # Do mha attention with chunked prefix cache if there are any sequence with prefix
+-        if has_extend_prefix:
+-            attn_output, lse = attn_output
++        if has_extend_prefix and self._overlap_causal_with_prefix(backend):
+             forward_batch.set_attn_attend_prefix_cache(True)
+             attn_output = self._chunked_prefix_attn_mha(
+                 q=q,
+-                accum_output=attn_output,
+-                accum_lse=lse,
++                accum_output=None,
++                accum_lse=None,
+                 forward_batch=forward_batch,
++                causal_kv=(k, v),
+             )
++        else:
++            attn_output = self.attn_mha(q, k, v, forward_batch, save_kv_cache=False)
++
++            # Do mha attention with chunked prefix cache if there are any sequence with prefix
++            if has_extend_prefix:
++                attn_output, lse = attn_output
++                forward_batch.set_attn_attend_prefix_cache(True)
++                attn_output = self._chunked_prefix_attn_mha(
++                    q=q,
++                    accum_output=attn_output,
++                    accum_lse=lse,
++                    forward_batch=forward_batch,
++                )
+ 
+         attn_output = attn_output.reshape(-1, self.num_local_heads * self.v_head_dim)
+         if gate is not None:
+@@ -477,9 +490,12 @@
+         self: DeepseekV2AttentionMLA,
+         q: torch.Tensor,
+         accum_output: torch.Tensor,
+-        accum_lse: torch.Tensor,
++        accum_lse: Optional[torch.Tensor],
+         forward_batch: ForwardBatch,
++        causal_kv: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
+     ) -> torch.Tensor:
++        """With causal_kv, the causal pass (accum_output is None) runs on the
++        alt stream next to the first prefix chunk instead of before it."""
+         # kv_b_proj needs BF16 input, but legacy q.dtype was BF16 by accident.
+         from sglang.srt.layers.attention.merge_state import merge_state
+ 
+@@ -511,6 +527,8 @@
+ 
+         assert forward_batch.num_prefix_chunks is not None
+         packed_offset = 0
++        pending = None
++        causal_done = None
+         for i in range(forward_batch.num_prefix_chunks):
+             forward_batch.set_prefix_chunk_idx(i)
+ 
+@@ -562,6 +580,14 @@
+                     k[..., self.qk_nope_head_dim :] = k_pe
+                     del kv_a_normed, k_pe, kv, k_nope, v_dense
+ 
++            if causal_kv is not None and accum_output is None:
++                prefix_ready = torch.cuda.current_stream().record_event()
++                if _EXP_CAUSAL_FIRST:
++                    accum_output, accum_lse, causal_done = (
++                        self._causal_attn_mha_on_alt_stream(
++                            q, *causal_kv, forward_batch, after=prefix_ready
++                        )
++                    )
+             output, lse = self.attn_mha(
+                 q,
+                 k,
+@@ -573,18 +599,30 @@
+                 # active lengths remain encoded in the backend metadata.
+                 key_value_num_tokens=k.shape[0],
+             )
+-            tmp_output = torch.empty_like(accum_output)
+-            tmp_lse = torch.empty_like(accum_lse)
+-            merge_state(
+-                output,
+-                lse,
+-                accum_output,
+-                accum_lse,
+-                tmp_output,
+-                tmp_lse,
+-            )
+-            accum_output, accum_lse = tmp_output, tmp_lse
+-            del k, v, output, lse, tmp_output, tmp_lse
++            if causal_kv is not None and accum_output is None:
++                accum_output, accum_lse, causal_done = (
++                    self._causal_attn_mha_on_alt_stream(
++                        q, *causal_kv, forward_batch, after=prefix_ready
++                    )
++                )
++            # One merge behind the attention launches, so that the next chunk's
++            # gather/projection is not queued behind the overlapped causal pass.
++            if pending is not None:
++                if causal_done is not None:
++                    torch.cuda.current_stream().wait_event(causal_done)
++                    causal_done = None
++                accum_output, accum_lse = self._merge_chunk_state(
++                    merge_state, pending, accum_output, accum_lse
++                )
++            pending = (output, lse)
++            del k, v, output, lse
++
++        if causal_done is not None:
++            torch.cuda.current_stream().wait_event(causal_done)
++        accum_output, _ = self._merge_chunk_state(
++            merge_state, pending, accum_output, accum_lse
++        )
++        del pending
+ 
+         if pack_all_prefix_chunks:
+             assert packed_offset == packed_prefix_k.shape[0]
+@@ -592,6 +630,43 @@
+ 
+         return accum_output
+ 
++    @staticmethod
++    def _merge_chunk_state(merge_state, chunk_state, accum_output, accum_lse):
++        output, lse = chunk_state
++        tmp_output = torch.empty_like(accum_output)
++        tmp_lse = torch.empty_like(accum_lse)
++        merge_state(output, lse, accum_output, accum_lse, tmp_output, tmp_lse)
++        return tmp_output, tmp_lse
++
++    def _causal_attn_mha_on_alt_stream(
++        self: DeepseekV2AttentionMLA,
++        q: torch.Tensor,
++        k: torch.Tensor,
++        v: torch.Tensor,
++        forward_batch: ForwardBatch,
++        *,
++        after: torch.cuda.Event,
++    ) -> tuple[torch.Tensor, torch.Tensor, torch.cuda.Event]:
++        # Gated on the first chunk's K/V being packed, the causal CTAs share the
++        # SMs with that chunk's FMHA grid and fill its partial waves.
++        current_stream = torch.cuda.current_stream()
++        self.alt_stream.wait_event(after)
++        forward_batch.set_attn_attend_prefix_cache(False)
++        with torch.cuda.stream(self.alt_stream):
++            output, lse = self.attn_mha(q, k, v, forward_batch, save_kv_cache=False)
++        forward_batch.set_attn_attend_prefix_cache(True)
++        for t in (q, k, v):
++            t.record_stream(self.alt_stream)
++        output.record_stream(current_stream)
++        lse.record_stream(current_stream)
++        return output, lse, self.alt_stream.record_event()
++
++    def _overlap_causal_with_prefix(self: DeepseekV2AttentionMLA, backend) -> bool:
++        if self.alt_stream is None or torch.cuda.is_current_stream_capturing():
++            return False
++        can_overlap = getattr(backend, "can_overlap_causal_with_prefix", None)
++        return can_overlap is not None and can_overlap()
++
+     def _project_pack_prefix_kv(
+         self: DeepseekV2AttentionMLA,
+         *,

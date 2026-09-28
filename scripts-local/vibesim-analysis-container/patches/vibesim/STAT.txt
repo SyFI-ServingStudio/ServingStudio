@@ -55,6 +55,7 @@
  analyzer/rust/src/ui_service/tests.rs              |  199 +
  analyzer/rust/src/ui_service/workload.rs           |   13 +-
  branch                                             |  Bin 0 -> 24576 bytes
+ doc/alignment/kimi_k3_b12c_prefill.md              |   40 +
  doc/alignment/kimi_k3_single_layer.md              |  286 ++
  doc/analyzer.md                                    |    6 +-
  doc/components/optimal_analyze.md                  |    2 +-
@@ -207,7 +208,7 @@
  profiling/kernels/mla_cache_append.py              |   26 +-
  profiling/kernels/mla_decode_attention.py          |   55 +
  profiling/kernels/mla_merge_state.py               |   46 +
- profiling/kernels/mla_prefill_attention.py         |   53 +
+ profiling/kernels/mla_prefill_attention.py         |   55 +
  profiling/kernels/mla_prefix_gather.py             |   49 +
  profiling/kernels/mla_rope_quantize_fp8.py         |   53 +
  profiling/kernels/moe_finalize_fuse_shared.py      |   47 +
@@ -229,21 +230,21 @@
  .../attention/gdn_gated_rms_norm_sglang_triton.py  |   68 +
  profiling/runners/attention/kda_fused_decode.py    |  184 +
  .../runners/attention/kda_recurrent_decode.py      |  316 ++
- profiling/runners/attention/kimi_k3_prefill.py     |  568 +++
+ profiling/runners/attention/kimi_k3_prefill.py     |  626 +++
  profiling/runners/attention/mla_cache_append.py    |  290 +-
  .../runners/attention/mla_decode_attention.py      |  359 ++
  .../runners/attention/mla_rope_quantize_fp8.py     |  222 +
  profiling/runners/attention/vllm_mla_rope.py       |   11 +-
- profiling/runners/elementwise/kimi_k3.py           |  131 +
+ profiling/runners/elementwise/kimi_k3.py           |  134 +
  profiling/runners/elementwise/nvfp4_quant.py       |   53 +-
  profiling/runners/gemm/batched_gemm.py             |   78 +-
- .../runners/gemm/gemm_fp32_output_sglang_k3.py     |   79 +
+ .../runners/gemm/gemm_fp32_output_sglang_k3.py     |   82 +
  .../runners/gemm/gemm_fp32_output_sglang_router.py |   94 +
- profiling/runners/gemm/sglang.py                   |  196 +
+ profiling/runners/gemm/sglang.py                   |  253 ++
  profiling/runners/moe/bf16_fused_moe.py            |  469 ++
  profiling/runners/moe/exact_topk.py                |   45 +
  profiling/runners/moe/moe_finalize_fuse_shared.py  |  154 +
- profiling/runners/moe/mxfp4_fused_moe.py           |  449 ++
+ profiling/runners/moe/mxfp4_fused_moe.py           |  459 ++
  profiling/runners/moe/nvfp4_fused_moe.py           |  307 +-
  profiling/spec5_db_manifest.json                   | 2059 +++++++++
  pyproject.toml                                     |    1 +
@@ -294,7 +295,7 @@
  .../src/timing/kernels/kda_recurrent_decode.rs     |  121 +
  .../src/timing/kernels/mla_decode_attention.rs     |  220 +
  simulator/src/timing/kernels/mla_merge_state.rs    |   57 +
- .../src/timing/kernels/mla_prefill_attention.rs    |   91 +
+ .../src/timing/kernels/mla_prefill_attention.rs    |  128 +
  simulator/src/timing/kernels/mla_prefix_gather.rs  |   65 +
  .../src/timing/kernels/mla_rope_quantize_fp8.rs    |  142 +
  simulator/src/timing/kernels/mod.rs                |   77 +-
@@ -347,7 +348,7 @@
  simulator/src/worklet/kimi_k3_common.rs            |   90 +
  simulator/src/worklet/kimi_k3_dense_local.rs       |  207 +
  simulator/src/worklet/kimi_k3_kda_local.rs         |  989 +++++
- simulator/src/worklet/kimi_k3_mla_local.rs         | 1001 +++++
+ simulator/src/worklet/kimi_k3_mla_local.rs         | 1027 +++++
  simulator/src/worklet/kimi_k3_moe_local.rs         |  705 +++
  simulator/src/worklet/mod.rs                       |   53 +-
  ...{vllm_nvfp4_moe_local.rs => nvfp4_moe_local.rs} |  142 +-
@@ -400,7 +401,7 @@
  tests/test_frontend_measurement_gate.py            |  157 +
  tests/test_gdn_causal_conv_decode.py               |   18 +-
  tests/test_gdn_gated_rms_norm.py                   |   18 +-
- tests/test_kimi_k3_profiling.py                    |  384 ++
+ tests/test_kimi_k3_profiling.py                    |  402 ++
  tests/test_l1_single_gemm.py                       |   13 +-
  tests/test_launcher_leases.py                      |   11 +
  tests/test_launcher_process_supervisor.py          |   84 +-
@@ -421,4 +422,4 @@
  trace/README.md                                    |   35 +
  trace/diverse_100.csv                              |  101 +
  uv.lock                                            |   11 +
- 423 files changed, 73871 insertions(+), 2696 deletions(-)
+ 424 files changed, 74125 insertions(+), 2696 deletions(-)

@@ -10942,6 +10942,52 @@ diff --git a/branch b/branch
 new file mode 100644
 index 00000000..b54eb1c5
 Binary files /dev/null and b/branch differ
+diff --git a/doc/alignment/kimi_k3_b12c_prefill.md b/doc/alignment/kimi_k3_b12c_prefill.md
+new file mode 100644
+index 00000000..8c26f192
+--- /dev/null
++++ b/doc/alignment/kimi_k3_b12c_prefill.md
+@@ -0,0 +1,40 @@
++# Kimi-K3 B12c prefill prediction comparison
++
++The B12c rows were filled on one Slurm-allocated B200 with the branch profile
++database. Times below are milliseconds. The prediction column is the total from
++the regenerated `iter_breakdown.ans` report.
++
++| Layer | Point | Measured step | Predicted total | Delta |
++| --- | --- | ---: | ---: | ---: |
++| KDA | 16k, prefix 0 | 9.07 | 8.912 | -1.7% |
++| KDA | 16k, prefix 49,152 | 8.87 | 8.990 | +1.4% |
++| KDA | 4 x 4k, prefix 0 | 8.57 | 8.555 | -0.2% |
++| KDA | 16k, prefix 245,760 | 9.03 | 9.301 | +3.0% |
++| KDA | 32k, prefix 229,376 | 17.94 | 18.230 | +1.6% |
++| KDA | 16k, prefix 131,072 | 9.20 | 9.119 | -0.9% |
++| KDA | 32k, prefix 131,072 | 17.00* | 17.761 | +4.5% |
++| MLA | 16k, prefix 49,152 | 12.12 | 11.769 | -2.9% |
++| MLA | 16k, prefix 0 | 8.13 | 8.010 | -1.5% |
++| MLA | 4 x 4k, prefix 0 | 7.79 | 7.566 | -2.9% |
++| MLA | 16k, prefix 245,760 | 27.69 | 26.303 | -5.0% |
++| MLA | 32k, prefix 229,376 | 48.36 | 48.476 | +0.2% |
++| MLA | 16k, prefix 131,072 | 18.37 | 18.056 | -1.7% |
++| MLA | 32k, prefix 131,072 | 35.09 | 35.027 | -0.2% |
++
++\* The supplied B12c measured table did not include the KDA 32k/131,072
++point. Its measured value here is the 17.00 ms prior-campaign reference; the
++other rows use the supplied judge medians.
++
++The MLA prefix runner now profiles one physical FlashInfer launch per prefix
++chunk and carries both `prefix_len` and `num_prefix_chunks` in the cache key.
++Its measured rows are 9.38 ms at 16k/131,072, 17.63 ms at 16k/245,760, and
++31.36 ms at 32k/229,376. Prefix attention is the first cost family for all
++four long-context MLA points. For KDA, the GEMM family remains first when the
++projection leaves are aggregated, followed by routed MoE and the chunk leaf.
++
++The KDA chunk row is intentionally unchanged at 1.445 ms for 16k long
++context. The runner times the fused `chunk_kda` boundary with
++`use_qk_l2norm_in_kernel=True`; it is not retuned to the optimized-tree
++h-scan/intra/conv launch sum of about 0.72 ms.
++
++Decode rows and decode branches were not changed.
 diff --git a/doc/alignment/kimi_k3_single_layer.md b/doc/alignment/kimi_k3_single_layer.md
 new file mode 100644
 index 00000000..098c7cdd
@@ -46669,10 +46715,10 @@ index 00000000..332c71fd
 +)
 diff --git a/profiling/kernels/mla_prefill_attention.py b/profiling/kernels/mla_prefill_attention.py
 new file mode 100644
-index 00000000..9a5a607e
+index 00000000..049ec282
 --- /dev/null
 +++ b/profiling/kernels/mla_prefill_attention.py
-@@ -0,0 +1,53 @@
+@@ -0,0 +1,55 @@
 +"""Kimi-K3 SGLang TRT-LLM ragged MLA prefill attention."""
 +
 +from __future__ import annotations
@@ -46704,6 +46750,8 @@ index 00000000..9a5a607e
 +    batch_size: int
 +    q_len: int
 +    kv_len: int
++    prefix_len: int
++    num_prefix_chunks: int
 +
 +
 +register(
@@ -48832,10 +48880,10 @@ index 00000000..e42460ec
 +]
 diff --git a/profiling/runners/attention/kimi_k3_prefill.py b/profiling/runners/attention/kimi_k3_prefill.py
 new file mode 100644
-index 00000000..cc80e7a1
+index 00000000..aaab8911
 --- /dev/null
 +++ b/profiling/runners/attention/kimi_k3_prefill.py
-@@ -0,0 +1,568 @@
+@@ -0,0 +1,626 @@
 +"""Kimi-K3 chunked-prefill profiling callables.
 +
 +Each public function below follows the production SGLang boundary used by the
@@ -49178,12 +49226,16 @@ index 00000000..cc80e7a1
 +    kv_len: int,
 +    num_heads: int,
 +    device: Any,
++    query: Any | None = None,
 +) -> tuple[Any, Any, Any, Any, Any, Any, Any]:
 +    if min(batch_size, q_len, kv_len) <= 0:
 +        raise ValueError("MLA batch and lengths must be positive")
-+    q = torch.randn(
-+        (batch_size * q_len, num_heads, _K3_QK_DIM), dtype=torch.bfloat16, device=device
-+    ).to(torch.float8_e4m3fn)
++    if query is None:
++        q = torch.randn(
++            (batch_size * q_len, num_heads, _K3_QK_DIM), dtype=torch.bfloat16, device=device
++        ).to(torch.float8_e4m3fn)
++    else:
++        q = query
 +    k = torch.randn(
 +        (batch_size * kv_len, num_heads, _K3_QK_DIM),
 +        dtype=torch.bfloat16,
@@ -49203,6 +49255,32 @@ index 00000000..cc80e7a1
 +    return q, k, v, cum_q, cum_kv, seq_lens, out
 +
 +
++def _prefix_chunk_lengths(
++    prefix_len: int, chunk_len: int, num_prefix_chunks: int
++) -> tuple[int, ...]:
++    if prefix_len < 0 or chunk_len <= 0 or num_prefix_chunks < 0:
++        raise ValueError("MLA prefix lengths and chunk count must be non-negative")
++    if prefix_len == 0:
++        if num_prefix_chunks != 0:
++            raise ValueError("a causal MLA row must have num_prefix_chunks=0")
++        return (chunk_len,)
++    expected_chunks = (prefix_len + chunk_len - 1) // chunk_len
++    if num_prefix_chunks != expected_chunks:
++        raise ValueError(
++            "num_prefix_chunks must equal ceil(prefix_len / kv_len): "
++            f"got {num_prefix_chunks}, expected {expected_chunks}"
++        )
++    lengths = []
++    remaining = prefix_len
++    for _ in range(num_prefix_chunks):
++        current = min(chunk_len, remaining)
++        lengths.append(current)
++        remaining -= current
++    if remaining:
++        raise AssertionError("MLA prefix chunks did not cover prefix_len")
++    return tuple(lengths)
++
++
 +def profile_mla_prefill_attention_sglang_trtllm(
 +    num_heads: int,
 +    qk_head_dim: int,
@@ -49214,6 +49292,8 @@ index 00000000..cc80e7a1
 +    batch_size: int,
 +    q_len: int,
 +    kv_len: int,
++    prefix_len: int,
++    num_prefix_chunks: int,
 +) -> ComputeMetrics:
 +    q_dtype = DType.from_value(q_dtype)
 +    kv_dtype = DType.from_value(kv_dtype)
@@ -49235,52 +49315,78 @@ index 00000000..cc80e7a1
 +    except ImportError as exc:
 +        raise ProfilerNotImplemented("FlashInfer is required for K3 MLA prefill") from exc
 +    device = _require_b200(torch, "mla_prefill_attention")
++    batch_size = int(batch_size)
++    q_len = int(q_len)
++    kv_len = int(kv_len)
++    prefix_len = int(prefix_len)
++    num_prefix_chunks = int(num_prefix_chunks)
++    if causal and prefix_len != 0:
++        raise ValueError("causal MLA attention cannot have a cached prefix")
++    if not causal and prefix_len == 0:
++        raise ValueError("prefix MLA attention requires prefix_len > 0")
++    chunk_lengths = _prefix_chunk_lengths(prefix_len, kv_len, num_prefix_chunks)
 +    q, k, v, cum_q, cum_kv, seq_lens, out = _build_mla_inputs(
 +        torch,
-+        batch_size=int(batch_size),
-+        q_len=int(q_len),
-+        kv_len=int(kv_len),
++        batch_size=batch_size,
++        q_len=q_len,
++        kv_len=chunk_lengths[0],
 +        num_heads=int(num_heads),
 +        device=device,
 +    )
++    launches = [(k, v, cum_q, cum_kv, seq_lens, out, chunk_lengths[0])]
++    for chunk_len in chunk_lengths[1:]:
++        _, k, v, cum_q, cum_kv, seq_lens, out = _build_mla_inputs(
++            torch,
++            batch_size=batch_size,
++            q_len=q_len,
++            kv_len=chunk_len,
++            num_heads=int(num_heads),
++            device=device,
++            query=q,
++        )
++        launches.append((k, v, cum_q, cum_kv, seq_lens, out, chunk_len))
 +    workspace = _common.make_workspace()
 +
 +    def kernel() -> Any:
-+        return flashinfer.prefill.trtllm_ragged_attention_deepseek(
-+            query=q,
-+            key=k,
-+            value=v,
-+            workspace_buffer=workspace,
-+            batch_size=int(batch_size),
-+            window_left=-1,
-+            enable_pdl=False,
-+            max_q_len=int(q_len),
-+            bmm1_scale=_K3_QK_DIM**-0.5,
-+            bmm2_scale=1.0,
-+            cum_seq_lens_q=cum_q,
-+            cum_seq_lens_kv=cum_kv,
-+            seq_lens=seq_lens,
-+            max_kv_len=int(kv_len),
-+            is_causal=bool(causal),
-+            # The chunked-prefix handler requests LSE for both its prefix and
-+            # causal passes; the causal leaf is shared with the no-prefix path.
-+            return_lse=True,
-+            o_sf_scale=-1.0 if not causal else 1.0,
-+            out=out,
-+            skip_softmax_threshold_scale_factor=0,
-+        )
++        result = None
++        for k, v, cum_q, cum_kv, seq_lens, out, chunk_len in launches:
++            result = flashinfer.prefill.trtllm_ragged_attention_deepseek(
++                query=q,
++                key=k,
++                value=v,
++                workspace_buffer=workspace,
++                batch_size=batch_size,
++                window_left=-1,
++                enable_pdl=False,
++                max_q_len=q_len,
++                bmm1_scale=_K3_QK_DIM**-0.5,
++                bmm2_scale=1.0,
++                cum_seq_lens_q=cum_q,
++                cum_seq_lens_kv=cum_kv,
++                seq_lens=seq_lens,
++                max_kv_len=chunk_len,
++                is_causal=bool(causal),
++                # The chunked-prefix handler requests LSE for both its prefix and
++                # causal passes; the causal leaf is shared with the no-prefix path.
++                return_lse=True,
++                o_sf_scale=-1.0 if not causal else 1.0,
++                out=out,
++                skip_softmax_threshold_scale_factor=0,
++            )
++        return result
 +
 +    kernel()
 +    torch.cuda.synchronize(device)
-+    work = int(batch_size) * int(q_len) * int(kv_len)
++    work = sum(batch_size * q_len * chunk_len for chunk_len in chunk_lengths)
 +    if causal:
-+        work = int(batch_size) * int(q_len) * (2 * int(kv_len) - int(q_len)) // 2
++        work = batch_size * q_len * (2 * chunk_lengths[0] - q_len) // 2
 +    flops = 2 * work * int(num_heads) * (int(qk_head_dim) + int(v_head_dim))
-+    bytes_accessed = (
++    bytes_accessed = sum(
 +        q.numel() * q.element_size()
 +        + k.numel() * k.element_size()
 +        + v.numel() * v.element_size()
 +        + out.numel() * out.element_size()
++        for k, v, _cum_q, _cum_kv, _seq_lens, out, _chunk_len in launches
 +    )
 +    return _measure(kernel, flops=flops, bytes_accessed=bytes_accessed)
 +
@@ -50376,10 +50482,10 @@ index 4d439003..b3bd591d 100644
          num_tokens=num_tokens,
 diff --git a/profiling/runners/elementwise/kimi_k3.py b/profiling/runners/elementwise/kimi_k3.py
 new file mode 100644
-index 00000000..0e6ef3bb
+index 00000000..f64935b0
 --- /dev/null
 +++ b/profiling/runners/elementwise/kimi_k3.py
-@@ -0,0 +1,131 @@
+@@ -0,0 +1,134 @@
 +"""Profilers for Kimi-K3 fused eager elementwise calls."""
 +
 +from __future__ import annotations
@@ -50389,6 +50495,8 @@ index 00000000..0e6ef3bb
 +from profiling.profilers.timer import Timer
 +from profiling.runners.exceptions import KernelLaunchFailed, OOMError, ProfilerNotImplemented
 +from profiling.runners.metrics import ComputeMetrics
++
++_K3_MERGED_FRONT_WIDTH = 15_984
 +
 +
 +def profile_k3_situ_and_mul_prefill(
@@ -50422,12 +50530,13 @@ index 00000000..0e6ef3bb
 +
 +    try:
 +        generator = torch.Generator(device="cuda").manual_seed(31)
-+        input_tensor = torch.randn(
-+            (num_tokens, 2 * hidden_size),
++        merged_front = torch.randn(
++            (num_tokens, max(_K3_MERGED_FRONT_WIDTH, 2 * hidden_size)),
 +            dtype=torch.float32,
 +            device="cuda",
 +            generator=generator,
 +        )
++        input_tensor = merged_front[:, : 2 * hidden_size]
 +        output = torch.empty((num_tokens, hidden_size), dtype=torch.bfloat16, device="cuda")
 +
 +        def run_once():
@@ -50705,10 +50814,10 @@ index 3432ba9f..ce58ba2b 100644
      *,
 diff --git a/profiling/runners/gemm/gemm_fp32_output_sglang_k3.py b/profiling/runners/gemm/gemm_fp32_output_sglang_k3.py
 new file mode 100644
-index 00000000..ed27c64b
+index 00000000..31f37979
 --- /dev/null
 +++ b/profiling/runners/gemm/gemm_fp32_output_sglang_k3.py
-@@ -0,0 +1,79 @@
+@@ -0,0 +1,82 @@
 +"""Profile Kimi-K3's raw BF16-input/FP32-output GEMM path."""
 +
 +from __future__ import annotations
@@ -50741,6 +50850,8 @@ index 00000000..ed27c64b
 +            use_cutedsl_bf16_gemm,
 +        )
 +        from sglang.srt.layers.quantization.unquant import get_bf16_gemm_backend
++
++        from profiling.runners.gemm.sglang import _initialize_k3_bf16_gemm
 +    except ImportError as exc:
 +        raise ProfilerNotImplemented("the SGLang environment is required") from exc
 +    if not torch.cuda.is_available():
@@ -50749,6 +50860,7 @@ index 00000000..ed27c64b
 +        raise ProfilerNotImplemented(f"{_BACKEND} requires SM100")
 +
 +    try:
++        _initialize_k3_bf16_gemm()
 +        generator = torch.Generator(device="cuda").manual_seed(31)
 +        hidden = torch.randn((m, k), dtype=torch.bfloat16, device="cuda", generator=generator)
 +        weight = torch.randn((n, k), dtype=torch.bfloat16, device="cuda", generator=generator)
@@ -50890,15 +51002,18 @@ index 00000000..ce9aaacd
 +__all__ = ["profile_gemm_fp32_output_sglang_router"]
 diff --git a/profiling/runners/gemm/sglang.py b/profiling/runners/gemm/sglang.py
 new file mode 100644
-index 00000000..cec28afe
+index 00000000..997687be
 --- /dev/null
 +++ b/profiling/runners/gemm/sglang.py
-@@ -0,0 +1,196 @@
+@@ -0,0 +1,253 @@
 +"""Runners for SGLang's production BF16 dense-GEMM dispatches."""
 +
 +from __future__ import annotations
 +
++import json
++import tempfile
 +from collections.abc import Callable
++from pathlib import Path
 +
 +from profiling.db.args import DType
 +from profiling.profilers.energy import Energy
@@ -50907,6 +51022,58 @@ index 00000000..cec28afe
 +from profiling.runners.metrics import ComputeMetrics
 +
 +_FUSED_A_MAX_TOKENS = 16
++_K3_BF16_GEMM_INITIALIZED = False
++
++
++def _initialize_k3_bf16_gemm() -> None:
++    """Match the scheduler's ``auto -> cutedsl`` BF16 GEMM initialization.
++
++    Standalone L1 workers do not normally have SGLang's process-wide
++    ``ServerArgs`` context. Publish a minimal valid context, then invoke the
++    same public initializer as the production scheduler.
++    """
++    global _K3_BF16_GEMM_INITIALIZED
++    if _K3_BF16_GEMM_INITIALIZED:
++        return
++
++    from sglang.srt.layers.quantization.unquant import initialize_bf16_gemm_config
++    from sglang.srt.runtime_context import get_exec
++
++    try:
++        get_exec().kernel.bf16_gemm_backend
++    except (AttributeError, KeyError, ValueError):
++        from sglang.srt.server_args import ServerArgs, set_global_server_args_for_scheduler
++
++        config = {
++            "architectures": ["LlamaForCausalLM"],
++            "model_type": "llama",
++            "hidden_size": 4096,
++            "intermediate_size": 11008,
++            "num_hidden_layers": 2,
++            "num_attention_heads": 32,
++            "num_key_value_heads": 32,
++            "vocab_size": 32000,
++            "max_position_embeddings": 4096,
++            "rms_norm_eps": 1e-5,
++            "torch_dtype": "bfloat16",
++        }
++        with tempfile.TemporaryDirectory(prefix="vibesim-sglang-k3-") as config_dir:
++            Path(config_dir, "config.json").write_text(json.dumps(config), encoding="utf-8")
++            set_global_server_args_for_scheduler(
++                ServerArgs(
++                    model_path=config_dir,
++                    dtype="bfloat16",
++                    device="cuda",
++                    tp_size=1,
++                    load_format="dummy",
++                    bf16_gemm_backend="auto",
++                    disable_cuda_graph=True,
++                    disable_radix_cache=True,
++                )
++            )
++
++    initialize_bf16_gemm_config()
++    _K3_BF16_GEMM_INITIALIZED = True
 +
 +
 +def _validate_shape(m: int, n: int, k: int) -> None:
@@ -50965,7 +51132,6 @@ index 00000000..cec28afe
 +
 +    try:
 +        import torch
-+        import torch.nn.functional as functional
 +        import torch.nn.functional as functional
 +        from sglang.kernels.ops.gemm.cutedsl_bf16_gemm import (
 +            cutedsl_bf16_gemm,
@@ -51051,10 +51217,9 @@ index 00000000..cec28afe
 +) -> ComputeMetrics:
 +    """Profile K3's eager raw BF16 module-projection path.
 +
-+    K3's chunked-prefill path deliberately bypasses the module GEMM dispatcher
-+    for several merged and deferred projections.  This backend keeps that
-+    eager path separate from the decode CuTe-DSL backend while retaining the
-+    shared ``single_gemm`` cache schema.
++    K3's chunked-prefill path calls the same raw projection helper as the
++    eager layer. Initialize SGLang's production BF16 dispatcher in this
++    standalone worker while retaining the separate prefill cache backend.
 +    """
 +    _validate_shape(m, n, k)
 +    dtype = DType.from_value(dtype)
@@ -51064,20 +51229,24 @@ index 00000000..cec28afe
 +    try:
 +        import torch
 +        import torch.nn.functional as functional
++        from sglang.kernels.ops.gemm.cutedsl_bf16_gemm import (
++            cutedsl_bf16_gemm,
++            use_cutedsl_bf16_gemm,
++        )
 +    except ImportError as exc:
 +        raise ProfilerNotImplemented("the SGLang environment is required") from exc
 +
 +    _require_sm100("sglang_k3_raw_bf16")
 +    try:
++        _initialize_k3_bf16_gemm()
 +        generator = torch.Generator(device="cuda").manual_seed(31)
 +        activations = torch.randn(m, k, dtype=torch.bfloat16, device="cuda", generator=generator)
 +        weight = torch.randn(n, k, dtype=torch.bfloat16, device="cuda", generator=generator)
++        use_cutedsl = use_cutedsl_bf16_gemm(m, n, k)
 +
 +        def kernel():
-+            # K3's module projections use F.linear when the production
-+            # dispatcher is not initialized for CuTe-DSL. Its cuBLAS
-+            # heuristic/layout differs from torch.mm(..., out=...), so keep
-+            # the isolated leaf on the same callable.
++            if use_cutedsl:
++                return cutedsl_bf16_gemm(activations, weight, None)
 +            return functional.linear(activations, weight)
 +
 +        return _measure(
@@ -51778,10 +51947,10 @@ index 00000000..875f0564
 +__all__ = ["profile_moe_finalize_fuse_shared_sglang"]
 diff --git a/profiling/runners/moe/mxfp4_fused_moe.py b/profiling/runners/moe/mxfp4_fused_moe.py
 new file mode 100644
-index 00000000..acc46f9b
+index 00000000..b56c281f
 --- /dev/null
 +++ b/profiling/runners/moe/mxfp4_fused_moe.py
-@@ -0,0 +1,449 @@
+@@ -0,0 +1,459 @@
 +"""Kimi-K3 FlashInfer TRT-LLM MXFP4 fused-MoE runner."""
 +
 +from __future__ import annotations
@@ -51807,6 +51976,8 @@ index 00000000..acc46f9b
 +_TOP_K = 16
 +_RANK_LOCAL_TOP_K = 2
 +_EPILOGUE_TILE_M = 128
++_K3_MERGED_FRONT_WIDTH = 15_984
++_K3_MERGED_FRONT_GATE_UP_WIDTH = 12_288
 +
 +
 +def _validate_args(**kwargs: Any) -> dict[str, Any]:
@@ -52057,11 +52228,19 @@ index 00000000..acc46f9b
 +            dtype=torch.float32,
 +            device=device,
 +        )
-+        hidden_states = torch.randn(
-+            (args["num_tokens"], args["hidden_size"]),
-+            dtype=torch.bfloat16,
++        # K3's fused front emits one FP32 [gate_up | router | latent] buffer.
++        # The routed slice remains strided until production MXFP8 preparation;
++        # a contiguous BF16 tensor selects a different prefill tactic.
++        front = torch.randn(
++            (args["num_tokens"], _K3_MERGED_FRONT_WIDTH),
++            dtype=torch.float32,
 +            device=device,
 +        )
++        hidden_states = front[
++            :,
++            _K3_MERGED_FRONT_GATE_UP_WIDTH : _K3_MERGED_FRONT_GATE_UP_WIDTH
++            + args["hidden_size"],
++        ]
 +        hidden_states, hidden_states_scale = per_token_group_quant(
 +            hidden_states, group_size=_GROUP_SIZE, scale_ue8m0=True
 +        )
@@ -67514,17 +67693,17 @@ index 00000000..0a181757
 +register_kernel!(MlaMergeStateKernel, MlaMergeStateSpec);
 diff --git a/simulator/src/timing/kernels/mla_prefill_attention.rs b/simulator/src/timing/kernels/mla_prefill_attention.rs
 new file mode 100644
-index 00000000..c083f1d3
+index 00000000..1bbe0e9f
 --- /dev/null
 +++ b/simulator/src/timing/kernels/mla_prefill_attention.rs
-@@ -0,0 +1,91 @@
+@@ -0,0 +1,128 @@
 +//! Kimi-K3 TRT-LLM ragged MLA prefill attention.
 +
 +use crate::timing::bridge::{de_backends, ArgsPayload, DType, KernelKind};
 +use crate::timing::cache::CacheKind;
 +use crate::timing::kernels::engine::{register_kernel, KernelSpec};
 +use crate::timing::sweep::{Axis, SweepGrid};
-+use crate::timing::{Dim, KernelConfig, SweepCoords};
++use crate::timing::{Coords, Dim, KernelConfig, SweepCoords};
 +
 +const MAX_PROFILE_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 +
@@ -67544,11 +67723,29 @@ index 00000000..c083f1d3
 +    pub causal: bool,
 +}
 +
-+#[derive(Clone, SweepCoords, serde::Serialize, serde::Deserialize)]
++#[derive(Clone, serde::Serialize, serde::Deserialize)]
 +pub struct MlaPrefillAttentionKernelInput {
 +    pub batch_size: u32,
 +    pub q_len: u32,
 +    pub kv_len: u32,
++    pub prefix_len: u32,
++    pub num_prefix_chunks: u32,
++}
++
++impl SweepCoords for MlaPrefillAttentionKernelInput {
++    fn coords(&self) -> Coords {
++        // The physical runner consumes kv_len per launch, while the cache
++        // axis must represent the total prefix work across all launches.
++        Coords::new([
++            self.batch_size as f64,
++            self.q_len as f64,
++            self.prefix_len as f64,
++        ])
++    }
++
++    fn coord_field_names() -> &'static [&'static str] {
++        &["batch_size", "q_len", "prefix_len"]
++    }
 +}
 +
 +pub struct MlaPrefillAttentionSpec;
@@ -67561,9 +67758,9 @@ index 00000000..c083f1d3
 +
 +    fn sweep_grid(_config: &Self::Config) -> SweepGrid {
 +        SweepGrid::new(vec![
-+            Axis::values([1, 2, 4, 8]),
-+            Axis::values([1024, 4096, 16_384]),
-+            Axis::values([1024, 4096, 16_384, 49_152]),
++            Axis::values([1, 4]),
++            Axis::values([4096, 16_384, 32_768]),
++            Axis::values([0, 49_152, 131_072, 229_376, 245_760]),
 +        ])
 +    }
 +
@@ -67572,17 +67769,23 @@ index 00000000..c083f1d3
 +    }
 +
 +    fn infeasible_mask(config: &Self::Config, grid: &SweepGrid) -> Vec<bool> {
-+        grid.expand_3d(|batch_size, q_len, kv_len| {
++        grid.expand_3d(|batch_size, q_len, prefix_len| {
 +            let batch_size = batch_size.round() as u64;
 +            let q_len = q_len.round() as u64;
-+            let kv_len = kv_len.round() as u64;
++            let prefix_len = prefix_len.round() as u64;
++            let chunk_len = if prefix_len == 0 {
++                q_len
++            } else {
++                prefix_len.min(131_072 / batch_size.max(1))
++            };
 +            let bytes = batch_size
-+                .saturating_mul(kv_len)
++                .saturating_mul(chunk_len)
 +                .saturating_mul((config.qk_head_dim.get() + config.v_head_dim.get()) as u64)
 +                .saturating_mul(config.kv_dtype.size_bytes() as u64);
 +            bytes > MAX_PROFILE_BYTES
-+                || (config.causal && q_len != kv_len)
-+                || (!config.causal && kv_len < q_len)
++                || (config.causal && prefix_len != 0)
++                || (!config.causal && prefix_len == 0)
++                || (!config.causal && batch_size != 1)
 +        })
 +    }
 +
@@ -67591,7 +67794,18 @@ index 00000000..c083f1d3
 +        grid: &SweepGrid,
 +        backend: &'static str,
 +    ) -> Vec<ArgsPayload> {
-+        grid.expand_3d(|batch_size, q_len, kv_len| {
++        grid.expand_3d(|batch_size, q_len, prefix_len| {
++            let batch_size = batch_size.round() as u32;
++            let q_len = q_len.round() as u32;
++            let prefix_len = prefix_len.round() as u32;
++            let (kv_len, num_prefix_chunks) = if prefix_len == 0 {
++                (q_len, 0)
++            } else {
++                let chunk_capacity = (131_072 / u64::from(batch_size.max(1))) as u32;
++                let chunk_len = prefix_len.min(chunk_capacity);
++                let chunks = (prefix_len + chunk_len - 1) / chunk_len;
++                (chunk_len, chunks)
++            };
 +            ArgsPayload::new()
 +                .with("backend", backend)
 +                .with("num_heads", config.num_heads.get())
@@ -67601,9 +67815,11 @@ index 00000000..c083f1d3
 +                .with("kv_dtype", config.kv_dtype.as_str())
 +                .with("o_dtype", config.o_dtype.as_str())
 +                .with("causal", config.causal)
-+                .with("batch_size", batch_size.round() as u32)
-+                .with("q_len", q_len.round() as u32)
-+                .with("kv_len", kv_len.round() as u32)
++                .with("batch_size", batch_size)
++                .with("q_len", q_len)
++                .with("kv_len", kv_len)
++                .with("prefix_len", prefix_len)
++                .with("num_prefix_chunks", num_prefix_chunks)
 +        })
 +    }
 +}
@@ -75825,10 +76041,10 @@ index 00000000..9d1a6f0b
 +}
 diff --git a/simulator/src/worklet/kimi_k3_mla_local.rs b/simulator/src/worklet/kimi_k3_mla_local.rs
 new file mode 100644
-index 00000000..c8224d14
+index 00000000..24bf2edf
 --- /dev/null
 +++ b/simulator/src/worklet/kimi_k3_mla_local.rs
-@@ -0,0 +1,1001 @@
+@@ -0,0 +1,1027 @@
 +//! Kimi-K3 rank-local absorbed MLA worklet for the SGLang decode path.
 +
 +use crate::op::Op;
@@ -76534,6 +76750,7 @@ index 00000000..c8224d14
 +    q_len: u32,
 +    prefix_len: u32,
 +    prefix_chunk_tokens: u32,
++    num_prefix_chunks: u32,
 +}
 +
 +fn prefill_summary(input: &KimiK3MlaLocalWorkletInput) -> Option<PrefillSummary> {
@@ -76563,12 +76780,18 @@ index 00000000..c8224d14
 +    } else {
 +        prefix_len.min(MAX_KV_CHUNK_CAPACITY / batch_size.max(1))
 +    };
++    let num_prefix_chunks = if prefix_chunk_tokens == 0 {
++        0
++    } else {
++        (prefix_len + prefix_chunk_tokens - 1) / prefix_chunk_tokens
++    };
 +    Some(PrefillSummary {
 +        batch_size,
 +        num_tokens,
 +        q_len,
 +        prefix_len,
 +        prefix_chunk_tokens,
++        num_prefix_chunks,
 +    })
 +}
 +
@@ -76609,6 +76832,8 @@ index 00000000..c8224d14
 +                batch_size: 0,
 +                q_len: 0,
 +                kv_len: 0,
++                prefix_len: 0,
++                num_prefix_chunks: 0,
 +            },
 +            true,
 +            evaluator,
@@ -76619,6 +76844,8 @@ index 00000000..c8224d14
 +                batch_size: 0,
 +                q_len: 0,
 +                kv_len: 0,
++                prefix_len: 0,
++                num_prefix_chunks: 0,
 +            },
 +            true,
 +            evaluator,
@@ -76656,6 +76883,8 @@ index 00000000..c8224d14
 +            batch_size: summary.batch_size,
 +            q_len: summary.q_len,
 +            kv_len: summary.prefix_chunk_tokens,
++            prefix_len: summary.prefix_len,
++            num_prefix_chunks: summary.num_prefix_chunks,
 +        },
 +        summary.prefix_chunk_tokens == 0,
 +        evaluator,
@@ -76666,6 +76895,8 @@ index 00000000..c8224d14
 +            batch_size: summary.batch_size,
 +            q_len: summary.q_len,
 +            kv_len: summary.q_len,
++            prefix_len: 0,
++            num_prefix_chunks: 0,
 +        },
 +        false,
 +        evaluator,
@@ -76817,6 +77048,16 @@ index 00000000..c8224d14
 +        assert_eq!(summary.num_tokens, 16_384);
 +        assert_eq!(summary.q_len, 16_384);
 +        assert_eq!(summary.prefix_chunk_tokens, 49_152);
++        assert_eq!(summary.num_prefix_chunks, 1);
++
++        let input = KimiK3MlaLocalWorkletInput {
++            batch_tokens: 16_384,
++            decode_kv_lens: Vec::new(),
++            prefill_chunk_pairs: vec![(245_760, 16_384)],
++        };
++        let summary = prefill_summary(&input).unwrap();
++        assert_eq!(summary.prefix_chunk_tokens, 131_072);
++        assert_eq!(summary.num_prefix_chunks, 2);
 +
 +        let input = KimiK3MlaLocalWorkletInput {
 +            batch_tokens: 16_384,
@@ -76828,6 +77069,7 @@ index 00000000..c8224d14
 +        assert_eq!(summary.num_tokens, 16_384);
 +        assert_eq!(summary.q_len, 4_096);
 +        assert_eq!(summary.prefix_chunk_tokens, 0);
++        assert_eq!(summary.num_prefix_chunks, 0);
 +    }
 +}
 diff --git a/simulator/src/worklet/kimi_k3_moe_local.rs b/simulator/src/worklet/kimi_k3_moe_local.rs
@@ -85209,10 +85451,10 @@ index 4d7ef96d..5b2cfd36 100644
  
 diff --git a/tests/test_kimi_k3_profiling.py b/tests/test_kimi_k3_profiling.py
 new file mode 100644
-index 00000000..c152dfaa
+index 00000000..5b0bcc39
 --- /dev/null
 +++ b/tests/test_kimi_k3_profiling.py
-@@ -0,0 +1,384 @@
+@@ -0,0 +1,402 @@
 +"""CPU-side registry, schema, and semantic checks for Kimi-K3 profiling."""
 +
 +from dataclasses import fields
@@ -85268,6 +85510,7 @@ index 00000000..c152dfaa
 +def test_k3_argument_field_order_is_the_db_contract():
 +    from profiling.kernels.kda_recurrent_decode import KdaRecurrentDecodeArgs
 +    from profiling.kernels.mla_decode_attention import MlaDecodeAttentionArgs
++    from profiling.kernels.mla_prefill_attention import MlaPrefillAttentionArgs
 +    from profiling.kernels.mxfp4_fused_moe import Mxfp4FusedMoeArgs
 +
 +    assert [field.name for field in fields(KdaRecurrentDecodeArgs)] == [
@@ -85294,6 +85537,13 @@ index 00000000..c152dfaa
 +        "gemm1_alpha",
 +        "gemm1_clamp_limit",
 +        "per_expert_batches",
++    ]
++    assert [field.name for field in fields(MlaPrefillAttentionArgs)][-5:] == [
++        "batch_size",
++        "q_len",
++        "kv_len",
++        "prefix_len",
++        "num_prefix_chunks",
 +    ]
 +
 +
@@ -85363,6 +85613,16 @@ index 00000000..c152dfaa
 +        },
 +    )
 +    assert moe.per_expert_batches[:16] == (16,) * 16
++
++
++def test_mla_prefill_chunk_contract_covers_a_short_remainder():
++    from profiling.runners.attention.kimi_k3_prefill import _prefix_chunk_lengths
++
++    assert _prefix_chunk_lengths(131_072, 131_072, 1) == (131_072,)
++    assert _prefix_chunk_lengths(245_760, 131_072, 2) == (131_072, 114_688)
++    assert _prefix_chunk_lengths(0, 16_384, 0) == (16_384,)
++    with pytest.raises(ValueError, match="num_prefix_chunks"):
++        _prefix_chunk_lengths(245_760, 131_072, 1)
 +
 +
 +@pytest.mark.parametrize(

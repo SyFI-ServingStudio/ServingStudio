@@ -94,6 +94,13 @@ NOTES = {
     ("mla_lcprefill_claude", 1): "ACCEPTED (Claude): 16B-align the prefix-chunk cum_seqlen_k row so the accepted CuTe-DSL prefix FMHA actually engages at long prefixes (it silently fell back to trtllm-gen; prefix FMHA = 66% of the step) + empirical KV-split policy (S=4 <=6 waves else S=2): 25196.8->21998.0 @16k/pf245760 (-12.7%), -7.5/-7.4/-4.4% on the others, bit-exact",
     ("mla_lcprefill_claude", 2): "ACCEPTED (Claude): prefix-FMHA softmax: 40 of 128 exp2 per tile emulated on the FMA pipe with a degree-2 polynomial (MUFU relief): 22001.9->20967.8 @16k/pf245760 (-4.7%), -5.7/-2.1/-3.1%, bit-exact",
     ("mla_lcprefill_claude", 3): "FAIL correctness (Claude): +1.4% @16k/pf245760 but rel 0.30 / row-wise rule failed at 32k/pf229376 (rel 0.25 on the primary, passed by rows) -- a numerics-changing prefix-attention change; rejected",
+    # follow-ups 2026-09-27 (rounds 4-6): B12c-corrected long-context prefill oracles (8807/8808) from MLA r6 / KDA r4 on
+    ("mla_lcprefill_claude", 4): "null (Claude): -0.4% @16k/pf245760, correct; agent hit its budget on one hypothesis",
+    ("mla_lcprefill_claude", 5): "ACCEPTED (Claude): fp8 packing of the prefix-chunk kv_b_proj output fused into the GEMM epilogue (mla_kv_b_proj_pack_fp8 + dense_gemm_sm100_fp8_via_bf16_epilogue): 20837.8->20609.2 @16k/pf245760 (-1.1%), -0.7% @16k/pf131072, bit-exact; a single-launch prefix FMHA was tried and reverted (neutral)",
+    ("mla_lcprefill_claude", 6): "ACCEPTED (Claude, corrected oracle 8808): causal in-chunk attention pass on the attention alt stream overlapping the prefix passes, joined before merge_state: 20791.6->20452.7 @16k/pf245760 (-1.6%), -0.8% @16k/pf131072, bit-exact; cumulative 27.69->20.45 ms (-26.1%)",
+    ("kda_lcprefill_claude", 4): "ACCEPTED (Claude, 60-min budget, corrected oracle 8807): warp-specialized 4-stage kda_chunk_h (from the rejected r3 tree) + pinned BK32/nw1 config for the inter-chunk solve: 8264.9->8133.9 @16k/pf245760 (-1.6%), -3.5% @16k/pf131072, rel 0.007; cumulative 9.03->8.13 ms (-10.0%)",
+    ("kda_lcprefill_claude", 5): "FAIL below 3-sigma (Claude): -1.2% @16k/pf245760, -3.2% @16k/pf131072, correct (rel 0.017); 15-rep re-judge: -1.1% vs a 3.09% floor (sigma 85 us, noisy window) -> still unaccepted; a real ~1-3% effect",
+    ("kda_lcprefill_claude", 6): "FAIL below 3-sigma (Claude): fused conv+l2norm and chunk_intra CUDA kernels (kda_conv_l2norm.cuh, kda_chunk_intra.cuh): -1.2% @16k/pf245760, -3.0% @16k/pf131072, -2.5% @32k/pf131072; passes the row-wise rule (rows over tol within budget) but max_rel 0.30 -> a numerics-changing rewrite; not accepted",
 }
 CAMPAIGN1 = {("kda", k) for k in (4, 5, 6, 7)} | {("mla", k) for k in (4, 5, 6, 7)}
 

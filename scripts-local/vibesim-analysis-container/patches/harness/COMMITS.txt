@@ -135,3 +135,6 @@ a5a097a K3 Campaign 6 write-up (shape-matched decode + long-context prefill, slu
 1e72984 K3: consolidated write-up of every successful technique across all decode and prefill shapes (technique x shape matrix, mechanisms, patch paths, dead ends, transfer rules)
 ab70a30 K3 follow-up #1: long-context prefill oracles (8807/8808) baked from new VibeSim presets; lcprefill cases point at them; B12c Codex task for prefill prediction fidelity (prefix scaling, GEMM/MoE rows)
 c8be24a K3 follow-up #2: re-judge exact-but-below-3-sigma rounds with 15 reps (slurm)
+6ceecbf K3 follow-up #2 results: KDA b512 r2 accepted on the 15-rep re-judge (+1.0% @512, promoted; patch kda_b512_02), KDA lcprefill r3 stays below the floor; KB notes
+a9c88f3 K3: rebake script for the B12c-corrected prefill oracles
+38581bf K3 follow-up #4: driver extension spec for MIXED (prefill chunk + decode) and TARGET_VERIFY steps (sglang v0.5.20 code survey, field tables, guards, plan)

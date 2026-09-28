@@ -41,13 +41,16 @@ each patch below is `<base>/<relative>`; every chain is validated to reproduce i
 | D4 32×8k | 261.6 → 226.5 | −13.4% | 263.6 → 247.2 | −6.2% | 0, 1, 2 |
 | D5 1×8k | 136.6 → 105.7 | −22.6% | 146.9 → 128.4 | −12.6% | 0, 1, 2 |
 | D6 256×8k | 506.4 → 482.8 (decode tree) | −4.7% | 661.0 → 638.5 (decode tree) | −3.4% | 0 |
-| D7 512×8k | 675.2 → 600.4 (b512 Claude) | −11.1% (≈9 pts autotune harness gap) | 976.3 → 877.8 (b512 Claude) | −10.1% (≈6.4 pts gap) | 0, 1, 2 |
+| D7 512×8k | 675.2 → 593.5 (b512 Claude, r2 accepted at 15 reps) | −12.1% (≈9 pts autotune harness gap) | 976.3 → 877.8 (b512 Claude) | −10.1% (≈6.4 pts gap) | 0, 1, 2 (r1 tree); r2 at 15 reps seed 0 |
 | P1 16k first chunk | 9.07 → 8.56 ms | −5.6% | 12.13 → 11.57 (r1) | −4.0% | 0, 1, 2 |
 | P2 16k @ 48k | 8.87 → ~8.3 | −6.3% | 12.13 → 11.23 | −7.4% | 0, 1, 2 |
-| P4 16k @ 128k | 9.20 → 8.20 | −10.9% | 18.37 → 15.39 | −16.2% | 0, 1, 2 |
-| P5 32k @ 128k | 18.07 → 16.32 | −9.7% | 35.09 → 30.90 | −11.9% | 0, 1, 2 |
-| P6 16k @ 245k | 9.03 → 8.19 | **−9.3%** | 27.69 → 20.97 | **−24.3%** | 0, 1, 2 |
-| P7 32k @ 229k | 17.94 → 16.31 | −9.1% | 48.36 → 39.89 | −17.5% | 0, 1, 2 |
+| P4 16k @ 128k | 9.20 → 8.14 | −11.5% | 18.37 → 14.99 | −18.4% | 0, 1, 2 |
+| P5 32k @ 128k | 18.07 → 16.14 | −10.7% | 35.09 → 30.33 | −13.6% | 0, 1, 2 |
+| P6 16k @ 245k | 9.03 → 8.13 | **−10.0%** | 27.69 → 20.45 | **−26.1%** | 0, 1, 2 |
+| P7 32k @ 229k | 17.94 → 16.15 | −10.0% | 48.36 → 39.95 | −17.4% | 0, 1, 2 |
+
+(P4–P7 updated 2026-09-27 after the follow-up rounds 4–6 with the B12c-corrected long-context oracles; see
+`K3_CAMPAIGN6_SHAPES_LCPREFILL.md` §9.)
 
 The D1–D5 trees are the shape-matched campaign's (`iter_opt_eval_k3_{kda,mla}_shapes_claude/best_tree`), which
 contain the decode levers + the b512 Claude levers + the shape rounds; D7 is the b512 Claude tree; P1–P3 the prefill
@@ -90,6 +93,10 @@ Legend: **gain** = judged faster on that shape; ok = engaged, neutral (≤0.5%);
 | T28 | fused SiLU-and-mul for the MoE activation | KDA | | | | | | | | **gain −1.4% / −4.0%** |
 | T29 | route+quant JIT specialised to 112 experts / top-2 (harness-specific) | MLA | gain −0.75% | ok | ok | — | — | ok | | |
 | T30 | one-shot FlashInfer autotune of the MXFP4 MoE tactic (= production warmup; harness gap) | both | ok (0) | ok | ok (0) | | | **gain 6–9 pts @512, 2–3 pts @256** | (flag `--flashinfer-autotune` instead) | (flag) |
+| T31 | fused-decode kernel prologue load hoist + quad-row warp reduction (accepted on the 15-rep re-judge) | KDA | | | ok −0.5% | | | **gain −1.0% @512, −1.1% @256** | — | — |
+| T32 | fp8 packing of the prefix-chunk `kv_b_proj` output fused into the GEMM epilogue | MLA | — | — | — | — | — | — | (not measured) | **gain −1.1% @245k, −0.7% @128k** |
+| T33 | causal in-chunk attention pass on the alt stream, overlapping the prefix passes; join before `merge_state` | MLA | — | — | — | — | — | — | (not measured) | **gain −1.6% @245k, −0.8% @128k** |
+| T34 | warp-specialized 4-stage CUDA h-scan + pinned config for the inter-chunk solve | KDA | — | — | — | — | — | — | (not measured) | **gain −1.6% @245k, −3.5% @128k** |
 
 ## 4. The techniques, by mechanism
 
