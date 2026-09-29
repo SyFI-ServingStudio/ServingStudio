@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#SBATCH --partition=main
+#SBATCH --partition=preemptible
 #SBATCH --nodes=1
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=32
@@ -7,7 +7,7 @@
 #SBATCH --job-name=vibesim-gpu
 #SBATCH --output=%x-%j.out
 # Generic slurm GPU wrapper for VibeSim repro / eval GPU work.
-# Requests ONE GPU on partition `main` (user override for the Kimi-K3 task; preemptible was
+# Requests ONE GPU on partition `preemptible` (2026-09-29 user: yield to other users; earlier `main` because preemptible was
 # stuck on QOSGrpGRES since it can't preempt the long-partition jobs). slurm's cgroup constrains
 # this job to that
 # device. We resolve the allocated GPU by UUID (cgroup-scoped, so `nvidia-smi` only

@@ -25,5 +25,11 @@ if [ "${1:-}" = "--docker" ]; then
   wait $!; rc=$?
   echo "[step] EXIT_RC=$rc"; exit $rc
 fi
-"$@"; rc=$?
+# 2026-09-29 (preemptible partition, PreemptMode=REQUEUE): the judge starts detached `docker run -d` containers that
+# survive the job's SIGTERM and would keep the GPU after a preemption -> remove every container labelled with this job.
+cleanup() { docker ps -aq --filter "label=k3_slurm_job=${SLURM_JOB_ID:-none}" | xargs -r docker rm -f >/dev/null 2>&1; }
+trap 'echo "[step] signal -> killing $child, removing job containers"; kill "$child" 2>/dev/null; cleanup; exit 143' TERM INT
+"$@" & child=$!
+wait "$child"; rc=$?
+cleanup
 echo "[step] EXIT_RC=$rc"; exit $rc

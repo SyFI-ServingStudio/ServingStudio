@@ -13,7 +13,7 @@ O="$HERE/iter_opt_eval_k3_kda_mixed_claude"
 if grep -q "non-compiling" "$O/trial_1_verdict.json" 2>/dev/null && [ -d "$O/trial_1_tree" ]; then
   echo "==== $(date +%F_%T) re-judging KDA mixed r1 (false non-compiling verdict from the queue timeout)"
   mv "$O/trial_1_verdict.json" "$O/trial_1_verdict.queue_timeout.json"
-  job="$(sbatch --parsable --partition=main --job-name=k3j_kda_mixed_r1_rejudge --output="$O/trial_1_judge_slurm.rejudge.out" \
+  job="$(sbatch --parsable --partition="${K3_SLURM_PARTITION:-preemptible}" --job-name=k3j_kda_mixed_r1_rejudge --output="$O/trial_1_judge_slurm.rejudge.out" \
         "$HERE/slurm_gpu.sh" "$HERE/k3_slurm_step.sh" python3 "$HERE/judge_k3.py" --agent-container rejudge --config "$HERE/issue_k3_kda_mixed_claude.json" \
         --golden-dir /raid/yilegu/eval_goldens --out "$O/trial_1_verdict.json" --tree-dir "$O/trial_1_tree" --pristine-dir "$O/pristine_tree" \
         --baseline-tree "$O/best_tree" --min-improvement 0 | cut -d';' -f1)"

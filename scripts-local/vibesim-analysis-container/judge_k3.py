@@ -102,7 +102,9 @@ class Container:
     def __init__(self, cfg, name, tree_mount=None):
         self.cfg, self.name = cfg, name
         gpu = os.environ.get("DOCKER_GPU_ARG") or f'"device={cfg.get("gpu", "3")}"'
+        # label -> k3_slurm_step.sh removes this container when slurm preempts / cancels the job
         argv = ["docker", "run", "-d", "--name", name, "--gpus", gpu,
+                "--label", f"k3_slurm_job={os.environ.get('SLURM_JOB_ID', 'none')}",
                 "--shm-size", cfg.get("shm_size", "32g"),
                 "-e", "CUDA_VISIBLE_DEVICES=0", "-e", "HF_HUB_OFFLINE=1",
                 "-e", "SGLANG_OPT_FUSED_KDA_VERIFY=0", "-e", "TOKENIZERS_PARALLELISM=false",

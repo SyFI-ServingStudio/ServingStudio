@@ -10,7 +10,7 @@
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SUFFIX="$1"; K0="$2"; N="$3"; CANDS="${CANDIDATES:-}"
-export AGENT_TIMEOUT="${AGENT_TIMEOUT:-2700}" K3_SLURM_PARTITION="${K3_SLURM_PARTITION:-main}"
+export AGENT_TIMEOUT="${AGENT_TIMEOUT:-2700}" K3_SLURM_PARTITION="${K3_SLURM_PARTITION:-preemptible}"
 GOLDEN_DIR=/raid/yilegu/eval_goldens
 
 slurm_judge () { # $1 name $2 out $3... judge args

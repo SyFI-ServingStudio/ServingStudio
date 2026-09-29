@@ -15,7 +15,7 @@ MAIN=/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/main
 PRESETS=(presets/predict_kimi_k3_b200_rank1_layer_kda_lcprefill.json presets/predict_kimi_k3_b200_rank1_layer_mla_lcprefill.json)
 
 echo "==== $(date +%F_%T) 1. JIT fill + predict (slurm main)"
-job="$(sbatch --parsable --partition=main --job-name=k3_lcprefill_fill --output="$HERE/k3_lcprefill_fill.slurm.out" \
+job="$(sbatch --parsable --partition="${K3_SLURM_PARTITION:-preemptible}" --job-name=k3_lcprefill_fill --output="$HERE/k3_lcprefill_fill.slurm.out" \
        "$HERE/slurm_gpu.sh" "$HERE/k3_slurm_step.sh" "$HERE/run_k3_jit_fill.sh" "${PRESETS[@]}" | cut -d';' -f1)"
 echo "slurm job $job -> $HERE/k3_lcprefill_fill.slurm.out"
 while squeue -h -j "$job" -o %T 2>/dev/null | grep -q .; do sleep 60; done; sleep 2

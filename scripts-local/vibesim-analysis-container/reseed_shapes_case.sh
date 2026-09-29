@@ -6,7 +6,7 @@
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"; c="$1"
 OUT="$HERE/iter_opt_eval_k3_${c}_shapes_claude"; GOLDEN_DIR=/raid/yilegu/eval_goldens
-K3_SLURM_PARTITION="${K3_SLURM_PARTITION:-main}"
+K3_SLURM_PARTITION="${K3_SLURM_PARTITION:-preemptible}"
 [ -d "$OUT/best_tree" ] && { echo "best_tree already present in $OUT"; exit 0; }
 for cand in "$HERE/iter_opt_eval_k3_${c}_b512_claude/best_tree" "$HERE/iter_opt_eval_k3_${c}/best_tree"; do
   [ -d "$cand" ] || continue

@@ -73,7 +73,7 @@ TASK_TMPL="${TASK_TMPL:-$HERE/$CFG_TMPL}"; [ -f "$TASK_TMPL" ] || TASK_TMPL="$HE
 GPU="${DOCKER_GPU_ARG:-\"device=$GPU_DEV\"}"
 SITE="/opt/venv/lib/python3.12/site-packages/$SITE_FW"
 OUT="$HERE/iter_opt_eval_${CASE}"; mkdir -p "$OUT" "$FICACHE" "$GOLDEN_DIR"
-K3_GPU_MODE="${K3_GPU_MODE:-direct}"; K3_SLURM_PARTITION="${K3_SLURM_PARTITION:-main}"
+K3_GPU_MODE="${K3_GPU_MODE:-direct}"; K3_SLURM_PARTITION="${K3_SLURM_PARTITION:-preemptible}"
 BEFORE_IMG="$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('before_image',''))" "$CONFIG")"
 
 # submit a command as one slurm GPU job (slurm_gpu.sh -> k3_slurm_step.sh guards against foreign

@@ -18,7 +18,7 @@ PY
 TREE="$OUT/trial_${K}_tree_judged"; BASE="$OUT/trial_${BASE_K}_tree_judged"
 [ -d "$TREE" ] && [ -d "$BASE" ] || { echo "!! missing $TREE or $BASE"; exit 1; }
 rm -rf "$OUT/rejudge15_trial_${K}_tree" "$OUT/rejudge15_trial_${K}_tree_judged"; cp -a "$TREE" "$OUT/rejudge15_trial_${K}_tree"
-job="$(sbatch --parsable --partition=main --job-name="k3_rejudge_${CASE}_${K}" --output="$OUT/rejudge15_trial_${K}.slurm.out" \
+job="$(sbatch --parsable --partition="${K3_SLURM_PARTITION:-preemptible}" --job-name="k3_rejudge_${CASE}_${K}" --output="$OUT/rejudge15_trial_${K}.slurm.out" \
       "$HERE/slurm_gpu.sh" "$HERE/k3_slurm_step.sh" python3 "$HERE/judge_k3.py" \
       --agent-container "rejudge15_${CASE}_${K}" --config "$CFG" --golden-dir /raid/yilegu/eval_goldens \
       --out "$OUT/rejudge15_trial_${K}_verdict.json" --tree-dir "$OUT/rejudge15_trial_${K}_tree" \

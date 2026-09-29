@@ -13,7 +13,7 @@ would also double-book GPUs).
 
 Usage: k3_gpu_broker.py --dir D --tree HOST_TREE --edit-path /sgl-workspace/sglang/python/sglang
          --driver HOST_DRIVER --opt-run HOST_DIR --jit-cache HOST_DIR --image lmsysorg/sglang:v0.5.20
-         [--mount host:cont[:ro] ...] [--shm 32g] [--partition main] [--job-prefix k3m_case]
+         [--mount host:cont[:ro] ...] [--shm 32g] [--partition preemptible] [--job-prefix k3m_case]
 Stops when <dir>/STOP exists.
 """
 import argparse, json, os, pathlib, shlex, subprocess, sys, time
@@ -71,7 +71,7 @@ def main():
     ap.add_argument("--driver", required=True); ap.add_argument("--opt-run", required=True)
     ap.add_argument("--jit-cache", required=True); ap.add_argument("--image", required=True)
     ap.add_argument("--mount", action="append", default=[]); ap.add_argument("--shm", default="32g")
-    ap.add_argument("--partition", default="main"); ap.add_argument("--job-prefix", default="k3m")
+    ap.add_argument("--partition", default="preemptible"); ap.add_argument("--job-prefix", default="k3m")
     ap.add_argument("--flashinfer-cache", default="/raid/yilegu/flashinfer_cache")
     a = ap.parse_args()
     d = pathlib.Path(a.dir); req_d, res_d = d / "req", d / "res"
