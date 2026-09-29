@@ -3,6 +3,9 @@
 *Written 2026-09-28 for the intern taking over. Everything referenced here is committed on the branches in §1;
 nothing in this document depends on the author's session.*
 
+> **Merge from VibeOptimizer branch `kimi-k3-loop`, folder `kimi-k3-loop/`** (a self-contained snapshot of this
+> directory's loop files, 2026-09-29). This workspace copy keeps the full history and the one-off campaign scripts.
+
 ## 0. What the K3 loop is, in one paragraph
 
 An open-ended optimization loop for ONE Kimi-K3 decoder layer (KDA linear-attention layers and MLA full-attention
