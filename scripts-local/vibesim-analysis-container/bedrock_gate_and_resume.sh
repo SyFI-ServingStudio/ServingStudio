@@ -52,4 +52,6 @@ while :; do
   echo "$(date +%F_%T) no schedulable GPU (all held) -> retry in 5 min"; sleep 300
 done
 echo "$(date +%F_%T) Bedrock + GPU available -> resuming"
+# 2026-09-29: K3_GATE_ONLY=1 -> return to the caller (continue_decode_prefill.sh gates every round itself)
+[ "${K3_GATE_ONLY:-0}" = 1 ] && exit 0
 exec "$HERE/resume_mixed_verify.sh"
