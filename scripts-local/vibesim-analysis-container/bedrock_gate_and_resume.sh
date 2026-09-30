@@ -35,7 +35,7 @@ echo "$(date +%F_%T) Bedrock healthy (${NEED_OK:-5} consecutive probes)"
 # 5-second sbatch on partition main must start within GPU_PROBE_WAIT s; otherwise cancel it, wait, re-check Bedrock once.
 gpu_probe() {
   local j st t=0
-  j="$(sbatch --parsable --partition="${K3_SLURM_PARTITION:-preemptible}" --job-name=k3_gpu_probe --output=/dev/null --wrap "sleep 5" | cut -d';' -f1)"
+  j="$(sbatch --parsable --partition="${K3_SLURM_PARTITION:-preemptible}" --gres=gpu:1 --job-name=k3_gpu_probe --output=/dev/null --wrap "sleep 5" | cut -d';' -f1)"
   while [ "$t" -lt "${GPU_PROBE_WAIT:-90}" ]; do
     st="$(squeue -h -j "$j" -o %T 2>/dev/null)"
     case "$st" in RUNNING|COMPLETING|"") return 0 ;; esac
