@@ -81,6 +81,12 @@ running commands directly; its paths remain valid after `cd`.
 permission errors, check that `UV_CACHE_DIR` points to the writable workspace
 cache; do not use `sudo uv`. Cargo, npm and model caches retain their own settings.
 
+Before moving a finished worktree into `old-wt/`, run `just clean-worktree wt-x`
+to see the regenerable bulk it would drop, then `just clean-worktree wt-x --apply`.
+It removes Cargo `target/` and, under `logs/`, simulator traces, plots, Analyzer
+payloads and nsys SQLite exports that have their `.nsys-rep`. Captures, parsed
+captures, parquet, presets and records stay; `.worktree-clean.tsv` lists what went.
+
 ## Build
 
 Run long builds in a named tmux session, with a log:

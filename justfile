@@ -51,6 +51,10 @@ check-agent-auth:
 check-gpu: check-docker
     @docker run --rm --gpus all nvidia/cuda:12.8.1-base-ubuntu24.04 nvidia-smi
 
+# Before retiring worktrees to old-wt/: drop regenerable bulk (target/, log traces/plots/payloads). Add --apply to delete.
+clean-worktree +args:
+    @python3 "{{workspace_root}}/scripts/clean-worktree.py" {{args}}
+
 # Materialize recorded component commits without advancing branch tips.
 pull:
     git pull --ff-only

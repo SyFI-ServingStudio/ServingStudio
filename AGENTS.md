@@ -23,6 +23,12 @@ Read the relevant README and local agent instructions before editing.
 - Maintain root `worktree.md` with each worktree's path, repository, branch,
   purpose, and current status; update it when creating, moving, or retiring a
   worktree, or when its task status changes.
+- Retire a finished worktree by archiving it under `old-wt/`; never use
+  `git worktree remove`. First fold any uncommitted `profiling/profile.db` rows
+  into the shared DB (`profiling/db/merge.py`), then run `just clean-worktree wt-x`
+  to review the regenerable bulk and `just clean-worktree wt-x --apply` to drop it.
+  When submodules make `git worktree move` refuse, `mv` the tree, run
+  `git worktree repair`, and fix each submodule's gitdir and `core.worktree`.
 - Run long-running jobs in named `tmux` sessions. Record the session name,
   working directory, command, and log path in the worktree's `progress.md`.
 - Follow each component's environment and test instructions; use `uv` in
