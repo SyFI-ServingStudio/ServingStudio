@@ -1,0 +1,380 @@
+[
+  {
+    "name": "absl-py",
+    "path": "wheelhouse/absl_py-2.5.0-py3-none-any.whl",
+    "sha256": "0f17b89f2a4eaaedc4f28c622998aa690564b3012a396a4ffad0821007fe03ba",
+    "version": "2.5.0"
+  },
+  {
+    "name": "blobfile",
+    "path": "wheelhouse/blobfile-3.3.0-py3-none-any.whl",
+    "sha256": "b87b00a0448c6111683d7eef011d02c03e808bef0928149fde2b5fa3a22ba753",
+    "version": "3.3.0"
+  },
+  {
+    "name": "boto3",
+    "path": "wheelhouse/boto3-1.43.109-py3-none-any.whl",
+    "sha256": "703a81baed186d31e27cf50065d25a9faeb704f009e7c56b0f002ca52a328896",
+    "version": "1.43.109"
+  },
+  {
+    "name": "botocore",
+    "path": "wheelhouse/botocore-1.43.109-py3-none-any.whl",
+    "sha256": "cd00edff465264fb448e36acc9ee29a828f738fff3746270b3f685a19194a5a6",
+    "version": "1.43.109"
+  },
+  {
+    "name": "certifi",
+    "path": "wheelhouse/certifi-2026.7.22-py3-none-any.whl",
+    "sha256": "62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775",
+    "version": "2026.7.22"
+  },
+  {
+    "name": "charset-normalizer",
+    "path": "wheelhouse/charset_normalizer-3.5.2-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl",
+    "sha256": "3d31298449090ab8d47b7b1b2a555ff73cac7ed438a08b7ac160980c7ebed649",
+    "version": "3.5.2"
+  },
+  {
+    "name": "ec2-metadata",
+    "path": "wheelhouse/ec2_metadata-2.17.0-py3-none-any.whl",
+    "sha256": "a696a899cb8ee1f0101eb9ec7bc2050e1ffc8574ee4cd748a52d9c748fb19d9e",
+    "version": "2.17.0"
+  },
+  {
+    "name": "filelock",
+    "path": "wheelhouse/filelock-4.0.12-py3-none-any.whl",
+    "sha256": "5f17ee83ecee8a6f3e389c75822fb70a1c2f0506b99438a6dffa1d56793588c8",
+    "version": "4.0.12"
+  },
+  {
+    "name": "fsspec",
+    "path": "wheelhouse/fsspec-2026.9.0-py3-none-any.whl",
+    "sha256": "8dd6e646e99ea382bd85f97a45e6b526a442d79423a7dc673f1e2756d05fcb5f",
+    "version": "2026.9.0"
+  },
+  {
+    "name": "hf-xet",
+    "path": "wheelhouse/hf_xet-1.7.0-cp38-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+    "sha256": "2814a6e999d13464c4d679b788cc5d784eb5a4edfc638a31f10e9a11ab531ef8",
+    "version": "1.7.0"
+  },
+  {
+    "name": "huggingface-hub",
+    "path": "wheelhouse/huggingface_hub-0.36.2-py3-none-any.whl",
+    "sha256": "48f0c8eac16145dfce371e9d2d7772854a4f591bcb56c9cf548accf531d54270",
+    "version": "0.36.2"
+  },
+  {
+    "name": "idna",
+    "path": "wheelhouse/idna-3.20-py3-none-any.whl",
+    "sha256": "ab7ae7122974553370f0bdb919e1a960b2cd1bc1ef0276416d896db81c14582c",
+    "version": "3.20"
+  },
+  {
+    "name": "islpy",
+    "path": "wheelhouse/islpy-2026.1-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
+    "sha256": "4992d09fff3c4c326563940c33f4436b2059e6bdabbfb5fa63ec97e9a17eae3b",
+    "version": "2026.1"
+  },
+  {
+    "name": "jinja2",
+    "path": "wheelhouse/jinja2-3.1.6-py3-none-any.whl",
+    "sha256": "85ece4451f492d0c13c5dd7c13a64681a86afae63a5f347908daf103ce6d2f67",
+    "version": "3.1.6"
+  },
+  {
+    "name": "jmespath",
+    "path": "wheelhouse/jmespath-1.1.0-py3-none-any.whl",
+    "sha256": "a5663118de4908c91729bea0acadca56526eb2698e83de10cd116ae0f4e97c64",
+    "version": "1.1.0"
+  },
+  {
+    "name": "libneuronxla",
+    "path": "wheelhouse/libneuronxla-2.2.17544.0+fb9962bf-py3-none-linux_x86_64.whl",
+    "sha256": "981a1919fdc3174f782c1b5501a4f4f74fc18853b5d800718c530ed221e48e0e",
+    "version": "2.2.17544.0+fb9962bf"
+  },
+  {
+    "name": "lockfile",
+    "path": "wheelhouse/lockfile-0.12.2-py2.py3-none-any.whl",
+    "sha256": "6c3cb24f344923d30b2785d5ad75182c8ea7ac1b6171b08657258ec7429d50fa",
+    "version": "0.12.2"
+  },
+  {
+    "name": "lxml",
+    "path": "wheelhouse/lxml-6.1.3-cp312-cp312-manylinux_2_26_x86_64.manylinux_2_28_x86_64.whl",
+    "sha256": "909f4e927bb051f7740d6367285fc60cdcfdaf0258c2dba4ff5ba7eadadc250c",
+    "version": "6.1.3"
+  },
+  {
+    "name": "markupsafe",
+    "path": "wheelhouse/markupsafe-3.0.4-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl",
+    "sha256": "8e124f974786f831d6043728e38296969d3579db8896fe004682f5758e613581",
+    "version": "3.0.4"
+  },
+  {
+    "name": "ml-dtypes",
+    "path": "wheelhouse/ml_dtypes-0.5.4-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
+    "sha256": "9ad459e99793fa6e13bd5b7e6792c8f9190b4e5a1b45c63aba14a4d0a7f1d5ff",
+    "version": "0.5.4"
+  },
+  {
+    "name": "mpmath",
+    "path": "wheelhouse/mpmath-1.3.0-py3-none-any.whl",
+    "sha256": "a0b2b9fe80bbcd81a6647ff13108738cfb482d481d826cc0e02f5b35e5c88d2c",
+    "version": "1.3.0"
+  },
+  {
+    "name": "networkx",
+    "path": "wheelhouse/networkx-2.8.8-py3-none-any.whl",
+    "sha256": "e435dfa75b1d7195c7b8378c3859f0445cd88c6b0375c181ed66823a9ceb7524",
+    "version": "2.8.8"
+  },
+  {
+    "name": "neuronx-cc",
+    "path": "wheelhouse/neuronx_cc-2.27.5334.0+f702b353-cp312-cp312-linux_x86_64.whl",
+    "sha256": "7c40ab2a653484a7343c66e288bb7325775f2202226c07c9e71ee4e1355cedda",
+    "version": "2.27.5334.0+f702b353"
+  },
+  {
+    "name": "neuronx-distributed",
+    "path": "wheelhouse/neuronx_distributed-0.19.28492+435aae2b-py3-none-linux_x86_64.whl",
+    "sha256": "ee3bbc4c28a8830e3d5201d41d976f19b53e4ac2379cf505fa411b95d182e49a",
+    "version": "0.19.28492+435aae2b"
+  },
+  {
+    "name": "neuronx-distributed-inference",
+    "path": "wheelhouse/neuronx_distributed_inference-0.9.0+4bcdc54b.dev-py3-none-any.whl",
+    "sha256": "1d564e8249d741fe0556f50568e08f81282a600c0c95a1d2a746cb137f6c0681",
+    "version": "0.9.0+4bcdc54b.dev"
+  },
+  {
+    "name": "nki",
+    "path": "wheelhouse/nki-0.6.0+31049202112.g85070674-cp312-cp312-linux_x86_64.whl",
+    "sha256": "6b16349fa07d755082ec0960d20efb2dfa80391dc74594d58fad456e8c0f5012",
+    "version": "0.6.0+31049202112.g85070674"
+  },
+  {
+    "name": "nki-library",
+    "path": "wheelhouse/nki_library-0.0.2-py3-none-any.whl",
+    "sha256": "20b4e1c8e6e3b48ca4d5e3970b345f938c787c0c2bff542beb947a6087a80012",
+    "version": "0.0.2"
+  },
+  {
+    "name": "numpy",
+    "path": "wheelhouse/numpy-2.2.6-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+    "sha256": "fd83c01228a688733f1ded5201c678f0c53ecc1006ffbc404db9f7a899ac6249",
+    "version": "2.2.6"
+  },
+  {
+    "name": "packaging",
+    "path": "wheelhouse/packaging-26.3-py3-none-any.whl",
+    "sha256": "d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c",
+    "version": "26.3"
+  },
+  {
+    "name": "pgzip",
+    "path": "wheelhouse/pgzip-0.4.0-py3-none-any.whl",
+    "sha256": "41e44c03a9f1bbbd390dd6b6e37a11484113f8c159a049fa81cd8a9ddde82a21",
+    "version": "0.4.0"
+  },
+  {
+    "name": "pillow",
+    "path": "wheelhouse/pillow-12.3.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
+    "sha256": "78cb2c6865a35ab8ff8b75fd122f6033b92a62c82801110e48ddd6c936a45d91",
+    "version": "12.3.0"
+  },
+  {
+    "name": "protobuf",
+    "path": "wheelhouse/protobuf-7.36.2-cp310-abi3-manylinux2014_x86_64.whl",
+    "sha256": "89f23aa53c24553a2416fd4fd1ec06f74fa42b14b546d8883128813f775bbfd2",
+    "version": "7.36.2"
+  },
+  {
+    "name": "psutil",
+    "path": "wheelhouse/psutil-7.2.2-cp36-abi3-manylinux2010_x86_64.manylinux_2_12_x86_64.manylinux_2_28_x86_64.whl",
+    "sha256": "076a2d2f923fd4821644f5ba89f059523da90dc9014e85f8e45a5774ca5bc6f9",
+    "version": "7.2.2"
+  },
+  {
+    "name": "pycryptodomex",
+    "path": "wheelhouse/pycryptodomex-3.24.0-cp37-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+    "sha256": "556e063b52f338bd924fe5c40692cc1f50cb0453bd1d6580b7ffff2eade1a894",
+    "version": "3.24.0"
+  },
+  {
+    "name": "python-daemon",
+    "path": "wheelhouse/python_daemon-3.1.2-py3-none-any.whl",
+    "sha256": "b906833cef63502994ad48e2eab213259ed9bb18d54fa8774dcba2ff7864cec6",
+    "version": "3.1.2"
+  },
+  {
+    "name": "python-dateutil",
+    "path": "wheelhouse/python_dateutil-2.9.0.post0-py2.py3-none-any.whl",
+    "sha256": "a8b2bc7bffae282281c8140a97d3aa9c14da0b136dfe83f850eea9a5f7470427",
+    "version": "2.9.0.post0"
+  },
+  {
+    "name": "pyyaml",
+    "path": "wheelhouse/pyyaml-6.0.3-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl",
+    "sha256": "ba1cc08a7ccde2d2ec775841541641e4548226580ab850948cbfda66a1befcdc",
+    "version": "6.0.3"
+  },
+  {
+    "name": "regex",
+    "path": "wheelhouse/regex-2026.9.29-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl",
+    "sha256": "39ab5894d971f9ac68baa6eca5c50387db579cfcacf36ae8df3feceb1815e6d0",
+    "version": "2026.9.29"
+  },
+  {
+    "name": "requests",
+    "path": "wheelhouse/requests-2.34.2-py3-none-any.whl",
+    "sha256": "2a0d60c172f83ac6ab31e4554906c0f3b3588d37b5cb939b1c061f4907e278e0",
+    "version": "2.34.2"
+  },
+  {
+    "name": "requests-unixsocket",
+    "path": "wheelhouse/requests_unixsocket-0.4.1-py3-none-any.whl",
+    "sha256": "60c4942e9dbecc2f64d611039fb1dfc25da382083c6434ac0316dca3ff908f4d",
+    "version": "0.4.1"
+  },
+  {
+    "name": "s3transfer",
+    "path": "wheelhouse/s3transfer-0.19.2-py3-none-any.whl",
+    "sha256": "d8168eccca828cbb2cd573675333f3bddd254313a9c42494b84c76b539e8ba25",
+    "version": "0.19.2"
+  },
+  {
+    "name": "safetensors",
+    "path": "wheelhouse/safetensors-0.8.0-cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+    "sha256": "fd6f3f93c9a0a7cc2788ee63fb763353d4bd2e89b0751bc78fcf7dda00bea774",
+    "version": "0.8.0"
+  },
+  {
+    "name": "scipy",
+    "path": "wheelhouse/scipy-1.18.1-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
+    "sha256": "f55fa87b6c612ecd6b058f167c53231b1d14e412efe361d3d6e38b3631c73218",
+    "version": "1.18.1"
+  },
+  {
+    "name": "sentencepiece",
+    "path": "wheelhouse/sentencepiece-0.2.2-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
+    "sha256": "c8a168b040bc61681293f79a949b5d911c8e25086f4260285b8d97ab5f1195da",
+    "version": "0.2.2"
+  },
+  {
+    "name": "setuptools",
+    "path": "wheelhouse/setuptools-84.0.0-py3-none-any.whl",
+    "sha256": "51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670",
+    "version": "84.0.0"
+  },
+  {
+    "name": "six",
+    "path": "wheelhouse/six-1.17.0-py2.py3-none-any.whl",
+    "sha256": "4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274",
+    "version": "1.17.0"
+  },
+  {
+    "name": "sympy",
+    "path": "wheelhouse/sympy-1.14.0-py3-none-any.whl",
+    "sha256": "e091cc3e99d2141a0ba2847328f5479b05d94a6635cb96148ccb3f34671bd8f5",
+    "version": "1.14.0"
+  },
+  {
+    "name": "tenacity",
+    "path": "wheelhouse/tenacity-9.2.1-py3-none-any.whl",
+    "sha256": "9e56f17539296baab7beabb08b92f6ee3d7be92d8be72d763360677c2ad6580e",
+    "version": "9.2.1"
+  },
+  {
+    "name": "tokenizers",
+    "path": "wheelhouse/tokenizers-0.22.2-cp39-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+    "sha256": "369cc9fc8cc10cb24143873a0d95438bb8ee257bb80c71989e3ee290e8d72c67",
+    "version": "0.22.2"
+  },
+  {
+    "name": "torch",
+    "path": "wheelhouse/torch-2.9.0+cpu-cp312-cp312-manylinux_2_28_x86_64.whl",
+    "sha256": "28f6eb31b08180a5c5e98d5bc14eef6909c9f5a1dbff9632c3e02a8773449349",
+    "version": "2.9.0+cpu"
+  },
+  {
+    "name": "torch-neuronx",
+    "path": "wheelhouse/torch_neuronx-2.9.0.2.15.32035+de43f57c-py3-none-any.whl",
+    "sha256": "350841e1790429c9f6541a0a3037c3d8fb5638dbf27dbb1547366e4c369c0998",
+    "version": "2.9.0.2.15.32035+de43f57c"
+  },
+  {
+    "name": "torch-xla",
+    "path": "wheelhouse/torch_xla-2.9.0-cp312-cp312-manylinux_2_28_x86_64.whl",
+    "sha256": "d6b4fbb2704bff08194c170b23dcf6dea562cf3cb53d9951b86667c327b6f5ed",
+    "version": "2.9.0"
+  },
+  {
+    "name": "torchvision",
+    "path": "wheelhouse/torchvision-0.24.0+cpu-cp312-cp312-manylinux_2_28_x86_64.whl",
+    "sha256": "baa37f80155a3b055911d5c2418be1e16b95bb69f671dbb0d07d67504093e23d",
+    "version": "0.24.0+cpu"
+  },
+  {
+    "name": "tqdm",
+    "path": "wheelhouse/tqdm-4.70.1-py3-none-any.whl",
+    "sha256": "c293e525e6fef9c20e8728fd4612df02a0aa31bb5fe91ecd93e123b1b7bffa73",
+    "version": "4.70.1"
+  },
+  {
+    "name": "transformers",
+    "path": "wheelhouse/transformers-4.57.6-py3-none-any.whl",
+    "sha256": "4c9e9de11333ddfe5114bc872c9f370509198acf0b87a832a0ab9458e2bd0550",
+    "version": "4.57.6"
+  },
+  {
+    "name": "typing-extensions",
+    "path": "wheelhouse/typing_extensions-4.16.0-py3-none-any.whl",
+    "sha256": "481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8",
+    "version": "4.16.0"
+  },
+  {
+    "name": "urllib3",
+    "path": "wheelhouse/urllib3-2.8.0-py3-none-any.whl",
+    "sha256": "0cf3cae568d36aa9576b28dfb35f11328f1cb974ca7647d9475ebb86c75ac6e3",
+    "version": "2.8.0"
+  },
+  {
+    "name": "aws-neuronx-runtime-lib",
+    "path": "debs/aws-neuronx-runtime-lib_2.34.10.0-ac18d186d_amd64.deb",
+    "sha256": "6de6a52f226807e2e307071d11af19df50a02b1a755e6c23a22c709a7b05c3be",
+    "version": "2.34.10.0-ac18d186d"
+  },
+  {
+    "name": "aws-neuronx-collectives",
+    "path": "debs/aws-neuronx-collectives_2.34.10.0-74eaafac6_amd64.deb",
+    "sha256": "c162bb8649cd7a2ede70648515dcda7adb90201e099fa6a0fd4e87e17e3b4be3",
+    "version": "2.34.10.0-74eaafac6"
+  },
+  {
+    "path": "nxdi-source.tar",
+    "sha256": "16b29b6839445d190f0732a3a376c547c8597893f0adf07afc7cc006b8c38af2"
+  },
+  {
+    "path": "nxdi-source-commit.txt",
+    "sha256": "8de0bb5ab7b6b33374e57003642263dfc7471d75f60744489d3ed9e16135bfc2"
+  },
+  {
+    "path": "pins.txt",
+    "sha256": "fbbf4e56ec13d05899b5634a28d6b895d3b6f2d25361ccf33d5299ad08d1df21"
+  },
+  {
+    "path": "official-downloads.json",
+    "sha256": "ecc94d661fb89d4745ca23788eb035c2773c69082bc6cea1575271337a74642f"
+  },
+  {
+    "path": "requirements.lock",
+    "sha256": "119770e38e7953e455a568c2c42d43b54a2c37dff02c13052423761df0009dc5"
+  },
+  {
+    "path": "verify-wheelhouse.py",
+    "sha256": "acbc769644c1c86bff6646ddbf664e6ad72d62c637bffb32aad0d2c345de5193"
+  }
+]

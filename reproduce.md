@@ -87,6 +87,89 @@ It removes Cargo `target/` and, under `logs/`, simulator traces, plots, Analyzer
 payloads and nsys SQLite exports that have their `.nsys-rep`. Captures, parsed
 captures, parquet, presets and records stay; `.worktree-clean.tsv` lists what went.
 
+## Trainium2 host profiling
+
+On an Amazon Linux 2023 Trainium2 instance, prepare the local Neuron driver and
+isolated Python environments from the workspace root:
+
+```bash
+just setup-env
+source .env
+just setup-neuron-host --install
+just setup-neuron-python
+```
+
+The host installer uses the official AWS package repository, installs matching
+kernel headers, and loads the Neuron driver. It does not upgrade the OS or reboot.
+The Python installer pins the validated NKI/compiler versions. It keeps native
+NKI profiling in `.venv-neuron` and compiler tracing in `.venv-neuron-trace`.
+AL2023 has GLIBC 2.34, so the tracing environment uses Torch NeuronX 2.6;
+Torch/XLA 2.9 requires GLIBC 2.35. The pinned NxDI dense decoder source is an
+experimentally validated combination with this tracing stack, installed without
+its Torch 2.9 dependency override. See
+[Trainium2 support and validation limits](ServingStudioSim/doc/trainium2.md).
+
+The full-model compiler also runs in an isolated Ubuntu 24.04 image with Python
+3.12 and Torch NeuronX 2.9. This satisfies the pinned NxDI dependencies without
+changing the AL2023 host libc. The checked-in recipe pins the official base
+image digest, all 57 Python wheels, NxDI source revision, and Neuron runtime
+archives. A frozen local build context contains those artifacts and its
+`artifacts.json`; downloaded wheels and images stay under `tmp/`.
+
+Use an explicit Docker Unix socket and new output directories. Run builds and
+checks in named tmux sessions and record their commands and logs in `progress.md`:
+
+```bash
+# For a host without an existing Docker/containerd daemon:
+just neuron-docker check
+just neuron-docker start
+just neuron-docker status
+export SERVINGSTUDIO_NEURON_DOCKER_HOST="unix://$TMPDIR/neuron-docker/docker.sock"
+# Or select an existing intended daemon:
+export SERVINGSTUDIO_NEURON_DOCKER_HOST=unix:///absolute/path/to/docker.sock
+just build-neuron-image /absolute/path/to/frozen-context /absolute/path/to/new-build-report
+just check-neuron-image sha256:IMAGE_ID /absolute/path/to/new-import-report
+```
+
+`neuron-docker start` runs in the named `servingstudio-neuron-docker` tmux session.
+Its socket, data and logs live under `$TMPDIR/neuron-docker`; select another
+directory/session with `SERVINGSTUDIO_NEURON_DOCKER_DIR` and
+`SERVINGSTUDIO_NEURON_DOCKER_SESSION`. It uses a Unix socket, disables Docker
+bridge/iptables/forwarding changes, and refuses to start beside an existing
+Docker/containerd service or process. It never stops another daemon. The status
+command checks that the chosen daemon's data root matches the selected directory.
+
+The build verifies every artifact against `scripts/neuron-image/artifacts.json`,
+requires the pinned base image to exist locally, and runs without network access.
+It records the resulting immutable image ID. The check maps no devices and
+validates package versions, public SDK imports and `pip check`; it does not
+validate model numerics. On this host the coherent image compiles and executes
+the full NxDI model, but reproduces its long-context logit discrepancy, so NxDI
+whole-forward profiling remains unaccepted. The supported serving path is the
+separate stock vLLM Neuron TP4 image and `llama3_vllm_neuron` selector; see
+[its run commands](ServingStudioSim/doc/trainium2.md#stock-vllm-neuron-tp4-path).
+
+For a controller without CUDA dependencies, use:
+
+```bash
+cd ServingStudioSim
+uv sync --no-default-groups --group dev --group launcher --group analyze --group public-api
+uv run --no-sync python -m launcher kernel-profile list
+```
+
+Use `uv run --no-sync` with this controller so normal default CUDA groups do not
+replace its environment. On AL2023, use clang as the Cargo linker when the system
+GCC cannot handle the repository's `-fuse-ld=mold` flag:
+`export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=clang`.
+
+To compile and validate a local full Llama 3.1 8B checkpoint, run
+`just validate-neuron-checkpoint compile MODEL_DIR COMPILED_DIR REPORT_DIR`, then
+the same command with `validate` in a named tmux session. It uses the isolated
+tracing interpreter, reserves an idle Trainium chip for validation, and compares
+ten greedy cases against the full CPU BF16 checkpoint. See the component's
+[full checkpoint proof](ServingStudioSim/doc/trainium2.md#full-checkpoint-proof)
+for the fixed bucket sizes and report contract.
+
 ## Build
 
 Run long builds in a named tmux session, with a log:

@@ -13,6 +13,30 @@ task_tmp_dir := TMPDIR
 setup-env:
     @python3 "{{workspace_root}}/scripts/setup-env.py" "{{workspace_root}}"
 
+# Prepare an AL2023 Trainium host; --install changes system packages via sudo.
+setup-neuron-host *flags:
+    bash "{{workspace_root}}/scripts/setup-neuron-host.sh" {{flags}}
+
+# Isolated Neuron compiler, CPU Torch, and production NKI kernel library.
+setup-neuron-python checkout="ServingStudioSim":
+    bash "{{workspace_root}}/scripts/setup-neuron-python.sh" "{{workspace_root}}/{{checkout}}"
+
+# Check or start a workspace-owned Neuron Docker daemon; existing daemons are preserved.
+neuron-docker mode="status":
+    bash "{{workspace_root}}/scripts/neuron-docker.sh" "{{mode}}"
+
+# Rebuild the frozen Ubuntu/Python3.12 Neuron image from local hashed inputs.
+build-neuron-image context_dir output_dir:
+    bash "{{workspace_root}}/scripts/neuron-image.sh" build "{{context_dir}}" "{{output_dir}}"
+
+# Device-free dependency/import check of an immutable local Neuron image.
+check-neuron-image image_id output_dir:
+    bash "{{workspace_root}}/scripts/neuron-image.sh" check "{{image_id}}" "{{output_dir}}"
+
+# Use a local checkpoint; compile and physical validation are separate phases.
+validate-neuron-checkpoint phase model_dir compiled_dir report_dir:
+    bash "{{workspace_root}}/scripts/validate-neuron-checkpoint.sh" "{{phase}}" "{{model_dir}}" "{{compiled_dir}}" "{{report_dir}}"
+
 # Check workspace-local scratch/cache settings before installing or building.
 check-env:
     @mkdir -p "{{task_tmp_dir}}" && test -w "{{task_tmp_dir}}" || \
