@@ -43,6 +43,10 @@ check-docker:
     @command -v docker >/dev/null || { echo "Install Docker Engine and grant this user daemon access (see reproduce.md)." >&2; exit 1; }
     @docker info >/dev/null
 
+# Docker unless VIBESIM_HOST_ONLY=1 (host turns in external workspaces only).
+check-runtime:
+    @if [[ "${VIBESIM_HOST_ONLY:-0}" != 1 ]]; then just check-docker; fi
+
 check-agent-auth:
     @command -v codex >/dev/null || { echo "Install and authenticate the Codex CLI (see reproduce.md)." >&2; exit 1; }
     @test -r "$HOME/.codex/auth.json" || { echo "missing Codex auth: $HOME/.codex/auth.json" >&2; exit 1; }
@@ -99,11 +103,11 @@ check-ports: check-env
     @bash "{{workspace_root}}/scripts/services.sh" check-ports
 
 # Start one backend, Analyzer and UI in workspace-specific tmux sessions.
-start: check-env check-docker
+start: check-env check-runtime
     @bash "{{workspace_root}}/scripts/start-services.sh"
 
 # Drain the backend, then restart this workspace's configured services.
-restart: check-env check-docker
+restart: check-env check-runtime
     @bash "{{workspace_root}}/scripts/services.sh" restart
 
 # Initialize only new state; an existing directory is never overwritten or migrated.

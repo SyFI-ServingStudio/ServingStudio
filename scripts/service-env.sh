@@ -20,6 +20,12 @@ export VIBESIM_AGENT_WORKSPACES_ROOT=${VIBESIM_AGENT_WORKSPACES_ROOT:-$workspace
 export VIBESIM_RUNNER_IMAGE=${VIBESIM_RUNNER_IMAGE:-vibesim-agent-runner:$(id -un)}
 service_socket="$TMPDIR/vibesim-services.sock"
 
+# VIBESIM_HOST_ONLY=1: run without Docker. Only external (checkout/worktree)
+# workspaces can execute turns, on the host; managed workspaces need runners.
+host_only() {
+    [[ ${VIBESIM_HOST_ONLY:-0} = 1 ]]
+}
+
 # Status and stop must remain available even when a launch configuration broke.
 validate_service_config() {
     local setting

@@ -11,6 +11,9 @@ case "${1:-}" in
         unset OPENROUTE_KEY
         export VIBESIM_AGENT_ANALYZER_BASE_URL=${VIBESIM_AGENT_ANALYZER_BASE_URL:-http://host.docker.internal:$ANALYZER_PORT}
         export VIBESIM_AGENT_MANAGED_BACKEND_URL=${VIBESIM_AGENT_MANAGED_BACKEND_URL:-http://host.docker.internal:$AGENT_PORT}
+        # host.docker.internal resolves only inside a runner; host turns use the bind address.
+        export VIBESIM_AGENT_HOST_ANALYZER_BASE_URL=${VIBESIM_AGENT_HOST_ANALYZER_BASE_URL:-http://$VIBESIM_API_BIND:$ANALYZER_PORT}
+        export VIBESIM_AGENT_HOST_MANAGED_BACKEND_URL=${VIBESIM_AGENT_HOST_MANAGED_BACKEND_URL:-http://$VIBESIM_API_BIND:$AGENT_PORT}
         export VIBESIM_AGENT_BIND="$VIBESIM_API_BIND" VIBESIM_AGENT_PORT="$AGENT_PORT"
         exec uv run --frozen python -m vibesim_agent serve ;;
     analyzer)

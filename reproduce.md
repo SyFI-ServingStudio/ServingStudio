@@ -265,6 +265,16 @@ APIs bind to the Docker bridge gateway so runners can reach them via
 `.env` before starting services. A containerized backend needs additional host-path
 translation or Docker-in-Docker; these scripts run on the host.
 
+On a host without a usable Docker daemon, set `VIBESIM_HOST_ONLY=1` in `.env`.
+`just start` and `just restart` then skip the Docker and runner-image checks, and
+the APIs bind to `127.0.0.1` unless `VIBESIM_API_BIND` says otherwise. Only external
+workspaces such as `w_main` can run turns; they run on the host, as the operator.
+Managed workspaces still need runner containers. Host turns reach the APIs
+through `VIBESIM_AGENT_HOST_ANALYZER_BASE_URL` and
+`VIBESIM_AGENT_HOST_MANAGED_BACKEND_URL`, which default to the bind address. Kernel
+profiling without Docker also needs `VIBESIM_PROFILE_RUNTIME=host` (see
+`ServingStudioSim/profiling/README.md`).
+
 For production, serve the `npm run build` output (`dist/`) from a static web
 server and reverse-proxy `/api/agent/v1` to Agent and `/api/analyzer/v1` to
 Analyzer. Preserve streaming responses on Agent routes. Apply access control at

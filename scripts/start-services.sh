@@ -7,8 +7,13 @@ if tmux -S "$service_socket" list-sessions >/dev/null 2>&1; then
     echo "Workspace service sessions already exist; inspect with just services-status." >&2
     exit 1
 fi
-export VIBESIM_API_BIND=${VIBESIM_API_BIND:-$(docker network inspect bridge \
-    --format '{{(index .IPAM.Config 0).Gateway}}')}
+if host_only; then
+    # No runner containers: the APIs only need to be reachable from host turns.
+    export VIBESIM_API_BIND=${VIBESIM_API_BIND:-127.0.0.1}
+else
+    export VIBESIM_API_BIND=${VIBESIM_API_BIND:-$(docker network inspect bridge \
+        --format '{{(index .IPAM.Config 0).Gateway}}')}
+fi
 [[ -n "$VIBESIM_API_BIND" ]] || { echo "Docker bridge has no gateway" >&2; exit 1; }
 [[ -x "$VIBESIM_ANALYZER_BIN" ]] || {
     echo "Build the selected Analyzer first (just build-analyzer)" >&2; exit 1;
@@ -20,7 +25,7 @@ export VIBESIM_API_BIND=${VIBESIM_API_BIND:-$(docker network inspect bridge \
     echo "Agent state is not initialized. Use just agent-init for a new directory, or migrate existing state first." >&2
     exit 1
 }
-docker image inspect "$VIBESIM_RUNNER_IMAGE" >/dev/null
+host_only || docker image inspect "$VIBESIM_RUNNER_IMAGE" >/dev/null
 start_service() {
     local service_command
     printf -v service_command 'bash %q %q' "$workspace_root/scripts/run-service.sh" "$1"
