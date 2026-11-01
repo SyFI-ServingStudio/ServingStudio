@@ -1,0 +1,229 @@
+diff --git a/kernels/ops/kvcache/kv_indices.py b/kernels/ops/kvcache/kv_indices.py
+index e11c1b7..21ea49d 100644
+--- a/kernels/ops/kvcache/kv_indices.py
++++ b/kernels/ops/kvcache/kv_indices.py
+@@ -119,8 +119,9 @@ def create_chunked_prefix_cache_kv_indices(
+     chunk_start_pos = tl.load(chunk_start_idx_ptr + pid).to(tl.int32)
+     chunk_seq_len = tl.load(chunk_seq_lens_ptr + pid).to(tl.int32)
+ 
++    # Grid axis 1 (optional) splits one request's copy across CTAs.
+     num_loop = tl.cdiv(chunk_seq_len, BLOCK_SIZE)
+-    for i in range(num_loop):
++    for i in range(tl.program_id(axis=1), num_loop, tl.num_programs(axis=1)):
+         offset = tl.arange(0, BLOCK_SIZE) + i * BLOCK_SIZE
+         mask = offset < chunk_seq_len
+         data = tl.load(
+diff --git a/kernels/ops/kvcache/mla_buffer.py b/kernels/ops/kvcache/mla_buffer.py
+index 99ff8b8..ac4fe82 100644
+--- a/kernels/ops/kvcache/mla_buffer.py
++++ b/kernels/ops/kvcache/mla_buffer.py
+@@ -465,31 +465,34 @@ def get_mla_kv_buffer_kernel(
+     cache_k_nope_ptr,
+     cache_k_rope_ptr,
+     loc_ptr,
++    n_loc,
+     buffer_stride: tl.constexpr,
+     nope_stride: tl.constexpr,
+     rope_stride: tl.constexpr,
+     nope_dim: tl.constexpr,
+     rope_dim: tl.constexpr,
++    ROWS: tl.constexpr,
+ ):
+-    pid_loc = tl.program_id(0)
+-    loc = tl.load(loc_ptr + pid_loc).to(tl.int64)
+-    loc_src_ptr = kv_buffer_ptr + loc * buffer_stride
+-
+-    nope_offs = tl.arange(0, nope_dim)
+-    nope_src_ptr = loc_src_ptr + nope_offs
+-    nope_src = tl.load(nope_src_ptr)
+-
++    rows = tl.program_id(0) * ROWS + tl.arange(0, ROWS)
++    row_mask = (rows < n_loc)[:, None]
++    loc = tl.load(loc_ptr + rows, mask=rows < n_loc, other=0).to(tl.int64)
++    loc_src_ptr = kv_buffer_ptr + loc[:, None] * buffer_stride
++    rows = rows.to(tl.int64)[:, None]
++
++    nope_offs = tl.arange(0, nope_dim)[None, :]
++    nope_src = tl.load(loc_src_ptr + nope_offs, mask=row_mask)
+     tl.store(
+-        cache_k_nope_ptr + pid_loc * nope_stride + nope_offs,
++        cache_k_nope_ptr + rows * nope_stride + nope_offs,
+         nope_src,
++        mask=row_mask,
+     )
+ 
+-    rope_offs = tl.arange(0, rope_dim)
+-    rope_src_ptr = loc_src_ptr + nope_dim + rope_offs
+-    rope_src = tl.load(rope_src_ptr)
++    rope_offs = tl.arange(0, rope_dim)[None, :]
++    rope_src = tl.load(loc_src_ptr + nope_dim + rope_offs, mask=row_mask)
+     tl.store(
+-        cache_k_rope_ptr + pid_loc * rope_stride + rope_offs,
++        cache_k_rope_ptr + rows * rope_stride + rope_offs,
+         rope_src,
++        mask=row_mask,
+     )
+ 
+ 
+@@ -538,14 +541,19 @@ def get_mla_kv_buffer_triton(
+         return
+ 
+     rope_dim = cache_k_rope.shape[-1]  # 64
+-    get_mla_kv_buffer_kernel[grid](
++    # 8 rows per program: 31 -> 14 us for 49152 fp8->bf16 rows on B200 (one row per program is latency-bound).
++    rows_per_program = 8
++    get_mla_kv_buffer_kernel[(triton.cdiv(n_loc, rows_per_program),)](
+         kv_buffer,
+         cache_k_nope,
+         cache_k_rope,
+         loc,
++        n_loc,
+         kv_buffer.stride(0),
+         cache_k_nope.stride(0),
+         cache_k_rope.stride(0),
+         nope_dim,
+         rope_dim,
++        ROWS=rows_per_program,
++        num_warps=4,
+     )
+diff --git a/srt/layers/attention/trtllm_mla_backend.py b/srt/layers/attention/trtllm_mla_backend.py
+index 4a6cc4a..4449c36 100755
+--- a/srt/layers/attention/trtllm_mla_backend.py
++++ b/srt/layers/attention/trtllm_mla_backend.py
+@@ -34,6 +34,9 @@ from sglang.kernels.ops.attention.set_mla_kv_concat_q import (
+     set_mla_kv_concat_q,
+     set_mla_kv_concat_q_fp8,
+ )
++from sglang.kernels.ops.attention.mla_kv_pack_quantize_fp8 import (
++    mla_kv_pack_quantize_fp8,
++)
+ from sglang.kernels.ops.attention.utils import (
+     concat_mla_absorb_q_general,
+     mla_quantize_and_rope_for_fp8,
+@@ -122,7 +125,9 @@ def _quantize_fp8_qkv(q, k, v, layer):
+     q = q.to(torch.float8_e4m3fn)
+ 
+     k_scale = getattr(layer, "k_scale_float", None)
+-    if k_scale is None:
++    if k_scale is None or k.dtype == torch.float8_e4m3fn:
++        # K already packed to fp8 (pack_extend_kv / pack_prefix_chunk_kv
++        # quantize at unit scale), so the kernel must not rescale it.
+         k_scale = 1.0
+     if k_scale != 1.0:
+         assert hasattr(layer, "k_scale"), "k_scale is not set"
+@@ -134,7 +139,7 @@ def _quantize_fp8_qkv(q, k, v, layer):
+         k = k.to(torch.float8_e4m3fn)
+ 
+     v_scale = getattr(layer, "v_scale_float", None)
+-    if v_scale is None:
++    if v_scale is None or v.dtype == torch.float8_e4m3fn:
+         v_scale = 1.0
+     if v_scale != 1.0:
+         assert hasattr(layer, "v_scale"), "v_scale is not set"
+@@ -1127,6 +1132,70 @@ class TRTLLMMLABackend(FlashInferMLAAttnBackend):
+             skip_softmax_threshold_scale_factor=envs.SGLANG_SKIP_SOFTMAX_PREFILL_THRESHOLD_SCALE_FACTOR.get(),
+         )
+ 
++    def _packs_fp8_prefill_kv(self, forward_batch: ForwardBatch) -> bool:
++        """The ragged prefill kernel reads unit-scale fp8 Q/K/V; the fp8 cast
++        is exact either way, so doing it at pack time only drops the bf16
++        concat + strided cast passes. Not for the flashinfer fallback, which
++        wants bf16 inputs."""
++        return (
++            self.data_type == torch.float8_e4m3fn
++            and forward_batch.forward_mode.is_extend()
++            and not forward_batch.forward_mode.is_target_verify()
++            and not forward_batch.forward_mode.is_draft_extend_v2()
++            and self.forward_prefill_metadata is not None
++            and not self.forward_prefill_metadata.fallback_to_flashinfer_impl
++        )
++
++    def pack_extend_kv(
++        self,
++        k_nope: torch.Tensor,
++        k_pe: torch.Tensor,
++        v: torch.Tensor,
++        layer: RadixAttention,
++        forward_batch: ForwardBatch,
++    ) -> Optional[tuple[torch.Tensor, torch.Tensor]]:
++        """Build the current chunk's fp8 K = [k_nope | k_pe] and fp8 V in one
++        launch (bit-identical to concat + ``.to(fp8)``). Returns None when the
++        default bf16 path must be kept."""
++        if not self._packs_fp8_prefill_kv(forward_batch):
++            return None
++        if getattr(layer, "k_scale_float", None) not in (None, 1.0) or getattr(
++            layer, "v_scale_float", None
++        ) not in (None, 1.0):
++            return None
++        return mla_kv_pack_quantize_fp8(k_nope, k_pe, v, enable_pdl=False)
++
++    def pack_prefix_chunk_kv(
++        self,
++        k_nope: torch.Tensor,
++        k_pe: torch.Tensor,
++        v: torch.Tensor,
++    ) -> tuple[torch.Tensor, torch.Tensor]:
++        """Pack a materialized prefix chunk into contiguous K/V for the ragged
++        kernel: unit-scale fp8 in one launch for the fp8 KV cache, else the
++        bf16 concat."""
++        if self.data_type == torch.float8_e4m3fn:
++            return mla_kv_pack_quantize_fp8(k_nope, k_pe, v, enable_pdl=False)
++        k = k_nope.new_empty(
++            (k_nope.shape[0], k_nope.shape[1], k_nope.shape[2] + k_pe.shape[-1])
++        )
++        k[..., : k_nope.shape[-1]] = k_nope
++        k[..., k_nope.shape[-1] :] = k_pe
++        return k, v
++
++    def prepare_chunked_prefill_qkv(
++        self,
++        q: torch.Tensor,
++        k: torch.Tensor,
++        v: torch.Tensor,
++        forward_batch: ForwardBatch,
++    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
++        """Cast Q once for the causal pass and every prefix pass (each ragged
++        launch would otherwise re-cast the same bf16 Q)."""
++        if self._packs_fp8_prefill_kv(forward_batch):
++            q = q.to(torch.float8_e4m3fn)
++        return q, k, v
++
+     def _set_kv_and_concat_q_fused(
+         self,
+         layer: RadixAttention,
+diff --git a/srt/model_executor/forward_batch_deepseek_mha_mixin.py b/srt/model_executor/forward_batch_deepseek_mha_mixin.py
+index 122c216..5bdcdf5 100644
+--- a/srt/model_executor/forward_batch_deepseek_mha_mixin.py
++++ b/srt/model_executor/forward_batch_deepseek_mha_mixin.py
+@@ -93,7 +93,11 @@ class ForwardBatchDeepSeekMHAMixin:
+                 num_chunk_tokens, dtype=torch.int32, device=device
+             )
+ 
+-            create_chunked_prefix_cache_kv_indices[(self.batch_size,)](
++            # 512 = the kernel's BLOCK_SIZE; 64 CTAs per request is arbitrary.
++            num_blocks = min(-(-self.prefix_chunk_max_seq_lens[idx] // 512), 64)
++            create_chunked_prefix_cache_kv_indices[
++                (self.batch_size, max(num_blocks, 1))
++            ](
+                 req_to_token,
+                 self.req_pool_indices,
+                 chunk_starts,
+diff --git a/srt/models/deepseek_common/attention_forward_methods/forward_mha.py b/srt/models/deepseek_common/attention_forward_methods/forward_mha.py
+index 62d4073..6b5f030 100644
+--- a/srt/models/deepseek_common/attention_forward_methods/forward_mha.py
++++ b/srt/models/deepseek_common/attention_forward_methods/forward_mha.py
+@@ -288,6 +288,14 @@ class DeepseekMHAForwardMixin:
+         k_nope = kv[..., : self.qk_nope_head_dim]
+         v = kv[..., self.qk_nope_head_dim :]
+ 
++        # Backends whose kernel reads fp8 K/V pack [k_nope | k_pe] and cast V
++        # in one launch instead of a bf16 concat followed by strided casts.
++        pack_extend_kv = getattr(backend, "pack_extend_kv", None)
++        if pack_extend_kv is not None and self.qk_rope_head_dim > 0:
++            packed = pack_extend_kv(k_nope, k_pe, v, self.attn_mha, forward_batch)
++            if packed is not None:
++                return q, packed[0], packed[1], forward_batch
++
+         k = self._concat_and_cast_mha_k(k_nope, k_pe, forward_batch)
+         return q, k, v, forward_batch
+ 
