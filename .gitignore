@@ -6,3 +6,18 @@ tmp/
 .env
 .env.*
 !.env.example
+
+# Kimi-K3 bulk data: kept outside git, migrated to
+# kisnis.cs.washington.edu:/mnt/storage/yilegu/data/ServingStudio-kimi
+/main-k3-fill/
+/main-k3-rust/
+scripts-local/litellm/*.log
+scripts-local/vibesim-analysis-container/codex_runs/
+scripts-local/vibesim-analysis-container/smoke_mixed_verify/
+# End-to-end PR study (runs, job logs, bench scripts, kernel A/B), organized per PR in
+# kisnis.cs.washington.edu:/mnt/storage/yilegu/data/VibeOptimizer-kimi
+scripts-local/vibesim-analysis-container/k3_e2e/
+scripts-local/vibesim-analysis-container/k3_vkgraph_dev/out/*.pt
+scripts-local/vibesim-analysis-container/kimi_single_layer/align/
+scripts-local/vibesim-analysis-container/kimi_single_layer/*.db
+scripts-local/vibesim-analysis-container/kimi_single_layer/*.db.*
