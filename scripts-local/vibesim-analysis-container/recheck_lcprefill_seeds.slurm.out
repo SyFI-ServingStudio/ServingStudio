@@ -1,0 +1,31 @@
+==== slurm_gpu.sh on cayenne job=1880 ====
+CUDA_VISIBLE_DEVICES=0
+allocated GPU UUID(s): GPU-c09878e8-fb6a-ff0c-3c33-05993065d679
+0, GPU-c09878e8-fb6a-ff0c-3c33-05993065d679, 0 MiB
+==== exec: /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/k3_slurm_step.sh env CASES=kda_lcprefill_claude mla_lcprefill_claude /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/recheck_best_trees_seeds.sh slurm 1 2 ====
+==== 2026-09-27_07:33:08 recheck kda_lcprefill_claude best_tree, seed 1
+PASS all gates passed
+  1,16384pf245760: pristine 8906.9 -> best 8158.4 us (+8.4%), CHECK True rel 0.0070921981791660605
+  1,32768pf229376: pristine 17677.3 -> best 16359.6 us (+7.4%), CHECK True rel 0.007352940743944662
+  1,16384pf131072: pristine 9119.8 -> best 8225.9 us (+9.8%), CHECK True rel 0.0070921981791660605
+  1,32768pf131072: pristine 17633.4 -> best 16342.1 us (+7.3%), CHECK True rel 0.007352940743944662
+==== 2026-09-27_07:40:15 recheck mla_lcprefill_claude best_tree, seed 1
+PASS all gates passed
+  1,16384pf245760: pristine 27508.2 -> best 20764.0 us (+24.5%), CHECK True rel 0.0
+  1,32768pf229376: pristine 47945.1 -> best 39970.2 us (+16.6%), CHECK True rel 0.0
+  1,16384pf131072: pristine 18177.5 -> best 15111.3 us (+16.9%), CHECK True rel 0.0
+  1,32768pf131072: pristine 34682.2 -> best 30379.3 us (+12.4%), CHECK True rel 0.0
+==== 2026-09-27_07:45:56 recheck kda_lcprefill_claude best_tree, seed 2
+PASS all gates passed
+  1,16384pf245760: pristine 8900.9 -> best 8214.7 us (+7.7%), CHECK True rel 0.007042253124380105
+  1,32768pf229376: pristine 17647.7 -> best 16307.3 us (+7.6%), CHECK True rel 0.00680272071821928
+  1,16384pf131072: pristine 9027.6 -> best 8181.0 us (+9.4%), CHECK True rel 0.007042253124380105
+  1,32768pf131072: pristine 17716.2 -> best 16284.8 us (+8.1%), CHECK True rel 0.00680272071821928
+==== 2026-09-27_07:53:16 recheck mla_lcprefill_claude best_tree, seed 2
+PASS all gates passed
+  1,16384pf245760: pristine 27493.7 -> best 20672.8 us (+24.8%), CHECK True rel 0.0
+  1,32768pf229376: pristine 47871.2 -> best 39947.3 us (+16.6%), CHECK True rel 0.0
+  1,16384pf131072: pristine 18164.9 -> best 15068.4 us (+17.1%), CHECK True rel 0.0
+  1,32768pf131072: pristine 34616.8 -> best 30500.0 us (+11.9%), CHECK True rel 0.0
+==== 2026-09-27_07:58:54 recheck done
+[step] EXIT_RC=0

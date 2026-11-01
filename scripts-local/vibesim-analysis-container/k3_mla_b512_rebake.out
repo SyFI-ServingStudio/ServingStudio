@@ -1,0 +1,4 @@
+==== 2026-09-24_17:59:51 rebake with 83847486 Fix Kimi K3 MLA decode profile coverage
+--- Wrapper: Applying owner=yilegu, memory=432834647654 bytes, and cpus=201.6 ---
+['total: 1025 us', '        │  │  │  ├─ mla_decode_attention (mla_decode_attention)        409 us ( 39.9%)', 'total: 661 us', '        │  │  │  ├─ mla_decode_attention (mla_decode_attention)        209 us ( 31.6%)', 'total: 251 us', '        │  │  │  ├─ mla_decode_attention (mla_decode_attention)         69 us ( 27.4%)']
+==== 2026-09-24_18:00:20 8804 restarted

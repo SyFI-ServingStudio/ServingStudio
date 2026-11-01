@@ -1,0 +1,27 @@
+==== slurm_gpu.sh on cayenne job=2339 ====
+CUDA_VISIBLE_DEVICES=0
+allocated GPU UUID(s): GPU-c09878e8-fb6a-ff0c-3c33-05993065d679
+0, GPU-c09878e8-fb6a-ff0c-3c33-05993065d679, 0 MiB
+==== exec: /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/k3_slurm_step.sh env CASES=kda_verify_claude mla_verify_claude /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/recheck_best_trees_seeds.sh slurm 1 2 ====
+==== 2026-09-28_07:28:51 recheck kda_verify_claude best_tree, seed 1
+PASS all gates passed
+  64,8192vk3: pristine 509.3 -> best 480.6 us (+5.6%), CHECK True rel 0.014767931492460322
+  128,8192vk3: pristine 653.8 -> best 599.4 us (+8.3%), CHECK True rel 0.01695736328946584
+  16,65536vk3: pristine 322.9 -> best 302.4 us (+6.3%), CHECK True rel 0.012168140731459064
+==== 2026-09-28_07:33:44 recheck mla_verify_claude best_tree, seed 1
+PASS all gates passed
+  64,8192vk3: pristine 497.0 -> best 466.4 us (+6.2%), CHECK True rel 0.0
+  128,8192vk3: pristine 650.6 -> best 620.2 us (+4.7%), CHECK True rel 0.0
+  16,65536vk3: pristine 417.1 -> best 388.4 us (+6.9%), CHECK True rel 0.0
+==== 2026-09-28_07:39:20 recheck kda_verify_claude best_tree, seed 2
+PASS all gates passed
+  64,8192vk3: pristine 503.2 -> best 474.5 us (+5.7%), CHECK True rel 0.008510637718424667
+  128,8192vk3: pristine 662.8 -> best 609.5 us (+8.1%), CHECK True rel 0.013211381254544309
+  16,65536vk3: pristine 339.3 -> best 318.8 us (+6.0%), CHECK True rel 0.010758196015856
+==== 2026-09-28_07:43:53 recheck mla_verify_claude best_tree, seed 2
+PASS all gates passed
+  64,8192vk3: pristine 513.3 -> best 482.7 us (+6.0%), CHECK True rel 0.0
+  128,8192vk3: pristine 670.7 -> best 639.4 us (+4.7%), CHECK True rel 0.0
+  16,65536vk3: pristine 423.3 -> best 394.9 us (+6.7%), CHECK True rel 0.0
+==== 2026-09-28_07:49:25 recheck done
+[step] EXIT_RC=0

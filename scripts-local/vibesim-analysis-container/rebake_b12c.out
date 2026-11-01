@@ -1,0 +1,8 @@
+==== 2026-09-27_14:57:42 bake with 427d75f8 k3: align chunked-prefill prediction fidelity
+--- Wrapper: Applying owner=yilegu, memory=432834647654 bytes, and cpus=201.6 ---
+--- Wrapper: Applying owner=yilegu, memory=432834647654 bytes, and cpus=201.6 ---
+--- Wrapper: Applying owner=yilegu, memory=432834647654 bytes, and cpus=201.6 ---
+oracle 8805: ['total: 8912 us', 'total: 8990 us', 'total: 8555 us']
+oracle 8806: ['total: 11769 us', '│  │  │     ├─ mla_prefill_attention_prefix (mla_prefill_attention)       3503 us ( 29.8%)', 'total: 8010 us']
+oracle 8807: ['total: 9301 us', 'total: 18230 us', 'total: 9119 us']
+==== 2026-09-27_14:58:14 done

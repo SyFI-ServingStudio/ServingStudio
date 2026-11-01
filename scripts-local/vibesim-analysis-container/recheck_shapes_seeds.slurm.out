@@ -1,0 +1,35 @@
+==== slurm_gpu.sh on cayenne job=1747 ====
+CUDA_VISIBLE_DEVICES=0
+allocated GPU UUID(s): GPU-c09878e8-fb6a-ff0c-3c33-05993065d679
+0, GPU-c09878e8-fb6a-ff0c-3c33-05993065d679, 0 MiB
+==== exec: /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/k3_slurm_step.sh env CASES=kda_shapes_claude mla_shapes_claude /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/recheck_best_trees_seeds.sh slurm 1 2 ====
+==== 2026-09-27_03:28:21 recheck kda_shapes_claude best_tree, seed 1
+PASS all gates passed
+  1,1048576: pristine 132.5 -> best 103.7 us (+21.7%), CHECK True rel 0.0
+  16,65536: pristine 210.3 -> best 176.5 us (+16.1%), CHECK True rel 0.013698629136173214
+  128,8192: pristine 398.7 -> best 370.0 us (+7.2%), CHECK True rel 0.008810572066215185
+  32,8192: pristine 251.2 -> best 214.4 us (+14.7%), CHECK True rel 0.01847290494794838
+  1,8192: pristine 136.5 -> best 105.7 us (+22.6%), CHECK True rel 0.0
+==== 2026-09-27_03:33:16 recheck mla_shapes_claude best_tree, seed 1
+PASS all gates passed
+  1,1048576: pristine 302.3 -> best 216.3 us (+28.5%), CHECK True rel 0.005813952947539261
+  16,65536mix: pristine 294.0 -> best 261.4 us (+11.1%), CHECK True rel 0.003937007626015268
+  128,8192: pristine 466.3 -> best 436.6 us (+6.4%), CHECK True rel 0.008403360779605998
+  32,8192: pristine 283.8 -> best 267.6 us (+5.7%), CHECK True rel 0.008888888256790168
+  1,8192: pristine 146.8 -> best 128.4 us (+12.6%), CHECK True rel 0.005813952947539261
+==== 2026-09-27_03:39:17 recheck kda_shapes_claude best_tree, seed 2
+PASS all gates passed
+  1,1048576: pristine 132.4 -> best 103.7 us (+21.7%), CHECK True rel 0.0
+  16,65536: pristine 202.1 -> best 169.1 us (+16.3%), CHECK True rel 0.004784688628923359
+  128,8192: pristine 400.8 -> best 372.1 us (+7.2%), CHECK True rel 0.011178861061537492
+  32,8192: pristine 259.4 -> best 222.6 us (+14.2%), CHECK True rel 0.019823787148984168
+  1,8192: pristine 136.5 -> best 103.8 us (+24.0%), CHECK True rel 0.0
+==== 2026-09-27_03:44:38 recheck mla_shapes_claude best_tree, seed 2
+PASS all gates passed
+  1,1048576: pristine 302.3 -> best 216.4 us (+28.4%), CHECK True rel 0.010471203311312812
+  16,65536mix: pristine 279.8 -> best 246.9 us (+11.8%), CHECK True rel 0.004761904399092998
+  128,8192: pristine 473.4 -> best 443.6 us (+6.3%), CHECK True rel 0.009615383992525733
+  32,8192: pristine 275.8 -> best 259.5 us (+5.9%), CHECK True rel 0.009345793693772435
+  1,8192: pristine 147.1 -> best 128.4 us (+12.8%), CHECK True rel 0.005235601655656406
+==== 2026-09-27_03:50:47 recheck done
+[step] EXIT_RC=0

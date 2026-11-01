@@ -1,0 +1,32 @@
+==== slurm_gpu.sh on cayenne job=2106 ====
+CUDA_VISIBLE_DEVICES=0
+allocated GPU UUID(s): GPU-c04734e2-2332-795b-16f9-31aeb0b1212b
+0, GPU-c04734e2-2332-795b-16f9-31aeb0b1212b, 4 MiB
+==== exec: /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/k3_slurm_step.sh /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/run_k3_jit_fill.sh presets/predict_kimi_k3_b200_rank1_layer_kda_mixed.json presets/predict_kimi_k3_b200_rank1_layer_mla_mixed.json ====
+==== K3 JIT fill: repo=/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/main-k3-rust db=/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/kimi_single_layer/k3_branch_profile.db gpu=GPU-c04734e2-2332-795b-16f9-31aeb0b1212b ====
+
+---- presets/predict_kimi_k3_b200_rank1_layer_kda_mixed.json ----
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.09s
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.14s
+RESULT presets/predict_kimi_k3_b200_rank1_layer_kda_mixed.json exit=0
+
+---- presets/predict_kimi_k3_b200_rank1_layer_mla_mixed.json ----
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.08s
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.13s
+RESULT presets/predict_kimi_k3_b200_rank1_layer_mla_mixed.json exit=0
+
+==== rows per K3 table in /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/kimi_single_layer/k3_branch_profile.db ====
+kda_recurrent_decode: 9 B200 rows
+kda_fused_decode: no such table: kda_fused_decode
+mla_decode_attention: 299 B200 rows
+mxfp4_fused_moe: 406 B200 rows
+gdn_causal_conv_decode: 9 B200 rows
+gdn_gated_rms_norm: 14 B200 rows
+batched_gemm: 476 B200 rows
+single_gemm: 3401 B200 rows
+rms_norm: 315 B200 rows
+residual_rms_norm: 136 B200 rows
+mla_cache_append: 280 B200 rows
+elementwise: 982 B200 rows
+gemm_fp32_output: 136 B200 rows
+[step] EXIT_RC=0

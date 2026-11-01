@@ -1,0 +1,27 @@
+==== slurm_gpu.sh on cayenne job=2467 ====
+CUDA_VISIBLE_DEVICES=0
+allocated GPU UUID(s): GPU-c88e489a-0693-2c29-a1e3-30952377f742
+0, GPU-c88e489a-0693-2c29-a1e3-30952377f742, 0 MiB
+==== exec: /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/k3_slurm_step.sh env CASES=kda_mixed_claude mla_mixed_claude /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/recheck_best_trees_seeds.sh slurm 1 2 ====
+==== 2026-09-28_15:19:48 recheck kda_mixed_claude best_tree, seed 1
+PASS all gates passed
+  64,8192mx16384: pristine 10106.4 -> best 8355.1 us (+17.3%), CHECK True rel 0.007246376391514412
+  128,8192mx4096: pristine 3376.6 -> best 2759.9 us (+18.3%), CHECK True rel 0.007142856734693901
+  64,8192mx16384p49152: pristine 10042.8 -> best 8416.6 us (+16.2%), CHECK True rel 0.007246376391514412
+==== 2026-09-28_15:27:02 recheck mla_mixed_claude best_tree, seed 1
+PASS all gates passed
+  64,8192mx16384: pristine 21239.3 -> best 8353.1 us (+60.7%), CHECK True rel 0.011278194810334145
+  128,8192mx4096: pristine 24737.3 -> best 2541.9 us (+89.7%), CHECK True rel 0.009689921879694767
+  64,8192mx16384p49152: pristine 44626.3 -> best 13057.5 us (+70.7%), CHECK True rel 0.011111110452674936
+==== 2026-09-28_15:32:54 recheck kda_mixed_claude best_tree, seed 2
+PASS all gates passed
+  64,8192mx16384: pristine 10122.7 -> best 8340.8 us (+17.6%), CHECK True rel 0.007299269646757977
+  128,8192mx4096: pristine 3380.7 -> best 2727.2 us (+19.3%), CHECK True rel 0.0077519375037558135
+  64,8192mx16384p49152: pristine 10173.8 -> best 8369.4 us (+17.7%), CHECK True rel 0.007299269646757977
+==== 2026-09-28_15:40:29 recheck mla_mixed_claude best_tree, seed 2
+PASS all gates passed
+  64,8192mx16384: pristine 21146.1 -> best 8283.6 us (+60.8%), CHECK True rel 0.010948904470136965
+  128,8192mx4096: pristine 24669.8 -> best 2576.7 us (+89.6%), CHECK True rel 0.011111110452674936
+  64,8192mx16384p49152: pristine 44471.7 -> best 14205.3 us (+68.1%), CHECK True rel 0.010869564587271617
+==== 2026-09-28_15:46:27 recheck done
+[step] EXIT_RC=0

@@ -1,0 +1,365 @@
+==== slurm_gpu.sh on cayenne job=874 ====
+CUDA_VISIBLE_DEVICES=0
+allocated GPU UUID(s): GPU-0ea1b726-ae19-842c-29f2-3933b438b01f
+0, GPU-0ea1b726-ae19-842c-29f2-3933b438b01f, 0 MiB
+==== exec: ./run_k3_controls.sh issue_k3_kda.json ====
+######## control 1/3: null (pristine tree)
+rendered /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda/agent_task_rendered.md (100 lines)
+==================== k3_kda TRIAL 1 ====================
+--- Wrapper: Applying owner=yilegu, memory=432834647654 bytes, and cpus=28.8 ---
+== [1] launching Codex agent (gpt-5.6-luna effort=max, timeout 1s)
+== [1] agent exit=124 (transcript: /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda/trial_1_agent.log)
+== [1] saved iteration workspace -> /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda/trial_1_opt_run
+== [1] deterministic rebuild of the agent's tree
+== [1] install step: true
+== [1] judging (judge_k3.py)
+{
+  "agent_container": "iteropt_k3_kda_run_1",
+  "case_key": "9b15fde26cca",
+  "points": {
+    "128,8192": {
+      "before_us": 560.4479908943176,
+      "before_sigma_us": 0.03264157150744588,
+      "after_us": 560.479998588562,
+      "after_lat": [
+        560.479998588562,
+        560.4159832000732,
+        560.479998588562,
+        560.5120062828064,
+        560.4479908943176
+      ],
+      "improvement": -0.0001,
+      "noise_frac_3sigma": 0.0002,
+      "correctness": {
+        "max_abs_err": 0.0,
+        "max_rel_err": 0.0,
+        "mean_rel_err": 0.0,
+        "nan": false,
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "latency_mode": "graph",
+      "primary": true
+    },
+    "32,8192": {
+      "before_us": 305.4719865322113,
+      "before_sigma_us": 0.1924256766707255,
+      "after_us": 305.5039942264557,
+      "after_lat": [
+        304.7359883785248,
+        306.43200874328613,
+        305.5039942264557,
+        306.40000104904175,
+        305.4719865322113
+      ],
+      "improvement": -0.0001,
+      "noise_frac_3sigma": 0.0019,
+      "correctness": {
+        "max_abs_err": 0.0,
+        "max_rel_err": 0.0,
+        "mean_rel_err": 0.0,
+        "nan": false,
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "latency_mode": "graph",
+      "primary": false
+    },
+    "1,8192": {
+      "before_us": 175.4239946603775,
+      "before_sigma_us": 0.025600194931030273,
+      "after_us": 175.4239946603775,
+      "after_lat": [
+        175.4560023546219,
+        175.4239946603775,
+        175.4239946603775,
+        175.4239946603775,
+        175.3920018672943
+      ],
+      "improvement": 0.0,
+      "noise_frac_3sigma": 0.0004,
+      "correctness": {
+        "max_abs_err": 0.0,
+        "max_rel_err": 0.0,
+        "mean_rel_err": 0.0,
+        "nan": false,
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "latency_mode": "graph",
+      "primary": false
+    }
+  },
+  "driver_sha": "a631ad397746",
+  "changed_files": [],
+  "diff_patch": "/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda/trial_1_tree_judged.patch",
+  "diff_lines": 0,
+  "gates": {
+    "correctness": true,
+    "latency_improved": false,
+    "no_secondary_regression": true
+  },
+  "required_improvement": 0.05,
+  "before_us": 560.4479908943176,
+  "latency_us": 560.479998588562,
+  "recovered_frac": -0.0001,
+  "correctness": {
+    "pass": true
+  },
+  "golden_dir": "/raid/yilegu/eval_goldens/golden_k3_9b15fde26cca",
+  "verdict": "FAIL",
+  "reason": "failed: latency_improved"
+}
+== [1] done -> /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda/trial_1_verdict.json
+==================== SUMMARY (k3_kda) ====================
+  trial 1: FAIL improvement/recovered=-0.0001 lat=560.479998588562us correct=True reason=failed: latency_improved
+  trial 2: FAIL improvement/recovered=-0.1774 lat=664.7679805755615us correct=True reason=failed: latency_improved,no_secondary_regression
+  trial 3: FAIL improvement/recovered=-0.0001 lat=564.6399855613708us correct=True reason=failed: latency_improved
+  PASS 0/3
+######## control 2/3: planted slowdown
+rendered /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda/agent_task_rendered.md (100 lines)
+==================== k3_kda TRIAL 2 ====================
+--- Wrapper: Applying owner=yilegu, memory=432834647654 bytes, and cpus=28.8 ---
+== [2] launching Codex agent (gpt-5.6-luna effort=max, timeout 1s)
+== [2] agent exit=124 (transcript: /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda/trial_2_agent.log)
+== [2] saved iteration workspace -> /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda/trial_2_opt_run
+== [2] CONTROL: applying planted patch /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/controls/planted_slowdown.patch to the agent tree
+patching file srt/models/kimi_k3.py
+== [2] deterministic rebuild of the agent's tree
+== [2] install step: true
+== [2] judging (judge_k3.py)
+{
+  "agent_container": "iteropt_k3_kda_run_2",
+  "case_key": "9b15fde26cca",
+  "points": {
+    "128,8192": {
+      "before_us": 560.4479908943176,
+      "before_sigma_us": 0.03264157150744588,
+      "after_us": 659.8399877548218,
+      "after_lat": [
+        659.775972366333,
+        659.8399877548218,
+        659.8399877548218,
+        660.1600050926208,
+        659.8079800605774
+      ],
+      "improvement": -0.1773,
+      "noise_frac_3sigma": 0.0002,
+      "correctness": {
+        "max_abs_err": 0.0,
+        "max_rel_err": 0.0,
+        "mean_rel_err": 0.0,
+        "nan": false,
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "latency_mode": "graph",
+      "primary": true
+    },
+    "32,8192": {
+      "before_us": 305.4719865322113,
+      "before_sigma_us": 0.1924256766707255,
+      "after_us": 406.9119989871979,
+      "after_lat": [
+        402.6559889316559,
+        407.80800580978394,
+        406.9119989871979,
+        406.94400668144226,
+        406.9119989871979
+      ],
+      "improvement": -0.3321,
+      "noise_frac_3sigma": 0.0019,
+      "correctness": {
+        "max_abs_err": 0.0,
+        "max_rel_err": 0.0,
+        "mean_rel_err": 0.0,
+        "nan": false,
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "latency_mode": "graph",
+      "primary": false
+    },
+    "1,8192": {
+      "before_us": 175.4239946603775,
+      "before_sigma_us": 0.025600194931030273,
+      "after_us": 279.87200021743774,
+      "after_lat": [
+        279.87200021743774,
+        279.87200021743774,
+        279.87200021743774,
+        279.83999252319336,
+        279.87200021743774
+      ],
+      "improvement": -0.5954,
+      "noise_frac_3sigma": 0.0004,
+      "correctness": {
+        "max_abs_err": 0.0,
+        "max_rel_err": 0.0,
+        "mean_rel_err": 0.0,
+        "nan": false,
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "latency_mode": "graph",
+      "primary": false
+    }
+  },
+  "driver_sha": "a631ad397746",
+  "changed_files": [
+    "srt/models/kimi_k3.py"
+  ],
+  "diff_patch": "/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda/trial_2_tree_judged.patch",
+  "diff_lines": 13,
+  "gates": {
+    "correctness": true,
+    "latency_improved": false,
+    "no_secondary_regression": false
+  },
+  "required_improvement": 0.05,
+  "before_us": 560.4479908943176,
+  "latency_us": 659.8399877548218,
+  "recovered_frac": -0.1773,
+  "correctness": {
+    "pass": true
+  },
+  "golden_dir": "/raid/yilegu/eval_goldens/golden_k3_9b15fde26cca",
+  "verdict": "FAIL",
+  "reason": "failed: latency_improved,no_secondary_regression"
+}
+== [2] done -> /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda/trial_2_verdict.json
+==================== SUMMARY (k3_kda) ====================
+  trial 1: FAIL improvement/recovered=-0.0001 lat=560.479998588562us correct=True reason=failed: latency_improved
+  trial 2: FAIL improvement/recovered=-0.1773 lat=659.8399877548218us correct=True reason=failed: latency_improved,no_secondary_regression
+  trial 3: FAIL improvement/recovered=-0.0001 lat=564.6399855613708us correct=True reason=failed: latency_improved
+  PASS 0/3
+######## control 3/3: planted numerics change
+rendered /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda/agent_task_rendered.md (100 lines)
+==================== k3_kda TRIAL 3 ====================
+--- Wrapper: Applying owner=yilegu, memory=432834647654 bytes, and cpus=28.8 ---
+== [3] launching Codex agent (gpt-5.6-luna effort=max, timeout 1s)
+== [3] agent exit=124 (transcript: /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda/trial_3_agent.log)
+== [3] saved iteration workspace -> /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda/trial_3_opt_run
+== [3] CONTROL: applying planted patch /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/controls/planted_numerics.patch to the agent tree
+patching file srt/models/kimi_k3.py
+== [3] deterministic rebuild of the agent's tree
+== [3] install step: true
+== [3] judging (judge_k3.py)
+{
+  "agent_container": "iteropt_k3_kda_run_3",
+  "case_key": "9b15fde26cca",
+  "points": {
+    "128,8192": {
+      "before_us": 560.4479908943176,
+      "before_sigma_us": 0.03264157150744588,
+      "after_us": 562.4960064888,
+      "after_lat": [
+        562.5600218772888,
+        562.5280141830444,
+        562.4639987945557,
+        562.3679757118225,
+        562.4960064888
+      ],
+      "improvement": -0.0037,
+      "noise_frac_3sigma": 0.0002,
+      "correctness": {
+        "max_abs_err": 0.01171875,
+        "max_rel_err": 0.06666628740956496,
+        "mean_rel_err": 0.06401625275611877,
+        "nan": false,
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": false
+      },
+      "latency_mode": "graph",
+      "primary": true
+    },
+    "32,8192": {
+      "before_us": 305.4719865322113,
+      "before_sigma_us": 0.1924256766707255,
+      "after_us": 306.5280020236969,
+      "after_lat": [
+        306.5280020236969,
+        306.5280020236969,
+        306.4959943294525,
+        306.4959943294525,
+        306.5280020236969
+      ],
+      "improvement": -0.0035,
+      "noise_frac_3sigma": 0.0019,
+      "correctness": {
+        "max_abs_err": 0.0107421875,
+        "max_rel_err": 0.0666662529318606,
+        "mean_rel_err": 0.06403576582670212,
+        "nan": false,
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": false
+      },
+      "latency_mode": "graph",
+      "primary": false
+    },
+    "1,8192": {
+      "before_us": 175.4239946603775,
+      "before_sigma_us": 0.025600194931030273,
+      "after_us": 178.52799594402313,
+      "after_lat": [
+        177.50400304794312,
+        178.52799594402313,
+        178.49600315093994,
+        178.5919964313507,
+        178.52799594402313
+      ],
+      "improvement": -0.0177,
+      "noise_frac_3sigma": 0.0004,
+      "correctness": {
+        "max_abs_err": 0.01025390625,
+        "max_rel_err": 0.07291614815183536,
+        "mean_rel_err": 0.06513869762420654,
+        "nan": false,
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": false
+      },
+      "latency_mode": "graph",
+      "primary": false
+    }
+  },
+  "driver_sha": "a631ad397746",
+  "changed_files": [
+    "srt/models/kimi_k3.py"
+  ],
+  "diff_patch": "/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda/trial_3_tree_judged.patch",
+  "diff_lines": 12,
+  "gates": {
+    "correctness": false,
+    "latency_improved": false,
+    "no_secondary_regression": true
+  },
+  "required_improvement": 0.05,
+  "before_us": 560.4479908943176,
+  "latency_us": 562.4960064888,
+  "recovered_frac": -0.0037,
+  "correctness": {
+    "pass": false
+  },
+  "golden_dir": "/raid/yilegu/eval_goldens/golden_k3_9b15fde26cca",
+  "verdict": "FAIL",
+  "reason": "failed: correctness,latency_improved"
+}
+== [3] done -> /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda/trial_3_verdict.json
+==================== SUMMARY (k3_kda) ====================
+  trial 1: FAIL improvement/recovered=-0.0001 lat=560.479998588562us correct=True reason=failed: latency_improved
+  trial 2: FAIL improvement/recovered=-0.1773 lat=659.8399877548218us correct=True reason=failed: latency_improved,no_secondary_regression
+  trial 3: FAIL improvement/recovered=-0.0037 lat=562.4960064888us correct=False reason=failed: correctness,latency_improved
+  PASS 0/3
+######## verdicts
+trial_1_verdict.json FAIL failed: latency_improved required= 0.05 {'128,8192': (-0.0001, True), '32,8192': (-0.0001, True), '1,8192': (0.0, True)}
+trial_2_verdict.json FAIL failed: latency_improved,no_secondary_regression required= 0.05 {'128,8192': (-0.1773, True), '32,8192': (-0.3321, True), '1,8192': (-0.5954, True)}
+trial_3_verdict.json FAIL failed: correctness,latency_improved required= 0.05 {'128,8192': (-0.0037, False), '32,8192': (-0.0035, False), '1,8192': (-0.0177, False)}
