@@ -3,6 +3,10 @@
 *Companion to `K3_OPTIMIZATION_REPORT.md` (single-layer results, techniques, PR plan). This document is the full record
 of the end-to-end runs: what model was served, the exact server and client commands, every workload, every run.*
 
+> **Data location.** `k3_e2e/` (bench scripts, `results/`, job logs, `fmha_launcher_ab/`) is not in git. It lives,
+> organized per PR (write-up + patch + runs + job logs), at
+> `kisnis.cs.washington.edu:/mnt/storage/yilegu/data/VibeOptimizer-kimi/` (see its `README.md`).
+
 ## 1. Summary (revised 2026-10-15 — clean protocol)
 
 > **Revision.** The first version of this report (kept as `K3_E2E_BENCHMARK_REPORT.v1_20261014.md`) measured each
