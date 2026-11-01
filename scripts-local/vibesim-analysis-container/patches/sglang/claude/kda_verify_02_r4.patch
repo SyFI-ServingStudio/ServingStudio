@@ -1,0 +1,183 @@
+diff -ruN -x __pycache__ -x '*.pyc' a/kernels/ops/attention/fla/fused_norm_gate.py b/kernels/ops/attention/fla/fused_norm_gate.py
+--- a/kernels/ops/attention/fla/fused_norm_gate.py	2026-09-18 02:16:55.000000000 -0700
++++ b/kernels/ops/attention/fla/fused_norm_gate.py	2026-10-05 00:44:58.680434404 -0700
+@@ -36,6 +36,9 @@
+     rstd,  # pointer to the 1/std
+     eps,  # epsilon to avoid division by zero
+     T,  # number of rows in x
++    stride_gt,  # G_STRIDED: gate stride between tokens (elements)
++    stride_gh,  # G_STRIDED: gate stride between heads (elements)
++    GH,  # G_STRIDED: heads per token (rows of x per gate token row)
+     D: tl.constexpr,  # number of columns in x
+     BT: tl.constexpr,
+     BD: tl.constexpr,
+@@ -45,6 +48,7 @@
+     HAS_RESIDUAL: tl.constexpr,
+     HAS_WEIGHT: tl.constexpr,
+     HAS_BIAS: tl.constexpr,
++    G_STRIDED: tl.constexpr = False,
+     USE_GDC: tl.constexpr = False,
+ ):
+     # PDL: x is the producer's output (e.g. the fused KDA verify kernel, which
+@@ -98,8 +102,23 @@
+         b_y = b_y + b_b[None, :]
+ 
+     # swish/sigmoid output gate
+-    p_g = tl.make_block_ptr(g, (T, D), (D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
+-    b_g = tl.load(p_g, boundary_check=(0, 1)).to(tl.float32)
++    if G_STRIDED:
++        # [tokens, GH, D] gate view with arbitrary token / head strides (e.g. a
++        # column slice of a fused projection output): no host-side copy.
++        o_t = i_t * BT + tl.arange(0, BT)
++        m_t = o_t < T
++        p_g = (
++            g
++            + (o_t // GH).to(tl.int64)[:, None] * stride_gt
++            + (o_t % GH)[:, None] * stride_gh
++            + o_d[None, :]
++        )
++        b_g = tl.load(p_g, mask=m_t[:, None] & m_d[None, :], other=0.0).to(
++            tl.float32
++        )
++    else:
++        p_g = tl.make_block_ptr(g, (T, D), (D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
++        b_g = tl.load(p_g, boundary_check=(0, 1)).to(tl.float32)
+     if ACTIVATION == "swish" or ACTIVATION == "silu":
+         b_y = b_y * b_g * tl.sigmoid(b_g)
+     elif ACTIVATION == "sigmoid":
+@@ -191,7 +210,10 @@
+     out_dtype: torch.dtype = None,
+     residual_dtype: torch.dtype = None,
+     is_rms_norm: bool = False,
++    g_strided: torch.Tensor = None,
+ ):
++    """``g_strided``: optional [tokens, GH, D] gate view (unit last stride)
++    used in place of ``g`` by the D <= 512 kernel without materializing it."""
+     if residual is not None:
+         residual_dtype = residual.dtype
+     T, D = x.shape
+@@ -222,11 +244,24 @@
+         raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
+     # heuristics for number of warps
+ 
++    if g_strided is not None and D > 512:
++        g = g_strided.reshape(-1, D)
++        g_strided = None
+     if D <= 512:
+         BT = 32
+         pdl_kwargs = (
+             {"USE_GDC": True, "launch_pdl": True} if is_arch_support_pdl() else {}
+         )
++        if g_strided is not None:
++            g = g_strided
++            g_kwargs = dict(
++                stride_gt=g.stride(0),
++                stride_gh=g.stride(1),
++                GH=g.shape[1],
++                G_STRIDED=True,
++            )
++        else:
++            g_kwargs = dict(stride_gt=0, stride_gh=0, GH=1)
+         layer_norm_gated_fwd_kernel[(cdiv(T, BT),)](
+             x=x,
+             g=g,
+@@ -249,6 +284,7 @@
+             HAS_WEIGHT=weight is not None,
+             HAS_BIAS=bias is not None,
+             num_warps=4,
++            **g_kwargs,
+             **pdl_kwargs,
+         )
+     else:
+@@ -296,7 +332,25 @@
+         g_shape_og = g.shape
+         # reshape input data into 2D tensor
+         x = x.reshape(-1, x.shape[-1])
+-        g = g.reshape(-1, g.shape[-1])
++        # A [.., tokens, heads, D] gate sliced out of a wider projection
++        # output can't be flattened without a copy: hand the kernel the
++        # strided 3D view instead.
++        g_strided = None
++        if (
++            not torch.is_grad_enabled()
++            and g.dim() >= 3
++            and g.stride(-1) == 1
++            and g.numel() == x.numel()
++        ):
++            try:
++                g.view(-1, g.shape[-1])
++            except RuntimeError:
++                try:
++                    g_strided = g.view(-1, g.shape[-2], g.shape[-1])
++                except RuntimeError:
++                    g_strided = None
++        if g_strided is None:
++            g = g.reshape(-1, g.shape[-1])
+         if residual is not None:
+             assert residual.shape == x_shape_og
+             residual = residual.reshape(-1, residual.shape[-1])
+@@ -315,6 +369,7 @@
+             residual=residual,
+             residual_dtype=residual_dtype,
+             is_rms_norm=is_rms_norm,
++            g_strided=g_strided,
+         )
+         ctx.save_for_backward(residual_out, g, weight, bias, mean, rstd)
+         ctx.x_shape_og = x_shape_og
+diff -ruN -x __pycache__ -x '*.pyc' a/srt/models/kimi_k3.py b/srt/models/kimi_k3.py
+--- a/srt/models/kimi_k3.py	2026-09-27 00:51:22.363142884 -0700
++++ b/srt/models/kimi_k3.py	2026-10-05 00:11:51.291667138 -0700
+@@ -230,6 +230,12 @@
+     return torch.mm(x, weight.t(), out=out)
+ 
+ 
++def _k3_front_gemm_out(
++    x: torch.Tensor, weight: torch.Tensor, out: torch.Tensor
++) -> torch.Tensor:
++    return torch.mm(x, weight.t(), out=out, out_dtype=out.dtype)
++
++
+ # Fully fused KDA decode step (conv1d + delta rule + gated RMSNorm in one
+ # kernel, kernels/ops/attention/kda_fused_decode). The model hands the output-norm gate
+ # to the KDA backend via an attempt-and-verify stash on the attention layer;
+@@ -833,6 +839,12 @@
+         """[router | latent down] rows of the merged front weight."""
+         return self._front_w[self._front_sizes[0] :]
+ 
++    # Merged front split into [router | latent down] + side-stream gate_up
++    # up to this many tokens (TGV <= 32, cuBLAS above). At 256+ verify
++    # tokens the side-stream gate_up slows the HBM-bound MXFP4 GEMMs it
++    # overlaps by more than it saves (measured: flat @256, +2.3% @512).
++    _split_front_max_tokens = 64
++
+     # split_front covers <= 32 tokens. 32 prefetch CTAs keep the hint stream
+     # off most SMs: a full 148-CTA grid slows the 12-CTA KDA recurrence it
+     # overlaps by ~3us (measured on B200, one KDA layer).
+@@ -1298,7 +1310,7 @@
+         num_tokens, hidden_size = hidden_states.shape
+         split_front = (
+             self._split_front_eligible
+-            and num_tokens <= 32
++            and num_tokens <= self._split_front_max_tokens
+             and not k3_ar_fusion.enabled()
+         )
+         if split_front:
+@@ -1309,9 +1321,15 @@
+             # routed experts. Both are row views of the merged weight, and
+             # the TGV kernel keeps the full-K fp32 reduction per output, so
+             # the logits and activations are bit-identical to the merged GEMM.
+-            from sglang.kernels.ops.gemm.cutedsl_bf16_gemm import (
+-                cutedsl_bf16_gemm_out,
+-            )
++            # Above the TGV range (spec-verify widths) both halves are plain
++            # cuBLAS fp32-out GEMMs; the routed half then no longer waits
++            # behind the 12k-row shared gate_up on the critical path.
++            if num_tokens <= 32:
++                from sglang.kernels.ops.gemm.cutedsl_bf16_gemm import (
++                    cutedsl_bf16_gemm_out,
++                )
++            else:
++                cutedsl_bf16_gemm_out = _k3_front_gemm_out
+ 
+             n_gu = self._front_sizes[0]
+             routed_front = hidden_states.new_empty(

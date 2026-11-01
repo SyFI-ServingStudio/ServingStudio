@@ -10938,10 +10938,6 @@ index c12a93f7..37b36761 100644
      }
      Ok(())
  }
-diff --git a/branch b/branch
-new file mode 100644
-index 00000000..b54eb1c5
-Binary files /dev/null and b/branch differ
 diff --git a/doc/alignment/kimi_k3_b12c_prefill.md b/doc/alignment/kimi_k3_b12c_prefill.md
 new file mode 100644
 index 00000000..8c26f192

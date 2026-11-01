@@ -1,0 +1,130 @@
+diff -ruN -x __pycache__ -x '*.pyc' a/srt/models/kimi_k3.py b/srt/models/kimi_k3.py
+--- a/srt/models/kimi_k3.py	2026-09-25 05:02:42.660787379 -0700
++++ b/srt/models/kimi_k3.py	2026-09-30 06:53:10.395237759 -0700
+@@ -475,6 +475,8 @@
+         self.num_shared_experts = config.num_shared_experts
+         self.layer_idx = layer_idx
+         self.alt_stream = alt_stream
++        # the prefix fold into shared_output must be summed once by the AR
++        self._tp_rank0 = get_tp_group().rank_in_group == 0
+         self._dp_attention = is_dp_attention_enabled()
+ 
+         self.use_latent_moe = config.routed_expert_hidden_size is not None
+@@ -1229,18 +1231,23 @@
+         finally:
+             route_quant_handoff.clear()
+ 
+-    def _forward_shared(self, gate_up, shared_output):
++    def _forward_shared(self, gate_up, shared_output, accumulate=False):
+         shared = self.shared_experts
+         if TYPE_CHECKING:
+             assert shared is not None and isinstance(
+                 shared.down_proj.weight, torch.Tensor
+             )
+         assert shared is not None
+-        _k3_bf16_gemm(
+-            shared.act_fn(gate_up),
+-            shared.down_proj.weight,
+-            out=shared_output,
+-        )
++        act = shared.act_fn(gate_up)
++        if accumulate:
++            # carveout leaves SMs to the routed MoE chain it overlaps; captured
++            # into the graph. 32 measured on B200 B256/B512 (B256 -6us, B512 flat).
++            prev = torch._C._get_sm_carveout_experimental()
++            torch._C._set_sm_carveout_experimental(32)
++            shared_output.addmm_(act, shared.down_proj.weight.t())
++            torch._C._set_sm_carveout_experimental(prev)
++        else:
++            _k3_bf16_gemm(act, shared.down_proj.weight, out=shared_output)
+ 
+     def _get_fused_norm_params(self) -> tuple[torch.Tensor, float]:
+         norm = self.routed_expert_norm
+@@ -1268,20 +1275,6 @@
+             )
+ 
+         num_tokens, hidden_size = hidden_states.shape
+-        fused = _k3_bf16_gemm(
+-            hidden_states,
+-            self._front_w,
+-            out_dtype=torch.float32 if self._front_fp32 else None,
+-        )
+-        gate_up, router_logits, routed_input = torch.split(
+-            fused, self._front_sizes, dim=-1
+-        )
+-        if num_tokens > 1 and _is_hip and not _aiter_k3_opt:
+-            router_logits = router_logits.contiguous()
+-        if self._moe_front_needs_dense_bf16:
+-            # off an fp32 front the cast allocates the dense buffer, so the
+-            # contiguous() behind it is free; off a bf16 front it is the copy
+-            routed_input = routed_input.to(hidden_states.dtype).contiguous()
+         latent_numel = num_tokens * self.moe_hidden_size
+         if k3_ar_fusion.enabled():
+             # the shared-expert AR is pull-only, so its input must be a
+@@ -1300,6 +1293,37 @@
+ 
+         latent = buf[:latent_numel].view(num_tokens, self.moe_hidden_size)
+         shared_output = buf[latent_numel:].view(num_tokens, hidden_size)
++        up_weight = getattr(self.routed_expert_up_proj, "weight", None)
++        # Above 16 tokens fold the 3-way tail add into the GEMMs: prefix_sum
++        # seeds shared_output (beta=1 down GEMM), latent_up accumulates onto it.
++        fold = (
++            prefix_sum is not None
++            and num_tokens > 16
++            and self.alt_stream is not None
++            and not k3_ar_fusion.enabled()
++            and isinstance(up_weight, torch.Tensor)
++            and up_weight.dtype == torch.bfloat16
++        )
++        fold_prefix = fold and self._tp_rank0
++        if fold_prefix:
++            # forked ahead of the front GEMM so the copy never delays shared_down
++            self.alt_stream.wait_stream(torch.cuda.current_stream())
++            with torch.cuda.stream(self.alt_stream):
++                shared_output.copy_(prefix_sum)
++        fused = _k3_bf16_gemm(
++            hidden_states,
++            self._front_w,
++            out_dtype=torch.float32 if self._front_fp32 else None,
++        )
++        gate_up, router_logits, routed_input = torch.split(
++            fused, self._front_sizes, dim=-1
++        )
++        if num_tokens > 1 and _is_hip and not _aiter_k3_opt:
++            router_logits = router_logits.contiguous()
++        if self._moe_front_needs_dense_bf16:
++            # off an fp32 front the cast allocates the dense buffer, so the
++            # contiguous() behind it is free; off a bf16 front it is the copy
++            routed_input = routed_input.to(hidden_states.dtype).contiguous()
+         fused_norm = False
+         if self.alt_stream is not None and k3_ar_fusion.enabled():
+             defer_finalize = (
+@@ -1362,7 +1386,9 @@
+                 current_stream = torch.cuda.current_stream()
+                 self.alt_stream.wait_stream(current_stream)
+                 with torch.cuda.stream(self.alt_stream):
+-                    self._forward_shared(gate_up, shared_output)
++                    self._forward_shared(
++                        gate_up, shared_output, accumulate=fold_prefix
++                    )
+                 self._forward_routed(hidden_states, router_logits, routed_input, latent)
+                 current_stream.wait_stream(self.alt_stream)
+             else:
+@@ -1384,7 +1410,6 @@
+         shared_output = buf[latent_numel:].view(num_tokens, hidden_size)
+         if not fused_norm:
+             latent = self._latent_norm(latent)
+-        up_weight = getattr(self.routed_expert_up_proj, "weight", None)
+         if (
+             isinstance(up_weight, torch.Tensor)
+             and up_weight.dtype == torch.bfloat16
+@@ -1393,6 +1418,9 @@
+             and latent.shape[0] <= 16
+         ):
+             out = _k3_bf16_gemm(latent, up_weight)
++        elif fold:
++            assert isinstance(up_weight, torch.Tensor)
++            return shared_output.addmm_(latent, up_weight.t())
+         else:
+             out, _ = self.routed_expert_up_proj(latent)
+ 

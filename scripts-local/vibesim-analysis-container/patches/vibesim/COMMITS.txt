@@ -163,3 +163,4 @@ ef202ca2 Align K3 MXFP4 MoE runner with layer launch
 bbb2ae4e kimi_k3: long-context chunked-prefill presets + baked predictions (16k/32k chunks at 128k-262k prefixes) for the lcprefill oracles
 427d75f8 k3: align chunked-prefill prediction fidelity
 5ebb7ab3 kimi_k3: mixed prefill-chunk + decode presets (64x8k+16k chunk, 128x8k+4k chunk, 64x8k+16k@49k) for the mixed oracles
+72b153f3 kimi_k3: untrack stray smoke profile DB 'branch' (committed by accident in 85eefeb4; file kept on disk)

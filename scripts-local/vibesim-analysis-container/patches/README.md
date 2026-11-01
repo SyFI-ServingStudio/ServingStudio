@@ -1,4 +1,4 @@
-# Kimi-K3 loop — patches of what works (2026-09-28)
+# Kimi-K3 loop — patches of what works (2026-10-11)
 
 Regenerate with `./export_k3_patches.sh` (validates that each sglang chain reproduces the case's best tree).
 

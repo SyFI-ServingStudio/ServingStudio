@@ -1,0 +1,155 @@
+diff -ruN -x __pycache__ -x '*.pyc' a/srt/models/deepseek_common/attention_forward_methods/forward_mha.py b/srt/models/deepseek_common/attention_forward_methods/forward_mha.py
+--- a/srt/models/deepseek_common/attention_forward_methods/forward_mha.py	2026-09-30 04:20:40.803518742 -0700
++++ b/srt/models/deepseek_common/attention_forward_methods/forward_mha.py	2026-09-30 15:18:31.495623649 -0700
+@@ -392,7 +392,19 @@
+                 causal_kv=(k, v),
+             )
+         else:
++            issue_gate = (
++                None
++                if has_extend_prefix
++                else getattr(self, "_issue_output_gate_behind_attn", None)
++            )
++            attn_ready = (
++                torch.cuda.current_stream().record_event()
++                if issue_gate is not None
++                else None
++            )
+             attn_output = self.attn_mha(q, k, v, forward_batch, save_kv_cache=False)
++            if issue_gate is not None:
++                issue_gate(None, after=attn_ready)
+ 
+             # Do mha attention with chunked prefix cache if there are any sequence with prefix
+             if has_extend_prefix:
+@@ -596,6 +608,12 @@
+                         q, *causal_kv, forward_batch, after=prefix_ready
+                     )
+                 )
++                # Behind the causal pass on its stream, the output-gate GEMM
++                # is dispatched after both attention grids and fills the
++                # prefix pass's last wave.
++                issue_gate = getattr(self, "_issue_output_gate_behind_attn", None)
++                if issue_gate is not None:
++                    issue_gate(self.alt_stream)
+             # One merge behind the attention launches, so that the next chunk's
+             # gather/projection is not queued behind the overlapped causal pass.
+             if pending is not None:
+diff -ruN -x __pycache__ -x '*.pyc' a/srt/models/kimi_k3.py b/srt/models/kimi_k3.py
+--- a/srt/models/kimi_k3.py	2026-09-24 05:40:30.721083030 -0700
++++ b/srt/models/kimi_k3.py	2026-09-30 15:50:06.951564358 -0700
+@@ -1229,19 +1229,46 @@
+         finally:
+             route_quant_handoff.clear()
+ 
+-    def _forward_shared(self, gate_up, shared_output):
++    def _forward_shared(self, gate_up, shared_output, accumulate: bool = False):
+         shared = self.shared_experts
+         if TYPE_CHECKING:
+             assert shared is not None and isinstance(
+                 shared.down_proj.weight, torch.Tensor
+             )
+         assert shared is not None
++        if accumulate:
++            # beta=1 epilogue: shared_output += act @ W_down^T
++            shared_output.addmm_(shared.act_fn(gate_up), shared.down_proj.weight.t())
++            return
+         _k3_bf16_gemm(
+             shared.act_fn(gate_up),
+             shared.down_proj.weight,
+             out=shared_output,
+         )
+ 
++    def _folds_prefix_into_gemms(
++        self, prefix_sum: Optional[torch.Tensor], num_tokens: int
++    ) -> bool:
++        """Whether _forward_fused may accumulate the shared and routed tails
++        straight onto prefix_sum: only without any collective on the
++        [latent | shared] pair and for GEMMs past the small-M TGV buckets.
++        The rounding moves from two bf16 adds into the fp32 epilogues."""
++        if prefix_sum is None or num_tokens <= 16:
++            return False
++        up_weight = getattr(self.routed_expert_up_proj, "weight", None)
++        down_weight = getattr(self.shared_experts.down_proj, "weight", None)
++        return (
++            self.tp_size == 1
++            and not k3_ar_fusion.enabled()
++            and isinstance(up_weight, torch.Tensor)
++            and isinstance(down_weight, torch.Tensor)
++            and up_weight.dtype == down_weight.dtype == prefix_sum.dtype
++            and prefix_sum.dtype == torch.bfloat16
++            and prefix_sum.is_contiguous()
++            and prefix_sum.shape == (num_tokens, up_weight.shape[0])
++            and __import__("os").environ.get("K3X_FOLD", "1") == "1"  # K3X_TMP
++        )
++
+     def _get_fused_norm_params(self) -> tuple[torch.Tensor, float]:
+         norm = self.routed_expert_norm
+         assert self.fuse_ar_norm and norm is not None
+@@ -1358,16 +1385,27 @@
+                     prefix_sum,
+                 )
+         else:  # single collective over the flat [latent | shared] pair
++            # Without a collective, fold the tail add into the GEMM epilogues:
++            # the shared down GEMM accumulates onto the (consumed) prefix_sum
++            # and up_proj onto that, replacing the 3-way add's memory pass.
++            fold_prefix = self._folds_prefix_into_gemms(prefix_sum, num_tokens)
++            shared_dst = prefix_sum if fold_prefix else shared_output
+             if self.alt_stream is not None:
+                 current_stream = torch.cuda.current_stream()
+                 self.alt_stream.wait_stream(current_stream)
+                 with torch.cuda.stream(self.alt_stream):
+-                    self._forward_shared(gate_up, shared_output)
++                    self._forward_shared(gate_up, shared_dst, accumulate=fold_prefix)
+                 self._forward_routed(hidden_states, router_logits, routed_input, latent)
+                 current_stream.wait_stream(self.alt_stream)
+             else:
+-                self._forward_shared(gate_up, shared_output)
++                self._forward_shared(gate_up, shared_dst, accumulate=fold_prefix)
+                 self._forward_routed(hidden_states, router_logits, routed_input, latent)
++            if fold_prefix:
++                assert prefix_sum is not None and self.routed_expert_up_proj
++                latent = self._latent_norm(latent)
++                return prefix_sum.addmm_(
++                    latent, self.routed_expert_up_proj.weight.t()  # type: ignore
++                )
+             if self.fuse_ar_norm and k3_ar_fusion.enabled():
+                 fused_norm = True
+                 k3_ar_fusion.all_reduce_norm(
+@@ -2339,6 +2377,37 @@
+                 gate, _ = self.g_proj(hidden_states)
+             self._gate_precomputed = (gate, alt)
+ 
++    def _issue_output_gate_behind_attn(
++        self,
++        stream: Optional[torch.cuda.Stream],
++        after: Optional[torch.cuda.Event] = None,
++    ) -> None:
++        """Eager prefill: queue the output-gate GEMM right behind the attention
++        core's launches on a side stream. Its CTAs are dispatched after the
++        attention grids, so the GEMM runs in their last partial wave instead
++        of on the critical path before the gate multiply (the lazy path).
++        Same GEMM on the same input, joined by the o_proj wrap."""
++        hidden_states = self._gate_hidden_states
++        if (
++            not self.use_output_gate
++            or hidden_states is None
++            or self._gate_precomputed is not None
++            or self._gate_alt_stream is None
++            or hidden_states.shape[0] <= self._gate_bs_limit
++            or torch.cuda.is_current_stream_capturing()
++            or __import__("os").environ.get("K3X_GATE", "1") != "1"  # K3X_TMP
++        ):
++            return
++        current_stream = torch.cuda.current_stream()
++        stream = stream if stream is not None else self._gate_alt_stream
++        if after is not None:
++            stream.wait_event(after)
++        with torch.cuda.stream(stream):
++            gate, _ = self.g_proj(hidden_states)
++        hidden_states.record_stream(stream)
++        gate.record_stream(current_stream)
++        self._gate_precomputed = (gate, stream)
++
+     def forward(
+         self,
+         positions: torch.Tensor,

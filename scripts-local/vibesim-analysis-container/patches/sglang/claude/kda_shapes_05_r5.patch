@@ -1,0 +1,16 @@
+diff -ruN -x __pycache__ -x '*.pyc' a/kernels/ops/gemm/cutedsl_bf16_gemm.py b/kernels/ops/gemm/cutedsl_bf16_gemm.py
+--- a/kernels/ops/gemm/cutedsl_bf16_gemm.py	2026-09-18 02:16:55.000000000 -0700
++++ b/kernels/ops/gemm/cutedsl_bf16_gemm.py	2026-09-30 05:57:58.135395296 -0700
+@@ -1324,6 +1324,12 @@
+ 
+ def _pick_tactic(m: int, n: int, k: int) -> int:
+     """Pick the first ladder tactic whose grid fits one wave of the SMs."""
++    if (n, k) == (7168, 6144) and m <= 8:
++        # K3 shared-expert down GEMM. It overlaps the routed MoE chain, so
++        # half the CTAs (56 x 128-row tiles) leave SMs to the routed kernels.
++        # This is still bandwidth-bound, so the step gets ~2us shorter on B200.
++        # At m=32 it regresses. Full-K per CTA, so the result is bit-identical.
++        return 12
+     best, best_ctas = None, None
+     for tactic, cta_m, cta_n, num_mma_ctas in _TGV_TACTIC_LADDER:
+         ctas = _grid_ctas(m, n, cta_m, cta_n, num_mma_ctas)

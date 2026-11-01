@@ -149,3 +149,10 @@ b79a471 k3 follow-up #4: §9.6 interim results (KDA verify -3.55%, MLA verify r1
 9649f4b k3 warm-start KB: verify/mixed cases, per-case seed trees, techniques section E
 57a531b k3 follow-up #4: KDA mixed r2/r3 rows, redo_void_rounds.sh (re-run rounds killed by Bedrock 503 storms)
 78ecf27 k3 follow-up #4: MLA mixed r2 (-45% primary: decode rows of a mixed batch -> absorbed MLA decode), gate v3 (Bedrock 15 min + GPU probe), void-round redo v3
+80e054f k3 follow-up #4 complete: MLA mixed r4 (-2.3%), summary table, techniques doc §3b/§4.8/§6, KB notes, patch chains (kda/mla mixed + verify)
+f35386d k3 follow-up #4: mixed-tree seed rechecks (KDA -17%, MLA -61% vs pristine @64 dec + 16k chunk; -90% @128 dec + 4k), final tables
+266a317 k3: handoff document for merging the loop into VibeOptimizer (where the code is, component map, merge plan, gotchas)
+d20b826 k3 handoff: point at the VibeOptimizer kimi-k3-loop staging folder
+6c42b98 k3: continue_decode_prefill.sh (round-robin Opus 5.5 rounds on the non-plateaued decode/prefill cases, per-round Bedrock+GPU gate, VOID redo); gate-only mode for bedrock_gate_and_resume.sh
+5755ee4 k3: submit every GPU job to the preemptible partition; remove the judge's docker containers when slurm preempts/cancels the job
+ac15f5b k3 gate: the GPU probe must request a GPU (--gres=gpu:1); it was only testing CPU scheduling

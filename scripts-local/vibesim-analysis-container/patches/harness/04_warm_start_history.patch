@@ -1,9 +1,9 @@
 diff --git a/scripts-local/vibesim-analysis-container/build_opt_history.py b/scripts-local/vibesim-analysis-container/build_opt_history.py
 new file mode 100755
-index 0000000..64b7b14
+index 0000000..a38c0bc
 --- /dev/null
 +++ b/scripts-local/vibesim-analysis-container/build_opt_history.py
-@@ -0,0 +1,300 @@
+@@ -0,0 +1,304 @@
 +#!/usr/bin/env python3
 +"""Build the Kimi-K3 optimization-history knowledge base (warm start for new workload cases).
 +
@@ -120,6 +120,10 @@ index 0000000..64b7b14
 +    ("kda_mixed_claude", 1): "FAIL (Claude): edited blind while every GPU request sat behind slurm-manager placeholders for 5 h; tree +52..77% slower (first verdict 'non-compiling' was the smoke timing out in the queue).",
 +    ("kda_mixed_claude", 2): "ACCEPTED (Claude, eager metric): lift the one-wave dispatch guard (cdiv(V,16)*N*H <= #SMs, measured on the old single-stage kernel) so the 4-stage cp.async CUDA kda_chunk_h scan also serves mixed batches (N=65/129 sequences; Triton h-scan was 645 us there): 8659->8361 us @64 dec + 16k chunk (-3.4%), -4.5% @48k prefix, 128-dec point flat; row-wise CHECK pass.",
 +    ("mla_mixed_claude", 1): "VOID (Claude): tree byte-identical to the seed -- the agent never got past iter_00 while GPU-starved (placeholders); +0.04%.",
++    ("kda_mixed_claude", 3): "null (Claude, third start after two VOID ones): -0.8% @64 dec + 16k chunk, +1.6% @48k prefix, correct; the agent lost Bedrock after 133 turns at iter_01.",
++    ("mla_mixed_claude", 2): "ACCEPTED (Claude, eager metric): in a MIXED (EXTEND) batch route the 1-token decode rows to the absorbed MLA decode kernel (trtllm-gen) and keep the chunked-prefix MHA only for the prefill request -- the seed (and production's handle_attention_trtllm_mla) sent the whole batch through MHA_CHUNKED_KV, i.e. 64-128 tiny prefix passes per layer: 15065->8248 us @64 dec + 16k chunk (-45.2%), -77.5% @128 dec + 4k, -65.3% @48k prefix; max rel 0.013, 0/16448 rows over tol. Dead end: one big prefix chunk (11095 @p49152) FAILS CHECK -- log2-LSE vs ln merge_state makes the output chunk-dependent.",
++    ("mla_mixed_claude", 3): "FAIL (Claude): MoE tail add3 -> in-place addmm_ accumulation into the attn-res prefix sum: -0.95% (below the 1.7% floor), +4.3% @128 dec + 4k chunk, exact. Dead ends: CuTe causal variant (CHECK FAIL), MoE tune-at-exact-m (no gain), addmm out= (hidden 72 us memcpy).",
++    ("mla_mixed_claude", 4): "ACCEPTED (Claude): causal in-chunk attention pass restricted to the prefill rows of the mixed batch (the decode rows already take the absorbed decode kernel): 8483->8290 us @64 dec + 16k chunk (-2.28%), -1.5% @128 dec + 4k, -2.0% @48k prefix, max rel 0.0.",
 +}
 +CAMPAIGN1 = {("kda", k) for k in (4, 5, 6, 7)} | {("mla", k) for k in (4, 5, 6, 7)}
 +# The tree a case's round 1 started from when it is another case's best tree (else stacked_tree_judged / pristine).
@@ -306,10 +310,10 @@ index 0000000..64b7b14
 +    main()
 diff --git a/scripts-local/vibesim-analysis-container/opt_history_techniques.md b/scripts-local/vibesim-analysis-container/opt_history_techniques.md
 new file mode 100644
-index 0000000..8d8deac
+index 0000000..9b1381e
 --- /dev/null
 +++ b/scripts-local/vibesim-analysis-container/opt_history_techniques.md
-@@ -0,0 +1,75 @@
+@@ -0,0 +1,77 @@
 +# Kimi-K3 single-layer optimization: techniques that worked, and dead ends
 +
 +*Curated 2026-09-24 from 30+ judged trials on sglang v0.5.20 / B200 (one rank of the cookbook
@@ -382,6 +386,8 @@ index 0000000..8d8deac
 +| E2 | satfinite fp8 cvt in `set_mla_kv_concat_q` + shared/routed alt-stream overlap + MLA output-gate `g_proj` enqueued after the MLA node (fork event at `forward_absorb_core`, overlap up to 512 tokens) (MLA) | `kernels/jit/csrc/elementwise/set_mla_kv_concat_q.cuh`, `srt/models/kimi_k3.py` | −4.15% @64×8k vk3, −5.8% @16×64k, bit-exact | from PRISTINE: every accepted MLA decode tree regressed verify (+5.8…+31%), so verify cases must not inherit them blindly |
 +| E3 | residual add fused into the attn_res TMA aggregate + SM carveout on the shared-expert down GEMM so the MoE routing kernel is not blocked (MLA) | `kernels/jit/csrc/kimi_k3/attn_res/fused_tma.cuh`, `srt/layers/attn_residual.py`, `srt/models/kimi_k3.py` | −2.09% @64×8k vk3 | forking the shared experts after topk was worse (482.5 vs 474.5) |
 +| E4 | Lift the one-wave dispatch guard (`cdiv(V,16)*N*H <= #SMs`) so the 4-stage cp.async CUDA `kda_chunk_h` scan also serves mixed batches with many short sequences (N = 65/129) (KDA mixed) | `kernels/ops/attention/kda_chunk_h.py` / `fla/chunk_delta_h.py` | −3.4% @64 dec + 16k chunk, −4.5% @48k prefix | the guard was measured on the old single-stage kernel; the Triton h-scan cost 645 µs in the mixed batch |
++| E5 | In a MIXED (EXTEND) batch, route the 1-token decode rows to the absorbed MLA decode kernel (trtllm-gen) and run the chunked-prefix MHA only for the prefill request (MLA mixed) | `trtllm_mla_backend.py`, `forward_batch_deepseek_mha_mixin.py`, `attention_forward_methods/forward_mha.py` | **−45% @64 dec + 16k chunk, −77% @128 dec + 4k, −65% @48k prefix** | production's `handle_attention_trtllm_mla` sends every extend batch through `MHA_CHUNKED_KV` (64–128 tiny prefix passes per layer for the decode rows); applies to deployments with `--enable-mixed-chunk`. Do NOT merge the prefix into one chunk: log2-LSE vs ln `merge_state` makes the output chunk-dependent (CHECK FAIL) |
++| E6 | Restrict the causal in-chunk attention pass to the prefill rows of the mixed batch (MLA mixed, on top of E5) | same three files | −2.3% @64 dec + 16k chunk | bit-exact; the decode rows no longer need the causal pass at all |
 +
 +Dead ends here: trtllm-gen MLA at q_len=4 (2× slower than CuteDSL, microbench); MLA split_kv override,
 +TGV / deep_gemm GEMM swaps at these m; variants of the KV-concat kernel beyond E2 (±0).

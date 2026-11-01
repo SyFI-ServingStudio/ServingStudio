@@ -1,0 +1,510 @@
+diff -ruN -x __pycache__ -x '*.pyc' a/kernels/jit/csrc/attention/kda_fused_decode.cuh b/kernels/jit/csrc/attention/kda_fused_decode.cuh
+--- a/kernels/jit/csrc/attention/kda_fused_decode.cuh	2026-09-27 00:19:33.226205422 -0700
++++ b/kernels/jit/csrc/attention/kda_fused_decode.cuh	2026-09-30 00:59:27.013296482 -0700
+@@ -134,6 +134,25 @@
+   asm volatile("fence.proxy.async.shared::cta;");
+ }
+ 
++// ---- thread-block cluster (PTX ISA §9.7.13.4, §9.7.9.x mapa) ---------------
++
++// Split cluster barrier: every thread of every CTA in the cluster must arrive,
++// and phases alternate arrive -> wait.
++static SGL_DEVICE void cluster_arrive() {
++  asm volatile("barrier.cluster.arrive.release.aligned;" ::: "memory");
++}
++
++static SGL_DEVICE void cluster_wait() {
++  asm volatile("barrier.cluster.wait.acquire.aligned;" ::: "memory");
++}
++
++// Store to the same smem variable of CTA `rank` in this cluster (DSMEM).
++static SGL_DEVICE void st_cluster_f32(float* local_ptr, uint32_t rank, float value) {
++  uint32_t remote;
++  asm volatile("mapa.shared::cluster.u32 %0, %1, %2;" : "=r"(remote) : "r"(to_shared(local_ptr)), "r"(rank));
++  asm volatile("st.shared::cluster.f32 [%0], %1;" ::"r"(remote), "f"(value) : "memory");
++}
++
+ }  // namespace ptx
+ 
+ constexpr int kDimK = 128;
+@@ -997,6 +1016,322 @@
+                          : kda_fused_decode_k3_kernel<kFixedHeads, false, kUsePDL, StateT>;
+ }
+ 
++// Small-grid variant of kda_fused_decode_k3_kernel. Each (token, head) is
++// split over a cluster of kVSplit CTAs, CTA `rank` owning V rows
++// [rank*kDimV/kVSplit, (rank+1)*kDimV/kVSplit); every CTA redundantly runs the
++// q/k conv, decay and L2 norm. Per-row math, the row pairing and the onorm
++// sumsq order (per-32-row warp totals combined by one warp) match the base
++// kernel, so output and state are bitwise equal. Inputs no kernel of this step
++// writes (slot index, recurrent state via TMA, conv-state taps, params) are
++// read before the PDL wait, hiding their latency under the qkvg GEMM tail.
++// q/k conv-state writes wait for a cluster barrier since every CTA of the
++// cluster reads those channels.
++template <int kFixedHeads, bool kUseLowerBound, bool kUsePDL, typename StateT, int kVSplit>
++__global__ __launch_bounds__(kThreads, 1) void kda_fused_decode_k3_vsplit_kernel(
++    const __nv_bfloat16* __restrict__ x_q,
++    const __nv_bfloat16* __restrict__ x_k,
++    const __nv_bfloat16* __restrict__ x_v,
++    const float* __restrict__ w_q_t,
++    const float* __restrict__ w_k_t,
++    const float* __restrict__ w_v_t,
++    const float* __restrict__ bias_q,
++    const float* __restrict__ bias_k,
++    const float* __restrict__ bias_v,
++    __nv_bfloat16* __restrict__ cs_q,
++    __nv_bfloat16* __restrict__ cs_k,
++    __nv_bfloat16* __restrict__ cs_v,
++    const float* __restrict__ a_log,
++    const __nv_bfloat16* __restrict__ g,
++    const float* __restrict__ dt_bias,
++    const __nv_bfloat16* __restrict__ beta,
++    const __nv_bfloat16* __restrict__ onorm_g,
++    const float* __restrict__ onorm_weight,
++    const int* __restrict__ ssm_state_indices,
++    const int* __restrict__ cu_seqlens,
++    StateT* __restrict__ state,
++    __nv_bfloat16* __restrict__ out,
++    int B,
++    int H,
++    int HV,
++    float lower_bound,
++    float scale,
++    float onorm_eps,
++    int64_t x_row_stride,
++    int64_t g_row_stride,
++    int64_t beta_row_stride,
++    int64_t onormg_row_stride,
++    int64_t cs_slot_stride,
++    int64_t cs_w_stride,
++    int64_t state_slot_stride) {
++  static_assert(kVSplit > 1 && kNumChunks % kVSplit == 0);
++  constexpr int kLocalChunks = kNumChunks / kVSplit;
++  constexpr int kLocalV = kDimV / kVSplit;
++  constexpr int kLocalK = kDimK / kVSplit;
++  constexpr int kOnormWarps = kDimV / 32;
++  constexpr int kLocalOnormWarps = kLocalV / 32;
++  static_assert(kLocalV % 32 == 0);
++  static_assert(kThreads >= kDimK + kDimV);
++
++  const int tid = threadIdx.x;
++  const int lane = tid & 31;
++  const int warp = tid >> 5;
++  // Cluster dims are (kVSplit, 1, 1), so the cluster rank is blockIdx.x % kVSplit.
++  const int rank = static_cast<int>(blockIdx.x) % kVSplit;
++  const int i_n = static_cast<int>(blockIdx.x) / kVSplit;
++  const int i_hv = blockIdx.y;
++  const int i_h = i_hv;
++  const int bos = i_n;
++  const int slot = ssm_state_indices == nullptr ? i_n : ssm_state_indices[i_n];
++  const int v_lo = rank * kLocalV;
++
++  // Uniform across the cluster (same token), so no CTA is left at a barrier.
++  if (slot < 0) {
++    device::PDLWaitPrimary<kUsePDL>();
++    if (tid < kLocalV) {
++      out[(i_n * kFixedHeads + i_hv) * kDimV + v_lo + tid] = __float2bfloat16(0.0f);
++    }
++    device::PDLTriggerSecondary<kUsePDL>();
++    return;
++  }
++
++  const int hk_off = i_h * kDimK;
++  const int hv_off = i_hv * kDimV;
++  constexpr int hkv_dim = kFixedHeads * kDimK;
++  constexpr int hvv_dim = kFixedHeads * kDimV;
++
++  extern __shared__ __align__(16) unsigned char s_state_storage[];
++  StateT* s_state = reinterpret_cast<StateT*>(s_state_storage);
++  __shared__ float s_q[kDimK];
++  __shared__ float s_k[kDimK];
++  __shared__ float s_decay[kDimK];
++  __shared__ float s_v[kDimV];
++  __shared__ float s_o[kLocalV];
++  __shared__ float s_reduce[kThreads];
++  __shared__ float s_onorm_part[kOnormWarps];
++  __shared__ float s_beta;
++  __shared__ uint64_t s_tma_bar[kLocalChunks];
++
++  if (tid == 0) {
++#pragma unroll
++    for (int c = 0; c < kLocalChunks; ++c) {
++      ptx::mbar_init(&s_tma_bar[c], 1);
++    }
++#pragma unroll
++    for (int c = 0; c < kLocalChunks; ++c) {
++      tma_state_chunk_stage<kChunkV>(
++          s_state, state, slot, i_hv, state_slot_stride, rank * kLocalChunks + c, c, &s_tma_bar[c]);
++    }
++  }
++
++  // Lower warps: q conv + decay; upper warps: k conv, then this CTA's v rows.
++  const bool is_q = tid < kDimK;
++  const int k = is_q ? tid : tid - (kThreads - kDimK);
++  const int hk = hk_off + k;
++  const int64_t cs_qk_base = slot * cs_slot_stride + hk;
++  __nv_bfloat16* cs_qk = is_q ? cs_q : cs_k;
++  const float* w_qk_t = is_q ? w_q_t : w_k_t;
++  __nv_bfloat16 qk_state[kConvStateWidth];
++  float qk_w[kKernelWidth];
++#pragma unroll
++  for (int w = 0; w < kConvStateWidth; ++w) {
++    qk_state[w] = cs_qk[cs_qk_base + w * cs_w_stride];
++  }
++#pragma unroll
++  for (int w = 0; w < kKernelWidth; ++w) {
++    qk_w[w] = fp32_at(w_qk_t, w * hkv_dim + hk);
++  }
++  const float qk_bias = is_q ? bias_q[hk] : bias_k[hk];
++  const float gate_bias = is_q ? dt_bias[hk] : 0.0f;
++  const float exp_a = __shfl_sync(0xffffffffu, lane == 0 ? __expf(a_log[i_h]) : 0.0f, 0);
++
++  const int v = tid - (kThreads - kDimV);
++  const bool owns_v = v >= v_lo && v < v_lo + kLocalV;
++  const int hvv = hv_off + v;
++  const int64_t cs_v_base = slot * cs_slot_stride + hvv;
++  __nv_bfloat16 v_state[kConvStateWidth];
++  float v_w[kKernelWidth];
++  float v_bias = 0.0f;
++  if (owns_v) {
++#pragma unroll
++    for (int w = 0; w < kConvStateWidth; ++w) {
++      v_state[w] = cs_v[cs_v_base + w * cs_w_stride];
++    }
++#pragma unroll
++    for (int w = 0; w < kKernelWidth; ++w) {
++      v_w[w] = fp32_at(w_v_t, w * hvv_dim + hvv);
++    }
++    v_bias = bias_v[hvv];
++  }
++  const float pre_onorm_weight = tid < kLocalV ? onorm_weight[v_lo + tid] : 0.0f;
++
++  // Everything below may read the preceding kernel's outputs.
++  device::PDLWaitPrimary<kUsePDL>();
++
++  const __nv_bfloat16 qk_new = (is_q ? x_q : x_k)[bos * x_row_stride + hk];
++  {
++    float acc = qk_bias;
++#pragma unroll
++    for (int w = 0; w < kConvStateWidth; ++w) {
++      acc += __bfloat162float(qk_state[w]) * qk_w[w];
++    }
++    acc += __bfloat162float(qk_new) * qk_w[kKernelWidth - 1];
++    (is_q ? s_q : s_k)[k] = conv_silu_bf16(acc);
++
++    if (is_q) {
++      const float g_raw = bf16_load(g, bos * g_row_stride + i_hv * kDimK + k) + gate_bias;
++      if constexpr (kUseLowerBound) {
++        s_decay[k] = __expf(lower_bound * device::math::sigmoid_fast(exp_a * g_raw));
++      } else {
++        s_decay[k] = __expf(-exp_a * device::math::softplus_fast(g_raw));
++      }
++    }
++  }
++
++  // Only this CTA reads/writes its v channels, so the v shift can land now.
++  if (owns_v) {
++    const __nv_bfloat16 v_new = x_v[bos * x_row_stride + hvv];
++    float v_acc = v_bias;
++#pragma unroll
++    for (int w = 0; w < kConvStateWidth; ++w) {
++      v_acc += __bfloat162float(v_state[w]) * v_w[w];
++    }
++    v_acc += __bfloat162float(v_new) * v_w[kKernelWidth - 1];
++    cs_v[cs_v_base + 0] = v_state[1];
++    cs_v[cs_v_base + cs_w_stride] = v_state[2];
++    cs_v[cs_v_base + 2 * cs_w_stride] = v_new;
++    s_v[v] = conv_silu_bf16(v_acc);
++  }
++
++  float pre_onorm_gate = 0.0f;
++  if (tid < kLocalV) {
++    const int64_t onorm_idx = i_n * onormg_row_stride + i_hv * kDimV + v_lo + tid;
++    pre_onorm_gate = device::math::sigmoid_fast(bf16_load(onorm_g, onorm_idx));
++  }
++
++  if (tid == 0) {
++    s_beta = device::math::sigmoid_fast(bf16_load(beta, bos * beta_row_stride + i_hv));
++  }
++  __syncthreads();
++  // Phase 1: this CTA is done reading the shared q/k conv channels.
++  ptx::cluster_arrive();
++
++  const float q_sq = tid < kDimK ? s_q[tid] * s_q[tid] : 0.0f;
++  const float k_sq = tid < kDimK ? s_k[tid] * s_k[tid] : 0.0f;
++  const Sum2 qk_sum = block_reduce_sum2(q_sq, k_sq, s_reduce);
++  if (tid < kDimK) {
++    s_q[tid] *= rsqrtf(qk_sum.x + 1.0e-6f) * scale;
++    s_k[tid] *= rsqrtf(qk_sum.y + 1.0e-6f);
++  }
++  __syncthreads();
++
++  const int k_base = lane * 4;
++  const float4 q4 = *reinterpret_cast<const float4*>(s_q + k_base);
++  const float4 k4 = *reinterpret_cast<const float4*>(s_k + k_base);
++  const float4 decay4 = *reinterpret_cast<const float4*>(s_decay + k_base);
++  float r_q[4] = {q4.x, q4.y, q4.z, q4.w};
++  float r_k[4] = {k4.x, k4.y, k4.z, k4.w};
++  float r_decay[4] = {decay4.x, decay4.y, decay4.z, decay4.w};
++  const int64_t slot_base_wb = static_cast<int64_t>(slot) * state_slot_stride;
++
++#pragma unroll
++  for (int c = 0; c < kLocalChunks; ++c) {
++    const int chunk = rank * kLocalChunks + c;
++    ptx::mbar_wait_parity(&s_tma_bar[c], 0);
++    const StateT* state_stage = s_state + c * kChunkV * kDimK;
++
++#pragma unroll
++    for (int row = 0; row < kRowsPerWarp; row += 2) {
++      const int v_row_a = warp + row * kWarps;
++      const int v_row_b = warp + (row + 1) * kWarps;
++      const int v0 = chunk * kChunkV + v_row_a;
++      const int v1 = chunk * kChunkV + v_row_b;
++      float h_a_vals[4];
++      float h_b_vals[4];
++
++      const float4 raw_h_a = load_state4(state_stage + v_row_a * kDimK + k_base);
++      const float4 raw_h_b = load_state4(state_stage + v_row_b * kDimK + k_base);
++      h_a_vals[0] = raw_h_a.x * r_decay[0];
++      h_a_vals[1] = raw_h_a.y * r_decay[1];
++      h_a_vals[2] = raw_h_a.z * r_decay[2];
++      h_a_vals[3] = raw_h_a.w * r_decay[3];
++      h_b_vals[0] = raw_h_b.x * r_decay[0];
++      h_b_vals[1] = raw_h_b.y * r_decay[1];
++      h_b_vals[2] = raw_h_b.z * r_decay[2];
++      h_b_vals[3] = raw_h_b.w * r_decay[3];
++      const float dot_hk_a = h_a_vals[0] * r_k[0] + h_a_vals[1] * r_k[1] + h_a_vals[2] * r_k[2] + h_a_vals[3] * r_k[3];
++      const float dot_hk_b = h_b_vals[0] * r_k[0] + h_b_vals[1] * r_k[1] + h_b_vals[2] * r_k[2] + h_b_vals[3] * r_k[3];
++
++      const Sum2 dot_hk = warp_reduce_sum_pair_packed(dot_hk_a, dot_hk_b);
++      const float v_new0 = (s_v[v0] - dot_hk.x) * s_beta;
++      const float v_new1 = (s_v[v1] - dot_hk.y) * s_beta;
++
++      const int64_t state_idx_a = slot_base_wb + ((i_hv * kDimV + v0) * kDimK + k_base);
++      const int64_t state_idx_b = slot_base_wb + ((i_hv * kDimV + v1) * kDimK + k_base);
++      const float h_a_0 = h_a_vals[0] + r_k[0] * v_new0;
++      const float h_a_1 = h_a_vals[1] + r_k[1] * v_new0;
++      const float h_a_2 = h_a_vals[2] + r_k[2] * v_new0;
++      const float h_a_3 = h_a_vals[3] + r_k[3] * v_new0;
++      const float h_b_0 = h_b_vals[0] + r_k[0] * v_new1;
++      const float h_b_1 = h_b_vals[1] + r_k[1] * v_new1;
++      const float h_b_2 = h_b_vals[2] + r_k[2] * v_new1;
++      const float h_b_3 = h_b_vals[3] + r_k[3] * v_new1;
++      store_state4<false>(state + state_idx_a, make_float4(h_a_0, h_a_1, h_a_2, h_a_3));
++      store_state4<false>(state + state_idx_b, make_float4(h_b_0, h_b_1, h_b_2, h_b_3));
++      const float dot_hq_a = h_a_0 * r_q[0] + h_a_1 * r_q[1] + h_a_2 * r_q[2] + h_a_3 * r_q[3];
++      const float dot_hq_b = h_b_0 * r_q[0] + h_b_1 * r_q[1] + h_b_2 * r_q[2] + h_b_3 * r_q[3];
++
++      const float dot_hq = warp_reduce_sum_pair_split(dot_hq_a, dot_hq_b);
++      if ((lane & 15) == 0) {
++        s_o[(lane == 0 ? v0 : v1) - v_lo] = bf16_round(dot_hq);
++      }
++    }
++  }
++  __syncthreads();
++
++  device::PDLTriggerSecondary<kUsePDL>();
++
++  const float raw_o = tid < kLocalV ? s_o[tid] : 0.0f;
++  ptx::cluster_wait();
++  if (k >= rank * kLocalK && k < (rank + 1) * kLocalK) {
++    cs_qk[cs_qk_base + 0] = qk_state[1];
++    cs_qk[cs_qk_base + cs_w_stride] = qk_state[2];
++    cs_qk[cs_qk_base + 2 * cs_w_stride] = qk_new;
++  }
++
++  // Each 32-row warp total goes to slot v/32 of every CTA in the cluster.
++  if (warp < kLocalOnormWarps) {
++    const float warp_total = device::warp::reduce_sum(raw_o * raw_o);
++    if (lane < kVSplit) {
++      ptx::st_cluster_f32(&s_onorm_part[rank * kLocalOnormWarps + warp], lane, warp_total);
++    }
++  }
++  // Phase 2: the onorm partials are visible cluster-wide.
++  ptx::cluster_arrive();
++  ptx::cluster_wait();
++
++  if (warp == 0) {
++    float block_total = lane < kOnormWarps ? s_onorm_part[lane] : 0.0f;
++    block_total = device::warp::reduce_sum(block_total);
++    if (lane == 0) {
++      s_reduce[0] = block_total;
++    }
++  }
++  __syncthreads();
++
++  if (tid < kLocalV) {
++    const int out_idx = (i_n * kFixedHeads + i_hv) * kDimV + v_lo + tid;
++    const float rstd = rsqrtf(s_reduce[0] / static_cast<float>(kDimV) + onorm_eps);
++    const float y = raw_o * rstd * pre_onorm_weight * pre_onorm_gate;
++    out[out_idx] = bf16_store(y);
++  }
++}
++
++template <int kFixedHeads, int kVSplit, bool kUsePDL, typename StateT>
++auto select_kda_fused_decode_k3_vsplit_kernel(bool use_lower_bound) {
++  return use_lower_bound ? kda_fused_decode_k3_vsplit_kernel<kFixedHeads, true, kUsePDL, StateT, kVSplit>
++                         : kda_fused_decode_k3_vsplit_kernel<kFixedHeads, false, kUsePDL, StateT, kVSplit>;
++}
++
+ template <bool kUsePDL>
+ struct KdaFusedDecodeKernel {
+   template <typename StateT>
+@@ -1019,7 +1354,8 @@
+       double scale,
+       double onorm_eps,
+       double lower_bound,
+-      bool use_lower_bound) {
++      bool use_lower_bound,
++      int64_t v_split) {
+     using namespace host;
+ 
+     const int64_t kH = A_log.shape()[0];
+@@ -1091,16 +1427,25 @@
+         tma_stages = 4;
+       }
+     }
+-    auto kernel = kH == 3 ? select_kda_fused_decode_k3_kernel<3, kUsePDL, StateT>(use_lower_bound, tma_stages)
+-                          : (kH == 6 ? select_kda_fused_decode_k3_kernel<6, kUsePDL, StateT>(use_lower_bound, tma_stages)
+-                                     : select_kda_fused_decode_k3_kernel<12, kUsePDL, StateT>(use_lower_bound, tma_stages));
+-    const int smem_stages = tma_stages == 0 ? 2 : tma_stages;
++    // v_split == 4 picks the cluster-split kernel (TMA staging only); else the base kernel.
++    constexpr int kVSplit = 4;
++    const bool use_v_split = v_split == kVSplit && tma_slot_stride_aligned;
++    auto kernel =
++        use_v_split
++            ? (kH == 3 ? select_kda_fused_decode_k3_vsplit_kernel<3, kVSplit, kUsePDL, StateT>(use_lower_bound)
++                       : (kH == 6 ? select_kda_fused_decode_k3_vsplit_kernel<6, kVSplit, kUsePDL, StateT>(use_lower_bound)
++                                  : select_kda_fused_decode_k3_vsplit_kernel<12, kVSplit, kUsePDL, StateT>(use_lower_bound)))
++            : (kH == 3 ? select_kda_fused_decode_k3_kernel<3, kUsePDL, StateT>(use_lower_bound, tma_stages)
++                       : (kH == 6 ? select_kda_fused_decode_k3_kernel<6, kUsePDL, StateT>(use_lower_bound, tma_stages)
++                                  : select_kda_fused_decode_k3_kernel<12, kUsePDL, StateT>(use_lower_bound, tma_stages)));
++    const int smem_stages = use_v_split ? kNumChunks / kVSplit : (tma_stages == 0 ? 2 : tma_stages);
+     const size_t smem_bytes = static_cast<size_t>(smem_stages) * kChunkV * kDimK * sizeof(StateT);
+     host::RuntimeDeviceCheck(
+         cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, static_cast<int>(smem_bytes)));
+ 
+-    LaunchKernel(dim3(B, kH), dim3(kThreads), device.unwrap(), smem_bytes)
+-        .enable_pdl(kUsePDL)(
++    const int grid_split = use_v_split ? kVSplit : 1;
++    LaunchKernel(dim3(B * grid_split, kH), dim3(kThreads), device.unwrap(), smem_bytes)
++        .config({.use_pdl = kUsePDL, .cluster_dim = use_v_split ? std::optional(dim3(kVSplit, 1, 1)) : std::nullopt})(
+             kernel,
+             /*x_q=*/mixed_ptr,
+             /*x_k=*/mixed_ptr + kSeg,
+@@ -1158,7 +1503,8 @@
+       double scale,
+       double onorm_eps,
+       double lower_bound,
+-      bool use_lower_bound) {
++      bool use_lower_bound,
++      int64_t v_split) {
+     using namespace host;
+     if (is_type<bf16_t>(state.dtype())) {
+       run_impl<bf16_t>(
+@@ -1180,7 +1526,8 @@
+           scale,
+           onorm_eps,
+           lower_bound,
+-          use_lower_bound);
++          use_lower_bound,
++          v_split);
+     } else if (is_type<fp32_t>(state.dtype())) {
+       run_impl<fp32_t>(
+           mixed_qkv,
+@@ -1201,7 +1548,8 @@
+           scale,
+           onorm_eps,
+           lower_bound,
+-          use_lower_bound);
++          use_lower_bound,
++          v_split);
+     } else {
+       RuntimeCheck(false, "KDA fused decode state must be bfloat16 or float32, got ", state.dtype());
+     }
+diff -ruN -x __pycache__ -x '*.pyc' a/kernels/ops/attention/kda_fused_decode.py b/kernels/ops/attention/kda_fused_decode.py
+--- a/kernels/ops/attention/kda_fused_decode.py	2026-09-27 00:19:33.227205339 -0700
++++ b/kernels/ops/attention/kda_fused_decode.py	2026-09-30 00:58:42.014049116 -0700
+@@ -51,6 +51,19 @@
+     )
+ 
+ 
++def _v_split(B: int, H: int) -> int:
++    """KDA kernel selector: 4 = one (token, head) per 4-CTA cluster (V rows
++    split), 0 = the base one-CTA-per-(token, head) kernel."""
++    # Measured on B200 (H=12): the split wins while B*H*4 CTAs fit one wave;
++    # past that (B=16, 32, 128) the base kernel is as fast or faster.
++    return 4 if B * H * 4 <= _num_sms() else 0
++
++
++@cache_once
++def _num_sms() -> int:
++    return torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count
++
++
+ def covered(
+     mixed_qkv: torch.Tensor,
+     a: torch.Tensor,
+@@ -162,5 +175,6 @@
+         float(onorm_eps),
+         float(lower_bound) if lower_bound is not None else 0.0,
+         lower_bound is not None,
++        _v_split(B, H),
+     )
+     return out.view(1, B, H, 128)
+diff -ruN -x __pycache__ -x '*.pyc' a/srt/models/kimi_k3.py b/srt/models/kimi_k3.py
+--- a/srt/models/kimi_k3.py	2026-09-27 00:51:22.363142884 -0700
++++ b/srt/models/kimi_k3.py	2026-09-30 00:58:52.042212825 -0700
+@@ -803,7 +803,10 @@
+         )
+ 
+     def l2_prefetch_ahead(
+-        self, num_tokens: int, tensors: Tuple[torch.Tensor, ...]
++        self,
++        num_tokens: int,
++        tensors: Tuple[torch.Tensor, ...],
++        num_blocks: Optional[int] = None,
+     ) -> None:
+         """Warm L2 with ``tensors`` (weights read later in the layer) on
+         alt_stream while the main stream is latency-bound and HBM mostly
+@@ -826,7 +829,7 @@
+         self.alt_stream.wait_stream(cur)
+         with torch.cuda.stream(self.alt_stream):
+             for t in tensors:
+-                l2_prefetch(t, self._l2_prefetch_blocks)
++                l2_prefetch(t, num_blocks or self._l2_prefetch_blocks)
+ 
+     @property
+     def routed_front_weight(self) -> torch.Tensor:
+@@ -2655,24 +2658,25 @@
+         return group.all_reduce(attn_out), -1, False
+ 
+     _l2_prefetch_start = False
+-    import json as _j, os as _o  # TEMP_KNOB
+-    _TK = _j.load(open("/workspace/opt_run/knob.json")) if _o.path.exists("/workspace/opt_run/knob.json") else {}  # TEMP_KNOB
+-    _TEMP_KP_NUM, _TEMP_KP_DEN = _TK.get("kp", [1, 3])  # TEMP_KNOB
+ 
+     def _l2_prefetch_layer_start(self, num_tokens: int) -> None:
+-        if self._TK.get("off"): return  # TEMP_KNOB
+         # During the attention-side aggregation (one CTA): a K-prefix of the
+         # [q,k,v,g] weight, since every TGV CTA streams its rows along K.
+         w = self.self_attn.fused_qkvg_proj.weight
+         if w.dtype == torch.bfloat16 and w.dim() == 2 and w.is_contiguous():
+-            k = w.shape[1] * self._TEMP_KP_NUM // self._TEMP_KP_DEN // 64 * 64
++            k = w.shape[1] // 3 // 64 * 64
+             self.mlp.l2_prefetch_ahead(num_tokens, (w[:, :k],))
+ 
+     def _l2_prefetch_after_attn_front(self, num_tokens: int) -> None:
+         # During the KDA recurrence: o_proj, then the routed MoE front.
+         o_w = self.self_attn.o_proj.weight
+         head = (o_w,) if o_w.dtype == torch.bfloat16 and o_w.is_contiguous() else ()
+-        self.mlp.l2_prefetch_ahead(num_tokens, (*head, self.mlp.routed_front_weight))
++        # Measured on B200: the cluster-split KDA decode (B <= 3 at 12 heads)
++        # is shorter, so the prefetch needs 64 CTAs to land before o_proj.
++        num_blocks = 64 if num_tokens <= 3 else None
++        self.mlp.l2_prefetch_ahead(
++            num_tokens, (*head, self.mlp.routed_front_weight), num_blocks
++        )
+ 
+     def _run_self_attn(
+         self,
