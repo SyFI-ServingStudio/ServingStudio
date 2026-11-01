@@ -80,7 +80,7 @@ BEFORE_IMG="$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).ge
 # tenants), wait for it to leave the queue, echo its output file's tail. Returns the step's rc.
 slurm_run () { # $1 job-name $2 output-file $3... command
   local name="$1" outf="$2"; shift 2
-  local job; job="$(sbatch --parsable --partition="$K3_SLURM_PARTITION" --job-name="$name" --output="$outf" \
+  local job; job="$(sbatch --parsable --partition="$K3_SLURM_PARTITION" --time="${K3_SLURM_TIME:-01:30:00}" --job-name="$name" --output="$outf" \
                  "$HERE/slurm_gpu.sh" "$HERE/k3_slurm_step.sh" "$@" | cut -d';' -f1)"
   [ -n "$job" ] || { echo "!! sbatch failed for $name"; return 1; }
   echo "== slurm job $job ($name) submitted; output -> $outf"

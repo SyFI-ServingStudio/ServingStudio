@@ -102,7 +102,7 @@ def main():
         for m in a.mount:
             docker_args += ["-v", m]
         docker_args += ["--workdir", r.get("cwd") or "/workspace/opt_run", a.image] + list(r["argv"])
-        cmd = ["sbatch", "--parsable", f"--partition={a.partition}",
+        cmd = ["sbatch", "--parsable", f"--partition={a.partition}", f"--time={os.environ.get('K3_SLURM_TIME_MEASURE', '00:30:00')}",
                f"--job-name={a.job_prefix}_{rid[-6:]}", f"--output={out}",
                str(HERE / "slurm_gpu.sh"), str(HERE / "k3_slurm_step.sh"), "--docker"] + docker_args
         log(f"[{rid}] {r['kind']}: {' '.join(shlex.quote(x) for x in r['argv'])[:300]}")
