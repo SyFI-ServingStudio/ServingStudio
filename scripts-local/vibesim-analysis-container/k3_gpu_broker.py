@@ -90,6 +90,8 @@ def main():
         except Exception as e:
             log(f"bad request {rp}: {e}"); rp.rename(rp.with_suffix(".bad")); continue
         rid = r["id"]
+        if r.get("kind") == "driver":  # agents keep passing "$ARGS" quoted: one "--a x --b" element -> argparse rc 2
+            r["argv"] = [y for x in r["argv"] for y in (shlex.split(x) if x.startswith("--") and " " in x else [x])]
         out, rc_f, job_f = (res_d / f"{rid}.{s}" for s in ("out", "rc", "job"))
         docker_args = ["-e", "CUDA_VISIBLE_DEVICES=0", "-e", "HF_HUB_OFFLINE=1",
                        "-e", "SGLANG_OPT_FUSED_KDA_VERIFY=0", "-e", "TOKENIZERS_PARALLELISM=false",

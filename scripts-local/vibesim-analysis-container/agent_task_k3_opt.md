@@ -76,6 +76,9 @@ python3 /tmp/kimi_single_layer_decode.py --point "$POINTS" $ARGS --capture /work
 # 3) after editing, replay: speed AND correctness (per point: `JSON {...}` and `CHECK {...}`):
 python3 /tmp/kimi_single_layer_decode.py --point "$POINTS" $ARGS --replay /workspace/opt_run/golden.pt
 ```
+- Keep `$ARGS` **unquoted** so the shell splits it into separate flags. `"$ARGS"` (or one list element
+  holding the whole string, e.g. in Python `subprocess`) passes every flag as a single argument, and the
+  driver exits with rc 2 after a wasted GPU job.
 - Every point prints a `JSON {"latency_us": ..., "latency_mode": "graph"|"eager", ...}` line; the
   judged number is `latency_us` (graph mode for decode points and, with `--verify-graph`, for `vk`
   verify points; eager for prefill / mixed points, whose `point` carries the `pf<prefix>` / `mx` tag).
