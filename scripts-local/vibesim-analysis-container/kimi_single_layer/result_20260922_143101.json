@@ -1,0 +1,262 @@
+{
+  "sglang_version": "0.5.20",
+  "moe_backend": "flashinfer_mxfp4",
+  "hidden_act": "situ",
+  "moe_method": {
+    "class": "Mxfp4MoEMethod",
+    "use_flashinfer": true,
+    "use_marlin": false,
+    "_fi_kernel": "trtllm_sm100",
+    "flashinfer_mxfp4_moe_precision": "default"
+  },
+  "experts": 112,
+  "ep": 8,
+  "layer_idx": 5,
+  "attn_type": "kda",
+  "attention_backend": null,
+  "page_size": null,
+  "attn_heads": 12,
+  "cuda_graph": true,
+  "kv_cache_dtype": null,
+  "mamba_ssm_dtype": "bfloat16",
+  "num_attention_heads": 64,
+  "config": {
+    "num_experts": 112,
+    "num_experts_per_token": 16,
+    "num_shared_experts": 2,
+    "moe_intermediate_size": 3072,
+    "routed_expert_hidden_size": 3584,
+    "hidden_size": 7168
+  },
+  "mla": null,
+  "kda": {
+    "num_heads": 12,
+    "head_dim": 128,
+    "short_conv_kernel": 4,
+    "gate_lower_bound": -5.0
+  },
+  "points": [
+    {
+      "B": 32,
+      "seq_len": 8192,
+      "ok": true,
+      "attn_type": "kda",
+      "seed": 0,
+      "attn_res": {
+        "block_num": 8,
+        "valid_blocks": 1,
+        "write_layer": false
+      },
+      "out_shape": [
+        32,
+        7168
+      ],
+      "finite": true,
+      "us_step": 1528.6719799041748,
+      "us_token": 47.77099937200546,
+      "state_mb": 13.888512,
+      "peak_gb": 6.970517504,
+      "us_attn": 471.2640047073364,
+      "us_moe": 820.8640217781067,
+      "us_norms": 46.1760014295578,
+      "graph_ok": true,
+      "us_meta_prep": 57.95200169086456,
+      "us_step_graph": 359.9039912223816,
+      "graph_finite": true,
+      "graph_speedup": 4.24744381053452,
+      "us_token_graph": 11.246999725699425,
+      "latency_us": 359.9039912223816,
+      "latency_mode": "graph",
+      "kernel_profile": {
+        "total_kernel_us": 406.2214000000005,
+        "num_launches": 27.0
+      },
+      "kernel_profile_top": [
+        {
+          "name": "bmm_MxE4m3_MxE2m1MxE4m3_Fp32_Ab32_Bb32_Cb32_t128x8x512_s3_et128x8_m128x8x32_c1x1x1_rM_TN_transOut_schPd2x1x2x3_biasFp32M_bN_tma_ldgstsSf_rgTma_clmp_siTuGlu_dynB_sm100f",
+          "count": 1.0,
+          "total_us": 139.84860000000012,
+          "avg_us": 139.84860000000012
+        },
+        {
+          "name": "bmm_Bfloat16_MxE2m1MxE4m3_Fp32_Ab32_Bb32_t128x8x512u2_s3_et128x8_m128x8x32_c1x1x1_rM_TN_transOut_schPd2x1x2x3_biasFp32M_bN_rgTma_clmp_dynB_sm100f",
+          "count": 1.0,
+          "total_us": 72.45080000000007,
+          "avg_us": 72.45080000000007
+        },
+        {
+          "name": "nvjet_sm100_tss_128x32_64x10_4x1_v_bz_TNT",
+          "count": 1.0,
+          "total_us": 42.66540000000009,
+          "avg_us": 42.66540000000009
+        },
+        {
+          "name": "nvjet_sm100_tst_64x32_64x16_4x1_v_bz_TNT",
+          "count": 2.0,
+          "total_us": 28.399700000000074,
+          "avg_us": 14.199850000000037
+        },
+        {
+          "name": "nvjet_sm100_tst_64x32_64x16_2x1_2cta_v_bz_splitK_TNT",
+          "count": 1.0,
+          "total_us": 19.86549999999993,
+          "avg_us": 19.86549999999993
+        },
+        {
+          "name": "fused_sigmoid_gating_delta_rule_update_kernel",
+          "count": 1.0,
+          "total_us": 12.636900000000015,
+          "avg_us": 12.636900000000015
+        },
+        {
+          "name": "void moe::dev::finalize::finalizeKernel<moe::dev::finalize::KernelParams<cutlass::bfloat16_t, float, 4, true> >(moe::dev::finalize::KernelParams<cutlass::bfloat16_t, float, 4, true>)",
+          "count": 1.0,
+          "total_us": 9.657400000000099,
+          "avg_us": 9.657400000000099
+        },
+        {
+          "name": "void sglang::attn_res_fused_tma_kernel<sglang::KimiK3AttnResTrait<7168l, 1u, 4u, 200u>, 1u>(sglang::AttnResTMAParams)",
+          "count": 2.0,
+          "total_us": 9.519999999999891,
+          "avg_us": 4.759999999999946
+        },
+        {
+          "name": "void cublasLt::splitKreduce_kernel<32, 16, int, float, __nv_bfloat16, float, __nv_bfloat16, false, float, __nv_bfloat16, __nv_bfloat16, true, false, false, false>(cublasLt::cublasSplitKParams<float>, float const*, __nv_bfloat16 const*, float*, __nv_bfloat16*, float const*, float const*, __nv_bfloat16 const*, float const*, __nv_bfloat16*, void*, long, float*, int*, float*, float*, float const*, float const*, float const*, float const*, float const*)",
+          "count": 2.0,
+          "total_us": 8.662299999999869,
+          "avg_us": 4.331149999999934
+        },
+        {
+          "name": "nvjet_sm100_tst_16x64_64x16_4x1_v_bz_splitK_TNN",
+          "count": 1.0,
+          "total_us": 8.595200000000023,
+          "avg_us": 8.595200000000023
+        },
+        {
+          "name": "void moe::dev::routing::routingCustom::routingIndicesClusterKernel<moe::dev::routing::routingCustom::KernelParams<__nv_bfloat16, __nv_bfloat16, 256, 16, moe::dev::routing::TopKExpertSelect<moe::dev::routing::NoOpPreprocess, moe::dev::routing::SoftmaxPostprocess> >, 256>(moe::dev::routing::routingCustom::KernelParams<__nv_bfloat16, __nv_bfloat16, 256, 16, moe::dev::routing::TopKExpertSelect<moe::dev::routing::NoOpPreprocess, moe::dev::routing::SoftmaxPostprocess> >)",
+          "count": 1.0,
+          "total_us": 6.707300000000032,
+          "avg_us": 6.707300000000032
+        },
+        {
+          "name": "nvjet_sm100_tst_128x16_64x11_4x2_h_bz_TNT",
+          "count": 1.0,
+          "total_us": 6.704100000000063,
+          "avg_us": 6.704100000000063
+        }
+      ],
+      "rung": "adhoc"
+    },
+    {
+      "B": 128,
+      "seq_len": 8192,
+      "ok": true,
+      "attn_type": "kda",
+      "seed": 0,
+      "attn_res": {
+        "block_num": 8,
+        "valid_blocks": 1,
+        "write_layer": false
+      },
+      "out_shape": [
+        128,
+        7168
+      ],
+      "finite": true,
+      "us_step": 1377.6960372924805,
+      "us_token": 10.763250291347504,
+      "state_mb": 54.291456,
+      "peak_gb": 2.741959168,
+      "us_attn": 410.5600118637085,
+      "us_moe": 754.144012928009,
+      "us_norms": 47.55200073122978,
+      "graph_ok": true,
+      "us_meta_prep": 52.73599922657013,
+      "us_step_graph": 623.199999332428,
+      "graph_finite": true,
+      "graph_speedup": 2.2106804216435636,
+      "us_token_graph": 4.868749994784594,
+      "latency_us": 623.199999332428,
+      "latency_mode": "graph",
+      "kernel_profile": {
+        "total_kernel_us": 676.8185000000007,
+        "num_launches": 26.0
+      },
+      "kernel_profile_top": [
+        {
+          "name": "bmm_MxE4m3_MxE2m1MxE4m3_Fp32_Ab32_Bb32_Cb32_t128x16x256u2_s3_et128x16_m128x16x32_c1x1x1_rM_TN_transOut_schPd2x1x2x3_biasFp32M_bN_tma_ldgstsSf_rgTma_clmp_siTuGlu_dynB_sm100f",
+          "count": 1.0,
+          "total_us": 288.92960000000005,
+          "avg_us": 288.92960000000005
+        },
+        {
+          "name": "bmm_Bfloat16_MxE2m1MxE4m3_Fp32_Ab32_Bb32_t128x16x256u2_s3_et128x16_m128x16x32_c1x1x1_rM_TN_transOut_schPd2x1x2x3_biasFp32M_bN_rgTma_clmp_dynB_sm100f",
+          "count": 1.0,
+          "total_us": 145.2569999999999,
+          "avg_us": 145.2569999999999
+        },
+        {
+          "name": "nvjet_sm100_tss_240x64_64x9_1x2_2cta_h_bz_TNN",
+          "count": 1.0,
+          "total_us": 51.31169999999995,
+          "avg_us": 51.31169999999995
+        },
+        {
+          "name": "fused_sigmoid_gating_delta_rule_update_kernel",
+          "count": 1.0,
+          "total_us": 29.382199999999944,
+          "avg_us": 29.382199999999944
+        },
+        {
+          "name": "nvjet_sm100_tst_128x64_64x10_2x2_2cta_h_bz_TNT",
+          "count": 1.0,
+          "total_us": 22.67819999999991,
+          "avg_us": 22.67819999999991
+        },
+        {
+          "name": "nvjet_sm100_tst_96x64_64x15_2x2_2cta_h_bz_TNN",
+          "count": 1.0,
+          "total_us": 21.5519,
+          "avg_us": 21.5519
+        },
+        {
+          "name": "nvjet_sm100_tst_112x64_64x14_2x2_2cta_h_bz_TNN",
+          "count": 2.0,
+          "total_us": 19.366200000000173,
+          "avg_us": 9.683100000000087
+        },
+        {
+          "name": "nvjet_sm100_tst_24x64_64x16_4x1_v_bz_TNN",
+          "count": 1.0,
+          "total_us": 16.473300000000073,
+          "avg_us": 16.473300000000073
+        },
+        {
+          "name": "void sglang::attn_res_fused_tma_kernel<sglang::KimiK3AttnResTrait<7168l, 1u, 2u, 0u>, 2u>(sglang::AttnResTMAParams)",
+          "count": 2.0,
+          "total_us": 9.907300000000191,
+          "avg_us": 4.953650000000096
+        },
+        {
+          "name": "void moe::dev::finalize::finalizeKernelVecLoad<moe::dev::finalize::KernelParams<cutlass::bfloat16_t, float, 4, true> >(moe::dev::finalize::KernelParams<cutlass::bfloat16_t, float, 4, true>)",
+          "count": 1.0,
+          "total_us": 9.830200000000014,
+          "avg_us": 9.830200000000014
+        },
+        {
+          "name": "void sglang::situ_and_mul_kernel<float, __nv_bfloat16, true, true>(sglang::SituAndMulParams)",
+          "count": 1.0,
+          "total_us": 7.759900000000118,
+          "avg_us": 7.759900000000118
+        },
+        {
+          "name": "void moe::dev::routing::routingCustom::routingIndicesClusterKernel<moe::dev::routing::routingCustom::KernelParams<__nv_bfloat16, __nv_bfloat16, 256, 16, moe::dev::routing::TopKExpertSelect<moe::dev::routing::NoOpPreprocess, moe::dev::routing::SoftmaxPostprocess> >, 512>(moe::dev::routing::routingCustom::KernelParams<__nv_bfloat16, __nv_bfloat16, 256, 16, moe::dev::routing::TopKExpertSelect<moe::dev::routing::NoOpPreprocess, moe::dev::routing::SoftmaxPostprocess> >)",
+          "count": 1.0,
+          "total_us": 7.632000000000073,
+          "avg_us": 7.632000000000073
+        }
+      ],
+      "rung": "adhoc"
+    }
+  ]
+}

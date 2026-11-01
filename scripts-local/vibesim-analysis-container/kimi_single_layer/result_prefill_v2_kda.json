@@ -1,0 +1,369 @@
+{
+  "sglang_version": "0.5.20",
+  "moe_backend": "flashinfer_mxfp4",
+  "hidden_act": "situ",
+  "moe_method": {
+    "class": "Mxfp4MoEMethod",
+    "use_flashinfer": true,
+    "use_marlin": false,
+    "_fi_kernel": "trtllm_sm100",
+    "flashinfer_mxfp4_moe_precision": "default"
+  },
+  "experts": 112,
+  "ep": 8,
+  "layer_idx": 5,
+  "local_topk": 2,
+  "hidden_scale": 1.0,
+  "attn_type": "kda",
+  "attention_backend": null,
+  "page_size": null,
+  "attn_heads": 12,
+  "cuda_graph": true,
+  "kv_cache_dtype": null,
+  "mamba_ssm_dtype": "float32",
+  "num_attention_heads": 64,
+  "config": {
+    "num_experts": 112,
+    "num_experts_per_token": 2,
+    "num_shared_experts": 2,
+    "moe_intermediate_size": 3072,
+    "routed_expert_hidden_size": 3584,
+    "hidden_size": 7168
+  },
+  "mla": null,
+  "kda": {
+    "num_heads": 12,
+    "head_dim": 128,
+    "short_conv_kernel": 4,
+    "gate_lower_bound": -5.0
+  },
+  "points": [
+    {
+      "B": 1,
+      "seq_len": 16384,
+      "ok": true,
+      "attn_type": "kda",
+      "seed": 0,
+      "mixed": false,
+      "tag": "pf",
+      "prefill": true,
+      "prefix_len": 0,
+      "num_tokens": 16384,
+      "attn_res": {
+        "block_num": 8,
+        "valid_blocks": 1,
+        "write_layer": false
+      },
+      "out_shape": [
+        16384,
+        7168
+      ],
+      "finite": true,
+      "us_step": 8811.903953552246,
+      "us_token": 0.5378359346650541,
+      "state_mb": 1.62816,
+      "peak_gb": 14.412050432,
+      "graph_ok": false,
+      "graph_skipped": "prefill points are timed eagerly",
+      "latency_us": 8811.903953552246,
+      "latency_mode": "eager",
+      "kernel_profile": {
+        "total_kernel_us": 8339.269199999993,
+        "num_launches": 41.0
+      },
+      "kernel_profile_top": [
+        {
+          "name": "nvjet_sm100_tst_128x256_64x6_2x1_2cta_v_bz_TNT",
+          "count": 4.0,
+          "total_us": 2401.4695000000006,
+          "avg_us": 600.3673750000002
+        },
+        {
+          "name": "nvjet_sm100_tss_128x256_64x6_2x1_2cta_v_bz_TNT",
+          "count": 1.0,
+          "total_us": 2246.2748999999994,
+          "avg_us": 2246.2748999999994
+        },
+        {
+          "name": "bmm_MxE4m3_MxE2m1MxE4m3_Fp32_Ab32_Bb32_Cb32_t128x192x128u2_s5_et128x32_m256x192x32_c2x1x1_rM_TN_transOut_schPd2x1x2x3_biasFp32M_bN_tma_ldgstsSf_rgTma_clmp_siTuGlu_lbW8_lsfbW4_dynB_sm100f",
+          "count": 1.0,
+          "total_us": 852.8610999999999,
+          "avg_us": 852.8610999999999
+        },
+        {
+          "name": "chunk_gated_delta_rule_fwd_kernel_h_blockdim64",
+          "count": 1.0,
+          "total_us": 622.4375999999987,
+          "avg_us": 622.4375999999987
+        },
+        {
+          "name": "bmm_Bfloat16_MxE2m1MxE4m3_Fp32_Ab32_Bb32_t128x192x256u2_s3_et128x64_m256x192x32_c2x1x1_rM_TN_transOut_schPd2x1x2x3_biasFp32M_bN_rgTma_clmp_dynB_sm100f",
+          "count": 1.0,
+          "total_us": 318.1421,
+          "avg_us": 318.1421
+        },
+        {
+          "name": "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1})",
+          "count": 4.0,
+          "total_us": 239.70320000000052,
+          "avg_us": 59.92580000000013
+        },
+        {
+          "name": "void sglang::situ_and_mul_kernel<float, __nv_bfloat16, true, true>(sglang::SituAndMulParams)",
+          "count": 1.0,
+          "total_us": 232.10639999999938,
+          "avg_us": 232.10639999999938
+        },
+        {
+          "name": "void sglang::attn_res_fused_tma_kernel<sglang::KimiK3AttnResTrait<7168l, 1u, 2u, 0u>, 2u>(sglang::AttnResTMAParams)",
+          "count": 2.0,
+          "total_us": 223.09519999999688,
+          "avg_us": 111.54759999999844
+        },
+        {
+          "name": "void at::native::vectorized_elementwise_kernel<8, at::native::CUDAFunctor_add<c10::BFloat16>, std::array<char*, 3ul> >(int, at::native::CUDAFunctor_add<c10::BFloat16>, std::array<char*, 3ul>)",
+          "count": 2.0,
+          "total_us": 208.16440000000216,
+          "avg_us": 104.08220000000108
+        },
+        {
+          "name": "void sglang::add3_kernel<true, true>(sglang::Add3Params)",
+          "count": 1.0,
+          "total_us": 133.25479999999916,
+          "avg_us": 133.25479999999916
+        },
+        {
+          "name": "_causal_conv1d_fwd_kernel",
+          "count": 1.0,
+          "total_us": 112.73959999999911,
+          "avg_us": 112.73959999999911
+        },
+        {
+          "name": "chunk_kda_fwd_kernel_intra_sub_chunk",
+          "count": 1.0,
+          "total_us": 111.77020000000093,
+          "avg_us": 111.77020000000093
+        }
+      ],
+      "rung": "adhoc"
+    },
+    {
+      "B": 1,
+      "seq_len": 16384,
+      "ok": true,
+      "attn_type": "kda",
+      "seed": 0,
+      "mixed": false,
+      "tag": "pf49152",
+      "prefill": true,
+      "prefix_len": 49152,
+      "num_tokens": 16384,
+      "attn_res": {
+        "block_num": 8,
+        "valid_blocks": 1,
+        "write_layer": false
+      },
+      "out_shape": [
+        16384,
+        7168
+      ],
+      "finite": true,
+      "us_step": 8867.103576660156,
+      "us_token": 0.5412050522863865,
+      "state_mb": 1.62816,
+      "peak_gb": 9.681997824,
+      "graph_ok": false,
+      "graph_skipped": "prefill points are timed eagerly",
+      "latency_us": 8867.103576660156,
+      "latency_mode": "eager",
+      "kernel_profile": {
+        "total_kernel_us": 8390.694099999995,
+        "num_launches": 41.0
+      },
+      "kernel_profile_top": [
+        {
+          "name": "nvjet_sm100_tst_128x256_64x6_2x1_2cta_v_bz_TNT",
+          "count": 4.0,
+          "total_us": 2414.7637000000004,
+          "avg_us": 603.6909250000001
+        },
+        {
+          "name": "nvjet_sm100_tss_128x256_64x6_2x1_2cta_v_bz_TNT",
+          "count": 1.0,
+          "total_us": 2245.8726999999985,
+          "avg_us": 2245.8726999999985
+        },
+        {
+          "name": "bmm_MxE4m3_MxE2m1MxE4m3_Fp32_Ab32_Bb32_Cb32_t128x192x128u2_s5_et128x32_m256x192x32_c2x1x1_rM_TN_transOut_schPd2x1x2x3_biasFp32M_bN_tma_ldgstsSf_rgTma_clmp_siTuGlu_lbW8_lsfbW4_dynB_sm100f",
+          "count": 1.0,
+          "total_us": 846.3464000000025,
+          "avg_us": 846.3464000000025
+        },
+        {
+          "name": "chunk_gated_delta_rule_fwd_kernel_h_blockdim64",
+          "count": 1.0,
+          "total_us": 637.1133000000015,
+          "avg_us": 637.1133000000015
+        },
+        {
+          "name": "bmm_Bfloat16_MxE2m1MxE4m3_Fp32_Ab32_Bb32_t128x192x256u2_s3_et128x64_m256x192x32_c2x1x1_rM_TN_transOut_schPd2x1x2x3_biasFp32M_bN_rgTma_clmp_dynB_sm100f",
+          "count": 1.0,
+          "total_us": 320.4047000000014,
+          "avg_us": 320.4047000000014
+        },
+        {
+          "name": "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1})",
+          "count": 4.0,
+          "total_us": 244.6282000000022,
+          "avg_us": 61.15705000000055
+        },
+        {
+          "name": "void sglang::situ_and_mul_kernel<float, __nv_bfloat16, true, true>(sglang::SituAndMulParams)",
+          "count": 1.0,
+          "total_us": 234.15789999999942,
+          "avg_us": 234.15789999999942
+        },
+        {
+          "name": "void sglang::attn_res_fused_tma_kernel<sglang::KimiK3AttnResTrait<7168l, 1u, 2u, 0u>, 2u>(sglang::AttnResTMAParams)",
+          "count": 2.0,
+          "total_us": 227.29969999999963,
+          "avg_us": 113.64984999999982
+        },
+        {
+          "name": "void at::native::vectorized_elementwise_kernel<8, at::native::CUDAFunctor_add<c10::BFloat16>, std::array<char*, 3ul> >(int, at::native::CUDAFunctor_add<c10::BFloat16>, std::array<char*, 3ul>)",
+          "count": 2.0,
+          "total_us": 209.43759999999975,
+          "avg_us": 104.71879999999987
+        },
+        {
+          "name": "void sglang::add3_kernel<true, true>(sglang::Add3Params)",
+          "count": 1.0,
+          "total_us": 133.07889999999807,
+          "avg_us": 133.07889999999807
+        },
+        {
+          "name": "_causal_conv1d_fwd_kernel",
+          "count": 1.0,
+          "total_us": 115.67109999999964,
+          "avg_us": 115.67109999999964
+        },
+        {
+          "name": "chunk_kda_fwd_kernel_intra_sub_chunk",
+          "count": 1.0,
+          "total_us": 115.01190000000051,
+          "avg_us": 115.01190000000051
+        }
+      ],
+      "rung": "adhoc"
+    },
+    {
+      "B": 4,
+      "seq_len": 4096,
+      "ok": true,
+      "attn_type": "kda",
+      "seed": 0,
+      "mixed": false,
+      "tag": "pf",
+      "prefill": true,
+      "prefix_len": 0,
+      "num_tokens": 16384,
+      "attn_res": {
+        "block_num": 8,
+        "valid_blocks": 1,
+        "write_layer": false
+      },
+      "out_shape": [
+        16384,
+        7168
+      ],
+      "finite": true,
+      "us_step": 8569.8881149292,
+      "us_token": 0.5230644601397216,
+      "state_mb": 4.0704,
+      "peak_gb": 9.688514048,
+      "graph_ok": false,
+      "graph_skipped": "prefill points are timed eagerly",
+      "latency_us": 8569.8881149292,
+      "latency_mode": "eager",
+      "kernel_profile": {
+        "total_kernel_us": 7916.600299999999,
+        "num_launches": 41.0
+      },
+      "kernel_profile_top": [
+        {
+          "name": "nvjet_sm100_tst_128x256_64x6_2x1_2cta_v_bz_TNT",
+          "count": 4.0,
+          "total_us": 2411.1142999999997,
+          "avg_us": 602.7785749999999
+        },
+        {
+          "name": "nvjet_sm100_tss_128x256_64x6_2x1_2cta_v_bz_TNT",
+          "count": 1.0,
+          "total_us": 2233.8073000000013,
+          "avg_us": 2233.8073000000013
+        },
+        {
+          "name": "bmm_MxE4m3_MxE2m1MxE4m3_Fp32_Ab32_Bb32_Cb32_t128x192x128u2_s5_et128x32_m256x192x32_c2x1x1_rM_TN_transOut_schPd2x1x2x3_biasFp32M_bN_tma_ldgstsSf_rgTma_clmp_siTuGlu_lbW8_lsfbW4_dynB_sm100f",
+          "count": 1.0,
+          "total_us": 835.0531000000007,
+          "avg_us": 835.0531000000007
+        },
+        {
+          "name": "bmm_Bfloat16_MxE2m1MxE4m3_Fp32_Ab32_Bb32_t128x192x256u2_s3_et128x64_m256x192x32_c2x1x1_rM_TN_transOut_schPd2x1x2x3_biasFp32M_bN_rgTma_clmp_dynB_sm100f",
+          "count": 1.0,
+          "total_us": 317.6651999999991,
+          "avg_us": 317.6651999999991
+        },
+        {
+          "name": "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1})",
+          "count": 4.0,
+          "total_us": 247.10479999999902,
+          "avg_us": 61.776199999999754
+        },
+        {
+          "name": "void sglang::situ_and_mul_kernel<float, __nv_bfloat16, true, true>(sglang::SituAndMulParams)",
+          "count": 1.0,
+          "total_us": 235.14659999999913,
+          "avg_us": 235.14659999999913
+        },
+        {
+          "name": "void sglang::attn_res_fused_tma_kernel<sglang::KimiK3AttnResTrait<7168l, 1u, 2u, 0u>, 2u>(sglang::AttnResTMAParams)",
+          "count": 2.0,
+          "total_us": 228.41340000000037,
+          "avg_us": 114.20670000000018
+        },
+        {
+          "name": "void at::native::vectorized_elementwise_kernel<8, at::native::CUDAFunctor_add<c10::BFloat16>, std::array<char*, 3ul> >(int, at::native::CUDAFunctor_add<c10::BFloat16>, std::array<char*, 3ul>)",
+          "count": 2.0,
+          "total_us": 209.48269999999943,
+          "avg_us": 104.74134999999971
+        },
+        {
+          "name": "chunk_gated_delta_rule_fwd_kernel_h_blockdim64",
+          "count": 1.0,
+          "total_us": 181.17509999999857,
+          "avg_us": 181.17509999999857
+        },
+        {
+          "name": "void sglang::add3_kernel<true, true>(sglang::Add3Params)",
+          "count": 1.0,
+          "total_us": 133.24849999999952,
+          "avg_us": 133.24849999999952
+        },
+        {
+          "name": "_causal_conv1d_fwd_kernel",
+          "count": 1.0,
+          "total_us": 117.14629999999893,
+          "avg_us": 117.14629999999893
+        },
+        {
+          "name": "chunk_kda_fwd_kernel_intra_sub_chunk",
+          "count": 1.0,
+          "total_us": 116.49649999999993,
+          "avg_us": 116.49649999999993
+        }
+      ],
+      "rung": "adhoc"
+    }
+  ]
+}
