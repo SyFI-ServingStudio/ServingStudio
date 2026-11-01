@@ -46,6 +46,18 @@ validate_chain () { # $1 pristine $2 best $3... patches
   if [ -z "$d" ]; then echo "  chain reproduces $(basename "$(dirname "$best")")/$(basename "$best") exactly"; else echo "!! chain differs from best tree:"; echo "$d"; return 1; fi
 }
 
+
+# append every later ACCEPTED round k >= $3 of case dir $1 to the named array $4, diffing from the tree in $2
+# (the loop's own trial_k_verdict.json says PASS); prints the new tail tree into CHAIN_TAIL
+extend_chain () { # $1 case-dir $2 prev-tree $3 first-k $4 patch-prefix ; appends to CHAIN
+  local CBx="$1" prev="$2" k0="$3" pre="$4" n="${#CHAIN[@]}"
+  for k in $(seq "$k0" 12); do
+    local t="$CBx/trial_${k}_tree_judged" v="$CBx/trial_${k}_verdict.json"
+    [ -d "$t" ] && [ -f "$v" ] && grep -q '"verdict": "PASS"' "$v" || continue
+    n=$((n+1)); local pp; pp="$OUT/sglang/claude/${pre}_$(printf %02d "$n")_r${k}.patch"; tree_diff "$prev" "$t" "$pp"; CHAIN+=("$pp"); prev="$t"
+  done
+}
+
 echo "== sglang MLA chain"
 M="$HERE/iter_opt_eval_k3_mla"
 tree_diff "$M/pristine_tree"        "$M/trial_8_tree_judged"  "$OUT/sglang/mla/01_r08_cutedsl_to_trtllm_mla_decode.patch"
@@ -70,7 +82,8 @@ CB="$HERE/iter_opt_eval_k3_mla_b512_claude"
 tree_diff "$HERE/iter_opt_eval_k3_mla/best_tree" "$CB/trial_1_tree_judged" "$OUT/sglang/claude/mla_b512_01_r1_moe_autotune_kvconcat_satfinite.patch"
 tree_diff "$CB/trial_1_tree_judged" "$CB/trial_2_tree_judged" "$OUT/sglang/claude/mla_b512_02_r2_persistent_decode_tail_split.patch"
 tree_diff "$CB/trial_2_tree_judged" "$CB/trial_3_tree_judged" "$OUT/sglang/claude/mla_b512_03_r3_outgate_tail_overlap_attnres_fused_add.patch"
-validate_chain "$HERE/iter_opt_eval_k3_mla/best_tree" "$CB/best_tree" "$OUT"/sglang/claude/mla_b512_0*.patch
+CHAIN=("$OUT"/sglang/claude/mla_b512_0*.patch); extend_chain "$CB" "$CB/trial_3_tree_judged" 4 mla_b512
+validate_chain "$HERE/iter_opt_eval_k3_mla/best_tree" "$CB/best_tree" "${CHAIN[@]}"
 CB="$HERE/iter_opt_eval_k3_kda_b512_claude"
 tree_diff "$HERE/iter_opt_eval_k3_kda/best_tree" "$CB/trial_1_tree_judged" "$OUT/sglang/claude/kda_b512_01_r1_moe_autotune_fused_decode_vector_ldst_bfa_overlap.patch"
 # r2 was FAIL-by-noise at 5 reps (sigma 7.3 us) and PASSED the 15-rep re-judge on 2026-09-27 (+1.0% @512, follow-up #2)
@@ -79,44 +92,50 @@ validate_chain "$HERE/iter_opt_eval_k3_kda/best_tree" "$CB/best_tree" "$OUT"/sgl
 CB="$HERE/iter_opt_eval_k3_mla_prefill_claude"
 tree_diff "$HERE/iter_opt_eval_k3_mla/best_tree" "$CB/trial_1_tree_judged" "$OUT/sglang/claude/mla_prefill_01_r1_kv_pack_quantize_fp8_attnres_fused_add.patch"
 tree_diff "$CB/trial_1_tree_judged" "$CB/trial_2_tree_judged" "$OUT/sglang/claude/mla_prefill_02_r2_prefix_attention_cutedsl_fmha.patch"
-validate_chain "$HERE/iter_opt_eval_k3_mla/best_tree" "$CB/best_tree" "$OUT"/sglang/claude/mla_prefill_0*.patch
+CHAIN=("$OUT"/sglang/claude/mla_prefill_0*.patch); extend_chain "$CB" "$CB/trial_2_tree_judged" 3 mla_prefill
+validate_chain "$HERE/iter_opt_eval_k3_mla/best_tree" "$CB/best_tree" "${CHAIN[@]}"
 CB="$HERE/iter_opt_eval_k3_kda_prefill_claude"
 tree_diff "$HERE/iter_opt_eval_k3_kda/best_tree" "$CB/trial_1_tree_judged" "$OUT/sglang/claude/kda_prefill_01_r1_strided_chunk_kernels_no_copies_no_host_sync.patch"
-validate_chain "$HERE/iter_opt_eval_k3_kda/best_tree" "$CB/best_tree" "$OUT"/sglang/claude/kda_prefill_0*.patch
+CHAIN=("$OUT"/sglang/claude/kda_prefill_0*.patch); extend_chain "$CB" "$CB/trial_1_tree_judged" 2 kda_prefill
+validate_chain "$HERE/iter_opt_eval_k3_kda/best_tree" "$CB/best_tree" "${CHAIN[@]}"
 # unaccepted but exact and worth keeping (below the 3-sigma floor on the primary point):
-tree_diff "$CB/best_tree" "$CB/trial_2_tree_judged" "$OUT/sglang/claude/UNACCEPTED_kda_prefill_r2_cuda_kda_chunk_h_hscan.patch"
+tree_diff "$CB/trial_1_tree_judged" "$CB/trial_2_tree_judged" "$OUT/sglang/claude/UNACCEPTED_kda_prefill_r2_cuda_kda_chunk_h_hscan.patch"
 
 echo "== sglang Claude SHAPE-MATCHED decode chains (seed = the b512 Claude best tree of the same layer; slurm mode)"
 CB="$HERE/iter_opt_eval_k3_kda_shapes_claude"
 if [ -d "$CB/trial_3_tree_judged" ]; then
-  tree_diff "$HERE/iter_opt_eval_k3_kda_b512_claude/best_tree" "$CB/trial_1_tree_judged" "$OUT/sglang/claude/kda_shapes_01_r1_split_moe_front_small_m_alt_stream_tgv_fp32.patch"
+  tree_diff "$HERE/iter_opt_eval_k3_kda_b512_claude/trial_1_tree_judged" "$CB/trial_1_tree_judged" "$OUT/sglang/claude/kda_shapes_01_r1_split_moe_front_small_m_alt_stream_tgv_fp32.patch"
   tree_diff "$CB/trial_1_tree_judged" "$CB/trial_2_tree_judged" "$OUT/sglang/claude/kda_shapes_02_r2_l2_prefetch_oproj_routed_front.patch"
   tree_diff "$CB/trial_2_tree_judged" "$CB/trial_3_tree_judged" "$OUT/sglang/claude/kda_shapes_03_r3_fused_decode_attnres_tuning.patch"
-  validate_chain "$HERE/iter_opt_eval_k3_kda_b512_claude/best_tree" "$CB/best_tree" "$OUT"/sglang/claude/kda_shapes_0*.patch
+  CHAIN=("$OUT"/sglang/claude/kda_shapes_0*.patch); extend_chain "$CB" "$CB/trial_3_tree_judged" 4 kda_shapes
+  validate_chain "$HERE/iter_opt_eval_k3_kda_b512_claude/trial_1_tree_judged" "$CB/best_tree" "${CHAIN[@]}"
 fi
 CB="$HERE/iter_opt_eval_k3_mla_shapes_claude"
 if [ -d "$CB/trial_2_tree_judged" ]; then
-  tree_diff "$HERE/iter_opt_eval_k3_mla_b512_claude/best_tree" "$CB/trial_1_tree_judged" "$OUT/sglang/claude/mla_shapes_01_r1_b1_kv_split8_lse_merge_kvconcat_q_replicas.patch"
+  tree_diff "$HERE/iter_opt_eval_k3_mla_b512_claude/trial_3_tree_judged" "$CB/trial_1_tree_judged" "$OUT/sglang/claude/mla_shapes_01_r1_b1_kv_split8_lse_merge_kvconcat_q_replicas.patch"
   tree_diff "$CB/trial_1_tree_judged" "$CB/trial_2_tree_judged" "$OUT/sglang/claude/mla_shapes_02_r2_attnres_cluster_small_moe_finalize_rmsnorm.patch"
-  validate_chain "$HERE/iter_opt_eval_k3_mla_b512_claude/best_tree" "$CB/best_tree" "$OUT"/sglang/claude/mla_shapes_0*.patch
+  CHAIN=("$OUT"/sglang/claude/mla_shapes_0*.patch); extend_chain "$CB" "$CB/trial_2_tree_judged" 3 mla_shapes
+  validate_chain "$HERE/iter_opt_eval_k3_mla_b512_claude/trial_3_tree_judged" "$CB/best_tree" "${CHAIN[@]}"
 fi
 echo "== sglang Claude LONG-CONTEXT PREFILL chains (seed = the prefill Claude best tree; slurm mode)"
+# seeds = the prefill best trees AT SEED TIME (2026-09-27); later prefill rounds are not part of these chains
 for c in kda mla; do
-  CB="$HERE/iter_opt_eval_k3_${c}_lcprefill_claude"; prev="$HERE/iter_opt_eval_k3_${c}_prefill_claude/best_tree"; n=0; chain=()
+  case $c in kda) LCSEED="$HERE/iter_opt_eval_k3_kda_prefill_claude/trial_1_tree_judged";; mla) LCSEED="$HERE/iter_opt_eval_k3_mla_prefill_claude/trial_2_tree_judged";; esac
+  CB="$HERE/iter_opt_eval_k3_${c}_lcprefill_claude"; prev="$LCSEED"; n=0; chain=()
   for k in 1 2 3 4 5 6; do
     t="$CB/trial_${k}_tree_judged"; v="$CB/trial_${k}_verdict.json"
     [ -d "$t" ] && [ -f "$v" ] && grep -q '"verdict": "PASS"' "$v" || continue
     n=$((n+1)); p="$OUT/sglang/claude/${c}_lcprefill_0${n}_r${k}.patch"; tree_diff "$prev" "$t" "$p"; chain+=("$p"); prev="$t"
   done
-  [ "$n" -gt 0 ] && validate_chain "$HERE/iter_opt_eval_k3_${c}_prefill_claude/best_tree" "$CB/best_tree" "${chain[@]}"
+  [ "$n" -gt 0 ] && validate_chain "$LCSEED" "$CB/best_tree" "${chain[@]}"
 done
 
 echo "== sglang Claude MIXED prefill+decode and speculative-VERIFY chains (follow-up #4, slurm mode)"
-# seeds: mixed <- the same layer's lcprefill best tree; KDA verify <- the KDA shapes best tree; MLA verify <- PRISTINE
+# seeds: mixed <- the same layer's lcprefill best tree; KDA verify <- the KDA shapes tree at seed time (r3); MLA verify <- PRISTINE
 # (every accepted MLA tree regressed the verify step). Accepted = the loop's own trial_k_verdict.json says PASS
 # (KDA verify r2's graph-mode re-judge PASS is not promoted: r3 superseded it on a separate branch).
 for spec in "kda_mixed:$HERE/iter_opt_eval_k3_kda_lcprefill_claude/best_tree" "mla_mixed:$HERE/iter_opt_eval_k3_mla_lcprefill_claude/best_tree" \
-            "kda_verify:$HERE/iter_opt_eval_k3_kda_shapes_claude/best_tree" "mla_verify:$HERE/iter_opt_eval_k3_mla_verify_claude/pristine_tree"; do
+            "kda_verify:$HERE/iter_opt_eval_k3_kda_shapes_claude/trial_3_tree_judged" "mla_verify:$HERE/iter_opt_eval_k3_mla_verify_claude/pristine_tree"; do
   c="${spec%%:*}"; seed="${spec#*:}"; CB="$HERE/iter_opt_eval_k3_${c}_claude"; prev="$seed"; n=0; chain=()
   [ -d "$CB/best_tree" ] || continue
   for k in 1 2 3 4 5 6; do
