@@ -1,0 +1,188 @@
+{
+  "agent_container": "recheck_mla_lcprefill_claude_seed2",
+  "case_key": "57de78009937",
+  "points": {
+    "1,16384pf245760": {
+      "before_us": 27493.696212768555,
+      "before_sigma_us": 13.654718885272871,
+      "after_us": 20433.5994720459,
+      "after_lat": [
+        20433.5994720459,
+        20434.080123901367,
+        20426.111221313477,
+        20416.959762573242,
+        20436.288833618164
+      ],
+      "improvement": 0.2568,
+      "noise_frac_3sigma": 0.0015,
+      "correctness": {
+        "max_abs_err": 0.0,
+        "max_rel_err": 0.0,
+        "mean_rel_err": 0.0,
+        "nan": false,
+        "rows": 16384,
+        "rows_over_tol": 0,
+        "frac_rows_over_tol": 0.0,
+        "p99_row_rel_err": 0.0,
+        "rule": "prefill_rowwise(frac_rows_over_tol<=0.005,p99<=tol,mean<=0.01)",
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "latency_mode": "eager",
+      "primary": true,
+      "mixed": "pf245760"
+    },
+    "1,32768pf229376": {
+      "before_us": 47871.20056152344,
+      "before_sigma_us": 117.85269361430632,
+      "after_us": 39948.673248291016,
+      "after_lat": [
+        39940.608978271484,
+        39948.673248291016,
+        39928.16162109375,
+        39985.34393310547,
+        40026.46255493164
+      ],
+      "improvement": 0.1655,
+      "noise_frac_3sigma": 0.0074,
+      "correctness": {
+        "max_abs_err": 0.0,
+        "max_rel_err": 0.0,
+        "mean_rel_err": 0.0,
+        "nan": false,
+        "rows": 32768,
+        "rows_over_tol": 0,
+        "frac_rows_over_tol": 0.0,
+        "p99_row_rel_err": 0.0,
+        "rule": "prefill_rowwise(frac_rows_over_tol<=0.005,p99<=tol,mean<=0.01)",
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "latency_mode": "eager",
+      "primary": false,
+      "mixed": "pf229376"
+    },
+    "1,16384pf131072": {
+      "before_us": 18164.86358642578,
+      "before_sigma_us": 13.301709149482878,
+      "after_us": 15032.735824584961,
+      "after_lat": [
+        14932.255744934082,
+        15048.864364624023,
+        14981.504440307617,
+        15032.735824584961,
+        15057.31201171875
+      ],
+      "improvement": 0.1724,
+      "noise_frac_3sigma": 0.0022,
+      "correctness": {
+        "max_abs_err": 0.0,
+        "max_rel_err": 0.0,
+        "mean_rel_err": 0.0,
+        "nan": false,
+        "rows": 16384,
+        "rows_over_tol": 0,
+        "frac_rows_over_tol": 0.0,
+        "p99_row_rel_err": 0.0,
+        "rule": "prefill_rowwise(frac_rows_over_tol<=0.005,p99<=tol,mean<=0.01)",
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "latency_mode": "eager",
+      "primary": false,
+      "mixed": "pf131072"
+    },
+    "1,32768pf131072": {
+      "before_us": 34616.76788330078,
+      "before_sigma_us": 27.179578824941693,
+      "after_us": 30374.36866760254,
+      "after_lat": [
+        30468.576431274414,
+        30352.60772705078,
+        30374.36866760254,
+        30277.91976928711,
+        30423.967361450195
+      ],
+      "improvement": 0.1226,
+      "noise_frac_3sigma": 0.0024,
+      "correctness": {
+        "max_abs_err": 0.0,
+        "max_rel_err": 0.0,
+        "mean_rel_err": 0.0,
+        "nan": false,
+        "rows": 32768,
+        "rows_over_tol": 0,
+        "frac_rows_over_tol": 0.0,
+        "p99_row_rel_err": 0.0,
+        "rule": "prefill_rowwise(frac_rows_over_tol<=0.005,p99<=tol,mean<=0.01)",
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "latency_mode": "eager",
+      "primary": false,
+      "mixed": "pf131072"
+    }
+  },
+  "driver_sha": "ff88e72e3180",
+  "pristine_points": {
+    "1,16384pf245760": {
+      "median": 27493.696212768555,
+      "sigma": 13.654718885272871
+    },
+    "1,32768pf229376": {
+      "median": 47871.20056152344,
+      "sigma": 117.85269361430632
+    },
+    "1,16384pf131072": {
+      "median": 18164.86358642578,
+      "sigma": 13.301709149482878
+    },
+    "1,32768pf131072": {
+      "median": 34616.76788330078,
+      "sigma": 27.179578824941693
+    }
+  },
+  "changed_files": [
+    "kernels/jit/csrc/elementwise/set_mla_kv_concat_q.cuh",
+    "kernels/jit/csrc/moe/route_quant_fused.cuh",
+    "kernels/jit/csrc/moe/route_radix.cuh",
+    "kernels/jit/csrc/kimi_k3/attn_res/fused_tma.cuh",
+    "kernels/ops/gemm/dense_gemm_sm100_fp8_via_bf16_epilogue.py",
+    "kernels/ops/attention/set_mla_kv_concat_q.py",
+    "kernels/ops/attention/mla_kv_b_proj_pack_fp8.py",
+    "kernels/ops/attention/cute_dsl_fmha_fp8.py",
+    "kernels/ops/kimi_k3/attn_res.py",
+    "kernels/ops/kvcache/mla_buffer.py",
+    "kernels/ops/kvcache/kv_indices.py",
+    "kernels/ops/moe/moe_route_quant_fused.py",
+    "srt/model_executor/forward_batch_deepseek_mha_mixin.py",
+    "srt/models/kimi_k3.py",
+    "srt/layers/attn_residual.py",
+    "srt/models/deepseek_common/attention_forward_methods/forward_mha.py",
+    "srt/layers/attention/trtllm_mla_backend.py",
+    "srt/layers/attention/tokenspeed_mla_backend.py",
+    "srt/layers/attention/cutedsl_mla_backend.py",
+    "srt/layers/moe/topk.py"
+  ],
+  "diff_patch": "/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_lcprefill_claude/best_tree_judged.patch",
+  "diff_lines": 3486,
+  "gates": {
+    "correctness": true,
+    "latency_improved": true,
+    "no_secondary_regression": true
+  },
+  "required_improvement": 0.005,
+  "before_us": 27493.696212768555,
+  "latency_us": 20433.5994720459,
+  "recovered_frac": 0.2568,
+  "correctness": {
+    "pass": true
+  },
+  "golden_dir": "/raid/yilegu/eval_goldens/golden_k3_57de78009937",
+  "verdict": "PASS",
+  "reason": "all gates passed"
+}

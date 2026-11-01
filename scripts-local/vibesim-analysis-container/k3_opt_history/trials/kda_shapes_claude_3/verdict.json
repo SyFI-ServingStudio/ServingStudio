@@ -1,0 +1,209 @@
+{
+  "agent_container": "iteropt_k3_kda_shapes_claude_run_3",
+  "case_key": "803971dcb8fc",
+  "points": {
+    "1,1048576": {
+      "before_us": 103.80800068378448,
+      "before_sigma_us": 0.012800097465515137,
+      "after_us": 101.75999999046326,
+      "after_lat": [
+        101.75999999046326,
+        101.75999999046326,
+        101.75999999046326,
+        101.72799974679947,
+        101.72799974679947
+      ],
+      "improvement": 0.0197,
+      "noise_frac_3sigma": 0.0004,
+      "correctness": {
+        "max_abs_err": 0.0,
+        "max_rel_err": 0.0,
+        "mean_rel_err": 0.0,
+        "nan": false,
+        "rule": "max_rel_err<=tol",
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "latency_mode": "graph",
+      "primary": true,
+      "mixed": ""
+    },
+    "16,65536": {
+      "before_us": 167.1999990940094,
+      "before_sigma_us": 0.06589021897121661,
+      "after_us": 163.2000058889389,
+      "after_lat": [
+        163.32800686359406,
+        163.2000058889389,
+        163.2000058889389,
+        163.16799819469452,
+        163.16799819469452
+      ],
+      "improvement": 0.0239,
+      "noise_frac_3sigma": 0.0012,
+      "correctness": {
+        "max_abs_err": 0.234375,
+        "max_rel_err": 0.015243901447551125,
+        "mean_rel_err": 0.001316627487540245,
+        "nan": false,
+        "rows": 16,
+        "rows_over_tol": 0,
+        "frac_rows_over_tol": 0.0,
+        "p99_row_rel_err": 0.015243901871144772,
+        "rule": "max_rel_err<=tol",
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "latency_mode": "graph",
+      "primary": false,
+      "mixed": ""
+    },
+    "128,8192": {
+      "before_us": 374.1439878940582,
+      "before_sigma_us": 0.015665903651752175,
+      "after_us": 374.1759955883026,
+      "after_lat": [
+        375.16799569129944,
+        375.96800923347473,
+        374.1439878940582,
+        374.1759955883026,
+        374.1439878940582
+      ],
+      "improvement": -0.0001,
+      "noise_frac_3sigma": 0.0001,
+      "correctness": {
+        "max_abs_err": 0.1875,
+        "max_rel_err": 0.012605041169408998,
+        "mean_rel_err": 0.0005840336671099067,
+        "nan": false,
+        "rows": 128,
+        "rows_over_tol": 0,
+        "frac_rows_over_tol": 0.0,
+        "p99_row_rel_err": 0.00917017087340355,
+        "rule": "max_rel_err<=tol",
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "latency_mode": "graph",
+      "primary": false,
+      "mixed": ""
+    },
+    "32,8192": {
+      "before_us": 228.57600450515747,
+      "before_sigma_us": 0.8834308512222503,
+      "after_us": 226.49599611759186,
+      "after_lat": [
+        225.63199698925018,
+        226.49599611759186,
+        224.63999688625336,
+        226.52800381183624,
+        226.59200429916382
+      ],
+      "improvement": 0.0091,
+      "noise_frac_3sigma": 0.0116,
+      "correctness": {
+        "max_abs_err": 0.15625,
+        "max_rel_err": 0.011961721572308397,
+        "mean_rel_err": 0.0013712379150092602,
+        "nan": false,
+        "rows": 32,
+        "rows_over_tol": 0,
+        "frac_rows_over_tol": 0.0,
+        "p99_row_rel_err": 0.011961721815168858,
+        "rule": "max_rel_err<=tol",
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "latency_mode": "graph",
+      "primary": false,
+      "mixed": ""
+    },
+    "1,8192": {
+      "before_us": 113.88800293207169,
+      "before_sigma_us": 3.2354144385496446,
+      "after_us": 105.69600015878677,
+      "after_lat": [
+        105.79200088977814,
+        105.53599894046783,
+        105.69600015878677,
+        105.76000064611435,
+        105.6319996714592
+      ],
+      "improvement": 0.0719,
+      "noise_frac_3sigma": 0.0852,
+      "correctness": {
+        "max_abs_err": 0.0,
+        "max_rel_err": 0.0,
+        "mean_rel_err": 0.0,
+        "nan": false,
+        "rule": "max_rel_err<=tol",
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "latency_mode": "graph",
+      "primary": false,
+      "mixed": ""
+    }
+  },
+  "driver_sha": "ff88e72e3180",
+  "pristine_points": {
+    "1,1048576": {
+      "median": 136.63999736309052,
+      "sigma": 0.02394599338100123
+    },
+    "16,65536": {
+      "median": 200.03199577331543,
+      "sigma": 0.740850320880378
+    },
+    "128,8192": {
+      "median": 402.97600626945496,
+      "sigma": 0.39576632493404473
+    },
+    "32,8192": {
+      "median": 261.59998774528503,
+      "sigma": 0.023939622171533698
+    },
+    "1,8192": {
+      "median": 136.57599687576294,
+      "sigma": 0.7239085987640546
+    }
+  },
+  "baseline_tree": "/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_shapes_claude/best_tree",
+  "changed_files": [
+    "kernels/jit/csrc/attention/kda_fused_decode.cuh",
+    "kernels/jit/csrc/elementwise/l2_prefetch.cuh",
+    "kernels/jit/csrc/kimi_k3/attn_res/fused_tma.cuh",
+    "kernels/ops/attention/kda_fused_decode.py",
+    "kernels/ops/kimi_k3/attn_res.py",
+    "kernels/ops/elementwise/l2_prefetch.py",
+    "kernels/ops/attention/fla/fused_recurrent.py",
+    "srt/models/kimi_k3.py",
+    "srt/layers/attn_residual.py",
+    "srt/layers/attention/linear/kda_backend.py",
+    "srt/layers/moe/moe_runner/flashinfer_trtllm.py"
+  ],
+  "diff_patch": "/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_shapes_claude/trial_3_tree_judged.patch",
+  "diff_lines": 1702,
+  "gates": {
+    "correctness": true,
+    "latency_improved": true,
+    "no_secondary_regression": true
+  },
+  "required_improvement": 0.005,
+  "before_us": 103.80800068378448,
+  "latency_us": 101.75999999046326,
+  "recovered_frac": 0.0197,
+  "correctness": {
+    "pass": true
+  },
+  "golden_dir": "/raid/yilegu/eval_goldens/golden_k3_803971dcb8fc",
+  "verdict": "PASS",
+  "reason": "all gates passed",
+  "trial": 3,
+  "agent_exit": 0
+}

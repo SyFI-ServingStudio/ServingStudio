@@ -1,0 +1,206 @@
+{
+  "agent_container": "recheck_kda_shapes_claude_seed1",
+  "case_key": "40852908ed6b",
+  "points": {
+    "1,1048576": {
+      "before_us": 132.47999548912048,
+      "before_sigma_us": 0.015673203700052152,
+      "after_us": 103.74400019645691,
+      "after_lat": [
+        103.71199995279312,
+        103.58399897813797,
+        103.7760004401207,
+        103.74400019645691,
+        103.7760004401207
+      ],
+      "improvement": 0.2169,
+      "noise_frac_3sigma": 0.0004,
+      "correctness": {
+        "max_abs_err": 0.0,
+        "max_rel_err": 0.0,
+        "mean_rel_err": 0.0,
+        "nan": false,
+        "rule": "max_rel_err<=tol",
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "latency_mode": "graph",
+      "primary": true,
+      "mixed": ""
+    },
+    "16,65536": {
+      "before_us": 210.27199923992157,
+      "before_sigma_us": 0.015673203700052152,
+      "after_us": 176.4799952507019,
+      "after_lat": [
+        175.52000284194946,
+        176.4799952507019,
+        177.40799486637115,
+        177.47199535369873,
+        176.4799952507019
+      ],
+      "improvement": 0.1607,
+      "noise_frac_3sigma": 0.0002,
+      "correctness": {
+        "max_abs_err": 0.1875,
+        "max_rel_err": 0.013698629136173214,
+        "mean_rel_err": 0.0032502359244972467,
+        "nan": false,
+        "rows": 16,
+        "rows_over_tol": 0,
+        "frac_rows_over_tol": 0.0,
+        "p99_row_rel_err": 0.013698630034923553,
+        "rule": "max_rel_err<=tol",
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "latency_mode": "graph",
+      "primary": false,
+      "mixed": ""
+    },
+    "128,8192": {
+      "before_us": 398.6879885196686,
+      "before_sigma_us": 0.0683262849165776,
+      "after_us": 370.0160086154938,
+      "after_lat": [
+        370.04798650741577,
+        370.0160086154938,
+        369.951993227005,
+        370.0160086154938,
+        369.9840009212494
+      ],
+      "improvement": 0.0719,
+      "noise_frac_3sigma": 0.0005,
+      "correctness": {
+        "max_abs_err": 0.125,
+        "max_rel_err": 0.008810572066215185,
+        "mean_rel_err": 0.0002213647385360673,
+        "nan": false,
+        "rows": 128,
+        "rows_over_tol": 0,
+        "frac_rows_over_tol": 0.0,
+        "p99_row_rel_err": 0.006607929244637489,
+        "rule": "max_rel_err<=tol",
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "latency_mode": "graph",
+      "primary": false,
+      "mixed": ""
+    },
+    "32,8192": {
+      "before_us": 251.23199820518494,
+      "before_sigma_us": 0.02024344329250359,
+      "after_us": 214.39999341964722,
+      "after_lat": [
+        214.39999341964722,
+        214.36800062656403,
+        214.52799439430237,
+        214.36800062656403,
+        214.49600160121918
+      ],
+      "improvement": 0.1466,
+      "noise_frac_3sigma": 0.0002,
+      "correctness": {
+        "max_abs_err": 0.234375,
+        "max_rel_err": 0.01847290494794838,
+        "mean_rel_err": 0.002065428765490651,
+        "nan": false,
+        "rows": 32,
+        "rows_over_tol": 0,
+        "frac_rows_over_tol": 0.0,
+        "p99_row_rel_err": 0.018472904339432716,
+        "rule": "max_rel_err<=tol",
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "latency_mode": "graph",
+      "primary": false,
+      "mixed": ""
+    },
+    "1,8192": {
+      "before_us": 136.54400408267975,
+      "before_sigma_us": 1.6352467738840473,
+      "after_us": 105.72800040245056,
+      "after_lat": [
+        104.80000078678131,
+        105.79200088977814,
+        103.87200117111206,
+        105.79200088977814,
+        105.72800040245056
+      ],
+      "improvement": 0.2257,
+      "noise_frac_3sigma": 0.0359,
+      "correctness": {
+        "max_abs_err": 0.0,
+        "max_rel_err": 0.0,
+        "mean_rel_err": 0.0,
+        "nan": false,
+        "rule": "max_rel_err<=tol",
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "latency_mode": "graph",
+      "primary": false,
+      "mixed": ""
+    }
+  },
+  "driver_sha": "ff88e72e3180",
+  "pristine_points": {
+    "1,1048576": {
+      "median": 132.47999548912048,
+      "sigma": 0.015673203700052152
+    },
+    "16,65536": {
+      "median": 210.27199923992157,
+      "sigma": 0.015673203700052152
+    },
+    "128,8192": {
+      "median": 398.6879885196686,
+      "sigma": 0.0683262849165776
+    },
+    "32,8192": {
+      "median": 251.23199820518494,
+      "sigma": 0.02024344329250359
+    },
+    "1,8192": {
+      "median": 136.54400408267975,
+      "sigma": 1.6352467738840473
+    }
+  },
+  "changed_files": [
+    "kernels/jit/csrc/attention/kda_fused_decode.cuh",
+    "kernels/jit/csrc/elementwise/l2_prefetch.cuh",
+    "kernels/jit/csrc/kimi_k3/attn_res/fused_tma.cuh",
+    "kernels/ops/attention/kda_fused_decode.py",
+    "kernels/ops/kimi_k3/attn_res.py",
+    "kernels/ops/elementwise/l2_prefetch.py",
+    "kernels/ops/attention/fla/fused_recurrent.py",
+    "srt/models/kimi_k3.py",
+    "srt/layers/attn_residual.py",
+    "srt/layers/attention/linear/kda_backend.py",
+    "srt/layers/moe/moe_runner/flashinfer_trtllm.py"
+  ],
+  "diff_patch": "/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_shapes_claude/best_tree_judged.patch",
+  "diff_lines": 1702,
+  "gates": {
+    "correctness": true,
+    "latency_improved": true,
+    "no_secondary_regression": true
+  },
+  "required_improvement": 0.005,
+  "before_us": 132.47999548912048,
+  "latency_us": 103.74400019645691,
+  "recovered_frac": 0.2169,
+  "correctness": {
+    "pass": true
+  },
+  "golden_dir": "/raid/yilegu/eval_goldens/golden_k3_40852908ed6b",
+  "verdict": "PASS",
+  "reason": "all gates passed"
+}

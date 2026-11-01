@@ -1,0 +1,775 @@
+diff -ruN -x __pycache__ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_lcprefill_claude/trial_4_tree_judged/kernels/jit/csrc/attention/kda_chunk_prep.cuh /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_lcprefill_claude/trial_5_tree_judged/kernels/jit/csrc/attention/kda_chunk_prep.cuh
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_lcprefill_claude/trial_4_tree_judged/kernels/jit/csrc/attention/kda_chunk_prep.cuh	1969-12-31 16:00:00.000000000 -0800
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_lcprefill_claude/trial_5_tree_judged/kernels/jit/csrc/attention/kda_chunk_prep.cuh	2026-09-27 17:02:25.736051520 -0700
+@@ -0,0 +1,616 @@
++// Per-chunk preparation of KDA chunked prefill (safe gate, K = V = 128, BT = 64).
++// Replaces the Triton chain chunk_kda_fwd_kernel_intra_sub_chunk ->
++// chunk_kda_fwd_kernel_inter_solve_fused -> recompute_w_u_fwd (plus the Akk zero
++// fill between them) with one kernel. Per (64-token chunk, head):
++//   Aqk [64, 64] bf16   lower-triangular q.k^T gate-weighted scores (upper blocks unwritten)
++//   Ai  [64, 64]        (I + tril(beta * k.k^T gated, -1))^-1, kept in smem
++//   u = bf16(Ai) @ bf16(v * beta)
++//   w = bf16(Ai) @ bf16(k * beta * exp2(g))
++//   kg = bf16(k * exp2(g_last - g))
++// Every product keeps the Triton operand precision: tf32 for the diagonal 16x16
++// blocks and the block merge of the inverse, bf16 for the off-diagonal blocks and
++// u / w, fp32 forward substitution. Only the fp32 summation order differs.
++
++#include <sgl_kernel/tensor.h>
++#include <sgl_kernel/utils.h>
++
++#include <sgl_kernel/type.cuh>
++#include <sgl_kernel/utils.cuh>
++
++#include <dlpack/dlpack.h>
++#include <tvm/ffi/container/tensor.h>
++
++#include <cstdint>
++#include <cuda_bf16.h>
++
++namespace sglang {
++
++namespace kda_chunk_prep {
++
++constexpr int kBT = 64;   // chunk length (tokens)
++constexpr int kBC = 16;   // sub-chunk length; warp c owns tokens [16c, 16c + 16) in the solve
++constexpr int kK = 128;   // head dim of q / k / v
++constexpr int kThreads = 128;
++constexpr int kLd = 20;   // pitch of the fp32 16x16 blocks (tf32 fragment loads conflict-free)
++constexpr int kBlk = kBC * kLd;
++
++struct Smem {
++  bf16_t q[kBT * kK];  // [tok][K], 16 B chunks XOR-swizzled by (row & 7); later bf16(Ai) [64][64]
++  bf16_t k[kBT * kK];  // same layout; later bf16(k * beta * exp2(g))
++  bf16_t v[kBT * kK];  // same layout; later bf16(v * beta)
++  float g[kBT * kK];   // [tok][K], 16 B chunks swizzled by (row & 7); later u | w staging
++  // fp32 blocks: [0, 10) Ai(c, j) for c >= j, [10, 16) Akk(c, j) for c > j, [16, 20) per-warp scratch
++  float blk[20 * kBlk];
++  float beta[kBT];
++};
++
++SGL_DEVICE int ai_blk(int c, int j) {
++  return (c * (c + 1) / 2 + j) * kBlk;
++}
++SGL_DEVICE int akk_blk(int c, int j) {
++  return (10 + c * (c - 1) / 2 + j) * kBlk;
++}
++
++/// bf16 [row][128]: element offset of 8-element chunk `chunk` of `row`.
++SGL_DEVICE int swz(int row, int chunk) {
++  return row * kK + ((chunk ^ (row & 7)) * 8);
++}
++/// fp32 [row][128]: element offset of 4-element chunk `chunk` of `row`.
++SGL_DEVICE int swz_f(int row, int chunk) {
++  return row * kK + ((chunk ^ (row & 7)) * 4);
++}
++SGL_DEVICE float g_at(const float* sg, int row, int col) {
++  return sg[swz_f(row, col >> 2) + (col & 3)];
++}
++SGL_DEVICE float bf_at(const bf16_t* s, int row, int col) {
++  return __bfloat162float(s[swz(row, col >> 3) + (col & 7)]);
++}
++/// bf16 [row][64] (the inverse): element offset of 8-element chunk `chunk`.
++SGL_DEVICE int swz64(int row, int chunk) {
++  return row * kBT + ((chunk ^ (row & 7)) * 8);
++}
++
++SGL_DEVICE uint32_t smem_addr(const void* p) {
++  return static_cast<uint32_t>(__cvta_generic_to_shared(p));
++}
++
++SGL_DEVICE void cp_async16(uint32_t dst, const void* src, bool pred) {
++  // src-size 0 zero-fills the destination (rows past the sequence end).
++  asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n" ::"r"(dst), "l"(src), "r"(pred ? 16 : 0));
++}
++
++SGL_DEVICE void cp_async_commit() {
++  asm volatile("cp.async.commit_group;\n" ::);
++}
++
++template <int N>
++SGL_DEVICE void cp_async_wait() {
++  asm volatile("cp.async.wait_group %0;\n" ::"n"(N));
++}
++
++SGL_DEVICE void ldsm_x4(uint32_t (&r)[4], uint32_t addr) {
++  asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0, %1, %2, %3}, [%4];\n"
++               : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3])
++               : "r"(addr));
++}
++
++SGL_DEVICE void ldsm_x4_t(uint32_t (&r)[4], uint32_t addr) {
++  asm volatile("ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%0, %1, %2, %3}, [%4];\n"
++               : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3])
++               : "r"(addr));
++}
++
++/// d = a @ b + d, m16n8k16 bf16 -> fp32.
++SGL_DEVICE void mma_bf16(float (&d)[4], const uint32_t (&a)[4], uint32_t b0, uint32_t b1) {
++  asm volatile(
++      "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, "
++      "{%0, %1, %2, %3};\n"
++      : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3])
++      : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
++}
++
++/// d = a @ b + d, m16n8k8 tf32 -> fp32 (fp32 operand bits, as Triton passes them).
++SGL_DEVICE void mma_tf32(float (&d)[4], const float (&a)[4], float b0, float b1) {
++  asm volatile(
++      "mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32 {%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, "
++      "{%0, %1, %2, %3};\n"
++      : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3])
++      : "r"(__float_as_uint(a[0])), "r"(__float_as_uint(a[1])), "r"(__float_as_uint(a[2])),
++        "r"(__float_as_uint(a[3])), "r"(__float_as_uint(b0)), "r"(__float_as_uint(b1)));
++}
++
++SGL_DEVICE float ex2_approx(float x) {
++  // Same instruction as Triton's tl.math.exp2 on fp32.
++  float y;
++  asm("ex2.approx.ftz.f32 %0, %1;\n" : "=f"(y) : "f"(x));
++  return y;
++}
++
++SGL_DEVICE uint32_t pack_bf16(float lo, float hi) {
++  const __nv_bfloat162 v = __floats2bfloat162_rn(lo, hi);
++  return *reinterpret_cast<const uint32_t*>(&v);
++}
++
++/// acc += X @ Y for fp32 16x16 blocks (pitch kLd) in tf32; acc holds two n8 tiles.
++SGL_DEVICE void mm16_tf32(float (&acc)[2][4], const float* X, const float* Y, int g, int t) {
++#pragma unroll
++  for (int kk = 0; kk < kBC; kk += 8) {
++    const float a[4] = {
++        X[g * kLd + kk + t], X[(g + 8) * kLd + kk + t], X[g * kLd + kk + t + 4], X[(g + 8) * kLd + kk + t + 4]};
++#pragma unroll
++    for (int nt = 0; nt < 2; ++nt) {
++      mma_tf32(acc[nt], a, Y[(kk + t) * kLd + nt * 8 + g], Y[(kk + t + 4) * kLd + nt * 8 + g]);
++    }
++  }
++}
++
++SGL_DEVICE void zero(float (&acc)[2][4]) {
++#pragma unroll
++  for (int nt = 0; nt < 2; ++nt)
++#pragma unroll
++    for (int i = 0; i < 4; ++i)
++      acc[nt][i] = 0.f;
++}
++
++/// D = sign * acc (C fragment layout -> fp32 16x16 block).
++SGL_DEVICE void store16(float* D, const float (&acc)[2][4], float sign, int g, int t) {
++#pragma unroll
++  for (int nt = 0; nt < 2; ++nt) {
++    D[g * kLd + nt * 8 + 2 * t] = sign * acc[nt][0];
++    D[g * kLd + nt * 8 + 2 * t + 1] = sign * acc[nt][1];
++    D[(g + 8) * kLd + nt * 8 + 2 * t] = sign * acc[nt][2];
++    D[(g + 8) * kLd + nt * 8 + 2 * t + 1] = sign * acc[nt][3];
++  }
++}
++
++/**
++ * \brief One CTA prepares one (64-token chunk, head): Aqk, w, u, kg of chunk_kda.
++ *
++ * Grid (num_chunks, H). chunk_indices[i] = (sequence, chunk within sequence).
++ */
++__global__ void __launch_bounds__(kThreads, 2) kda_chunk_prep_kernel(
++    const bf16_t* __restrict__ q,     // [T, H, K], token stride H * K
++    const bf16_t* __restrict__ k,     // [T, H, K], token stride H * K
++    const bf16_t* __restrict__ v,     // [T, H, V], token stride v_stride
++    const float* __restrict__ g,      // [T, H, K] chunk-local cumsum of the gate (log2 space)
++    const float* __restrict__ beta,   // [T, H]
++    bf16_t* __restrict__ Aqk,         // [T, H, BT]
++    bf16_t* __restrict__ w,           // [T, H, K]
++    bf16_t* __restrict__ u,           // [T, H, V]
++    bf16_t* __restrict__ kg,          // [T, H, K]
++    const int32_t* __restrict__ cu_seqlens,     // [N + 1]
++    const int32_t* __restrict__ chunk_indices,  // [NT, 2]
++    int64_t v_stride,
++    int32_t H,
++    float scale) {
++  extern __shared__ __align__(128) uint8_t smem_raw[];
++  auto& sm = *reinterpret_cast<Smem*>(smem_raw);
++
++  const int tid = threadIdx.x;
++  const int warp = tid >> 5;
++  const int lane = tid & 31;
++  const int g8 = lane >> 2;
++  const int t4 = lane & 3;
++  const int i_h = blockIdx.y;
++
++  const int i_n = chunk_indices[2 * blockIdx.x];
++  const int i_t = chunk_indices[2 * blockIdx.x + 1];
++  const int bos = cu_seqlens[i_n];
++  const int T = cu_seqlens[i_n + 1] - bos;
++  const int64_t row0 = static_cast<int64_t>(bos) + i_t * kBT;
++  const int Tc = min(kBT, T - i_t * kBT);  // valid rows of this chunk
++
++  const int64_t stride_qk = static_cast<int64_t>(H) * kK;
++  const int64_t head_off = static_cast<int64_t>(i_h) * kK;
++
++  // ---- async loads: q, k, g (group 0), v (group 1) ----
++  {
++    const bf16_t* qb = q + row0 * stride_qk + head_off;
++    const bf16_t* kb = k + row0 * stride_qk + head_off;
++    const float* gb = g + row0 * stride_qk + head_off;
++#pragma unroll
++    for (int i = 0; i < 8; ++i) {
++      const int idx = tid + i * kThreads;
++      const int row = idx >> 4, ch = idx & 15;
++      const bool ok = row < Tc;
++      const int64_t off = (ok ? row : 0) * stride_qk + ch * 8;
++      cp_async16(smem_addr(&sm.q[swz(row, ch)]), qb + off, ok);
++      cp_async16(smem_addr(&sm.k[swz(row, ch)]), kb + off, ok);
++    }
++#pragma unroll
++    for (int i = 0; i < 16; ++i) {
++      const int idx = tid + i * kThreads;
++      const int row = idx >> 5, ch = idx & 31;
++      const bool ok = row < Tc;
++      cp_async16(smem_addr(&sm.g[swz_f(row, ch)]), gb + (ok ? row : 0) * stride_qk + ch * 4, ok);
++    }
++    cp_async_commit();
++    const bf16_t* vb = v + row0 * v_stride + head_off;
++#pragma unroll
++    for (int i = 0; i < 8; ++i) {
++      const int idx = tid + i * kThreads;
++      const int row = idx >> 4, ch = idx & 15;
++      const bool ok = row < Tc;
++      cp_async16(smem_addr(&sm.v[swz(row, ch)]), vb + (ok ? row : 0) * v_stride + ch * 8, ok);
++    }
++    cp_async_commit();
++    if (tid < kBT) {
++      sm.beta[tid] = tid < Tc ? beta[(row0 + tid) * H + i_h] : 0.f;
++    }
++  }
++  cp_async_wait<1>();
++  __syncthreads();
++
++  const int c = warp;
++  const int r0 = kBC * c + g8;  // chunk-local rows of this lane's C / A fragments
++  const int r1 = r0 + 8;
++  const bool ok0 = r0 < Tc, ok1 = r1 < Tc;
++  bf16_t* aqk_row0 = Aqk + (row0 + r0) * H * kBT + i_h * kBT;
++  bf16_t* aqk_row1 = Aqk + (row0 + r1) * H * kBT + i_h * kBT;
++  float* scratch = &sm.blk[(16 + warp) * kBlk];
++
++  // ---- diagonal block (c, c): tf32, gate centred on the sub-chunk middle row ----
++  {
++    const int nd = kBC * c + max(0, min(kBC / 2, Tc - kBC * c - 1));
++    float aqk[2][4], akk[2][4];
++    zero(aqk);
++    zero(akk);
++#pragma unroll 4
++    for (int ks = 0; ks < kK / 8; ++ks) {
++      float qa[4], ka[4], kb[4];
++#pragma unroll
++      for (int e = 0; e < 4; ++e) {
++        const int row = (e & 1) ? r1 : r0;
++        const bool ok = (e & 1) ? ok1 : ok0;
++        const int col = ks * 8 + t4 + ((e & 2) ? 4 : 0);
++        const float gm = g_at(sm.g, row, col) - g_at(sm.g, nd, col);
++        const float eq = ok ? ex2_approx(gm) : 0.f;
++        const float ek = ok ? ex2_approx(-gm) : 0.f;
++        const float kv = bf_at(sm.k, row, col);
++        qa[e] = bf_at(sm.q, row, col) * eq;
++        ka[e] = kv * eq;
++        kb[e] = kv * ek;
++      }
++      // B fragment of n-tile 0 is (k = t4 / t4 + 4, s = g8) = this lane's row r0 values, n-tile 1 is row r1.
++      mma_tf32(aqk[0], qa, kb[0], kb[2]);
++      mma_tf32(aqk[1], qa, kb[1], kb[3]);
++      mma_tf32(akk[0], ka, kb[0], kb[2]);
++      mma_tf32(akk[1], ka, kb[1], kb[3]);
++    }
++    const float b0 = sm.beta[r0], b1 = sm.beta[r1];
++#pragma unroll
++    for (int nt = 0; nt < 2; ++nt) {
++      const int s = nt * 8 + 2 * t4;
++      const int rl0 = g8, rl1 = g8 + 8;
++      const float q00 = s <= rl0 ? aqk[nt][0] * scale : 0.f;
++      const float q01 = s + 1 <= rl0 ? aqk[nt][1] * scale : 0.f;
++      const float q10 = s <= rl1 ? aqk[nt][2] * scale : 0.f;
++      const float q11 = s + 1 <= rl1 ? aqk[nt][3] * scale : 0.f;
++      if (ok0) *reinterpret_cast<uint32_t*>(aqk_row0 + kBC * c + s) = pack_bf16(q00, q01);
++      if (ok1) *reinterpret_cast<uint32_t*>(aqk_row1 + kBC * c + s) = pack_bf16(q10, q11);
++      scratch[rl0 * kLd + s] = s < rl0 ? akk[nt][0] * b0 : 0.f;
++      scratch[rl0 * kLd + s + 1] = s + 1 < rl0 ? akk[nt][1] * b0 : 0.f;
++      scratch[rl1 * kLd + s] = s < rl1 ? akk[nt][2] * b1 : 0.f;
++      scratch[rl1 * kLd + s + 1] = s + 1 < rl1 ? akk[nt][3] * b1 : 0.f;
++    }
++    __syncwarp();
++
++    // Forward substitution: lane owns column s of (I + Akk)^-1.
++    const int s = lane & 15;
++    float col[kBC];
++#pragma unroll
++    for (int j = 0; j < kBC; ++j)
++      col[j] = -scratch[j * kLd + s];
++#pragma unroll
++    for (int i = 2; i < kBC; ++i) {
++      float acc = 0.f;
++#pragma unroll
++      for (int j = 0; j < i; ++j)
++        acc += -scratch[i * kLd + j] * col[j];
++      col[i] = (s < i ? -scratch[i * kLd + s] : 0.f) + acc;
++    }
++    float* dst = &sm.blk[ai_blk(c, c)];
++    if (lane < 16) {
++#pragma unroll
++      for (int j = 0; j < kBC; ++j)
++        dst[j * kLd + s] = col[j] + (j == s ? 1.f : 0.f);
++    }
++  }
++
++  // ---- off-diagonal blocks (c, j < c): bf16 operands, gate centred on row 16c ----
++  // Sub-chunks past the sequence end are skipped (their rows are never stored).
++  if (c > 0 && kBC * c < Tc) {
++    float aqk[3][2][4], akk[3][2][4];
++#pragma unroll
++    for (int j = 0; j < 3; ++j) {
++      zero(aqk[j]);
++      zero(akk[j]);
++    }
++    const int rn = kBC * c;
++#pragma unroll 2
++    for (int ks = 0; ks < kK / 16; ++ks) {
++      uint32_t qa[4], ka[4];
++      float gn[4][2];
++#pragma unroll
++      for (int e = 0; e < 4; ++e) {
++        const int row = (e & 1) ? r1 : r0;
++        const bool ok = (e & 1) ? ok1 : ok0;
++        const int col = ks * 16 + 2 * t4 + ((e & 2) ? 8 : 0);
++        float qv[2], kv[2];
++#pragma unroll
++        for (int x = 0; x < 2; ++x) {
++          gn[e][x] = g_at(sm.g, rn, col + x);
++          const float eq = ok ? ex2_approx(g_at(sm.g, row, col + x) - gn[e][x]) : 0.f;
++          qv[x] = bf_at(sm.q, row, col + x) * eq;
++          kv[x] = bf_at(sm.k, row, col + x) * eq;
++        }
++        qa[e] = pack_bf16(qv[0], qv[1]);
++        ka[e] = pack_bf16(kv[0], kv[1]);
++      }
++#pragma unroll
++      for (int j = 0; j < 3; ++j) {
++        if (j < c) {
++          uint32_t kt[4];  // B fragments: rows 16j + g8 (n-tile 0) and 16j + g8 + 8 (n-tile 1)
++#pragma unroll
++          for (int e = 0; e < 4; ++e) {
++            const int row = kBC * j + g8 + ((e & 1) ? 8 : 0);
++            const int col = ks * 16 + 2 * t4 + ((e & 2) ? 8 : 0);
++            float x2[2];
++#pragma unroll
++            for (int x = 0; x < 2; ++x)
++              x2[x] = bf_at(sm.k, row, col + x) * ex2_approx(gn[e][x] - g_at(sm.g, row, col + x));
++            kt[e] = pack_bf16(x2[0], x2[1]);
++          }
++          mma_bf16(aqk[j][0], qa, kt[0], kt[2]);
++          mma_bf16(aqk[j][1], qa, kt[1], kt[3]);
++          mma_bf16(akk[j][0], ka, kt[0], kt[2]);
++          mma_bf16(akk[j][1], ka, kt[1], kt[3]);
++        }
++      }
++    }
++    const float b0 = sm.beta[r0], b1 = sm.beta[r1];
++#pragma unroll
++    for (int j = 0; j < 3; ++j) {
++      if (j < c) {
++        float* dst = &sm.blk[akk_blk(c, j)];
++#pragma unroll
++        for (int nt = 0; nt < 2; ++nt) {
++          const int s = nt * 8 + 2 * t4;
++          if (ok0)
++            *reinterpret_cast<uint32_t*>(aqk_row0 + kBC * j + s) =
++                pack_bf16(aqk[j][nt][0] * scale, aqk[j][nt][1] * scale);
++          if (ok1)
++            *reinterpret_cast<uint32_t*>(aqk_row1 + kBC * j + s) =
++                pack_bf16(aqk[j][nt][2] * scale, aqk[j][nt][3] * scale);
++          dst[g8 * kLd + s] = akk[j][nt][0] * b0;
++          dst[g8 * kLd + s + 1] = akk[j][nt][1] * b0;
++          dst[(g8 + 8) * kLd + s] = akk[j][nt][2] * b1;
++          dst[(g8 + 8) * kLd + s + 1] = akk[j][nt][3] * b1;
++        }
++      }
++    }
++  }
++  cp_async_wait<0>();
++  __syncthreads();
++
++  // ---- elementwise: kg -> global, k -> bf16(k * beta * exp2(g)), v -> bf16(v * beta) ----
++  {
++    const int lr = Tc - 1;
++    bf16_t* kgb = kg + row0 * stride_qk + head_off;
++#pragma unroll 2
++    for (int i = 0; i < 8; ++i) {
++      const int idx = tid + i * kThreads;
++      const int row = idx >> 4, ch = idx & 15;
++      const float b = sm.beta[row];
++      const float4 g0 = *reinterpret_cast<const float4*>(&sm.g[swz_f(row, 2 * ch)]);
++      const float4 g1 = *reinterpret_cast<const float4*>(&sm.g[swz_f(row, 2 * ch + 1)]);
++      const float4 l0 = *reinterpret_cast<const float4*>(&sm.g[swz_f(lr, 2 * ch)]);
++      const float4 l1 = *reinterpret_cast<const float4*>(&sm.g[swz_f(lr, 2 * ch + 1)]);
++      const float gv[8] = {g0.x, g0.y, g0.z, g0.w, g1.x, g1.y, g1.z, g1.w};
++      const float lv[8] = {l0.x, l0.y, l0.z, l0.w, l1.x, l1.y, l1.z, l1.w};
++      uint4& kr = *reinterpret_cast<uint4*>(&sm.k[swz(row, ch)]);
++      uint4& vr = *reinterpret_cast<uint4*>(&sm.v[swz(row, ch)]);
++      uint4 kraw = kr, vraw = vr;
++      const __nv_bfloat162* k2 = reinterpret_cast<const __nv_bfloat162*>(&kraw);
++      const __nv_bfloat162* v2 = reinterpret_cast<const __nv_bfloat162*>(&vraw);
++      uint4 kgo, kbo, vbo;
++      uint32_t* kgp = reinterpret_cast<uint32_t*>(&kgo);
++      uint32_t* kbp = reinterpret_cast<uint32_t*>(&kbo);
++      uint32_t* vbp = reinterpret_cast<uint32_t*>(&vbo);
++#pragma unroll
++      for (int p = 0; p < 4; ++p) {
++        const float2 kf = __bfloat1622float2(k2[p]);
++        const float2 vf = __bfloat1622float2(v2[p]);
++        kgp[p] = pack_bf16(
++            kf.x * ex2_approx(lv[2 * p] - gv[2 * p]), kf.y * ex2_approx(lv[2 * p + 1] - gv[2 * p + 1]));
++        kbp[p] = pack_bf16(kf.x * b * ex2_approx(gv[2 * p]), kf.y * b * ex2_approx(gv[2 * p + 1]));
++        vbp[p] = pack_bf16(vf.x * b, vf.y * b);
++      }
++      if (row < Tc) *reinterpret_cast<uint4*>(kgb + row * stride_qk + ch * 8) = kgo;
++      kr = kbo;
++      vr = vbo;
++    }
++  }
++
++  // ---- merge the diagonal inverses into the full inverse (Triton's tf32 block formulas) ----
++  float acc[2][4];
++  if (c >= 1) {  // Ai(c, c-1) = -(Ai(c,c) @ Akk(c,c-1)) @ Ai(c-1,c-1)
++    zero(acc);
++    mm16_tf32(acc, &sm.blk[ai_blk(c, c)], &sm.blk[akk_blk(c, c - 1)], g8, t4);
++    store16(scratch, acc, 1.f, g8, t4);
++    __syncwarp();
++    zero(acc);
++    mm16_tf32(acc, scratch, &sm.blk[ai_blk(c - 1, c - 1)], g8, t4);
++    store16(&sm.blk[ai_blk(c, c - 1)], acc, -1.f, g8, t4);
++  }
++  __syncthreads();
++  if (c >= 2) {  // Ai(c, c-2) = -Ai(c,c) @ (Akk(c,c-2) @ Ai(c-2,c-2) + Akk(c,c-1) @ Ai(c-1,c-2))
++    zero(acc);
++    mm16_tf32(acc, &sm.blk[akk_blk(c, c - 2)], &sm.blk[ai_blk(c - 2, c - 2)], g8, t4);
++    mm16_tf32(acc, &sm.blk[akk_blk(c, c - 1)], &sm.blk[ai_blk(c - 1, c - 2)], g8, t4);
++    store16(scratch, acc, 1.f, g8, t4);
++    __syncwarp();
++    zero(acc);
++    mm16_tf32(acc, &sm.blk[ai_blk(c, c)], scratch, g8, t4);
++    store16(&sm.blk[ai_blk(c, c - 2)], acc, -1.f, g8, t4);
++  }
++  __syncthreads();
++  if (c == 3) {  // Ai(3, 0) = -Ai(3,3) @ (Akk(3,0) @ Ai(0,0) + Akk(3,1) @ Ai(1,0) + Akk(3,2) @ Ai(2,0))
++    zero(acc);
++    mm16_tf32(acc, &sm.blk[akk_blk(3, 0)], &sm.blk[ai_blk(0, 0)], g8, t4);
++    mm16_tf32(acc, &sm.blk[akk_blk(3, 1)], &sm.blk[ai_blk(1, 0)], g8, t4);
++    mm16_tf32(acc, &sm.blk[akk_blk(3, 2)], &sm.blk[ai_blk(2, 0)], g8, t4);
++    store16(scratch, acc, 1.f, g8, t4);
++    __syncwarp();
++    zero(acc);
++    mm16_tf32(acc, &sm.blk[ai_blk(3, 3)], scratch, g8, t4);
++    store16(&sm.blk[ai_blk(3, 0)], acc, -1.f, g8, t4);
++  }
++  __syncthreads();
++
++  // ---- bf16(Ai) -> sm.q as [64][64] (only blocks j <= c are read) ----
++  bf16_t* ai_h = sm.q;
++  for (int task = tid; task < 10 * kBC * 2; task += kThreads) {
++    const int b = task >> 5;
++    const int rl = (task >> 1) & 15;
++    const int hf = task & 1;
++    const int bc = b >= 6 ? 3 : (b >= 3 ? 2 : (b >= 1 ? 1 : 0));
++    const int bj = b - bc * (bc + 1) / 2;
++    const float* src = &sm.blk[b * kBlk + rl * kLd + hf * 8];
++    uint4 o;
++    uint32_t* op = reinterpret_cast<uint32_t*>(&o);
++#pragma unroll
++    for (int p = 0; p < 4; ++p)
++      op[p] = pack_bf16(src[2 * p], src[2 * p + 1]);
++    *reinterpret_cast<uint4*>(&ai_h[swz64(bc * kBC + rl, 2 * bj + hf)]) = o;
++  }
++  __syncthreads();
++
++  // ---- u = Ai @ vb, w = Ai @ kb; warp owns output columns [32 warp, 32 warp + 32) ----
++  bf16_t* stage = reinterpret_cast<bf16_t*>(sm.g);  // [2][64][128] bf16: u | w
++#pragma unroll
++  for (int m = 0; m < 2; ++m) {
++    const bf16_t* src = m == 0 ? sm.v : sm.k;
++    bf16_t* dst = stage + m * kBT * kK;
++#pragma unroll
++    for (int rc = 0; rc < 4; ++rc) {
++      float o[4][4];
++#pragma unroll
++      for (int nt = 0; nt < 4; ++nt)
++#pragma unroll
++        for (int x = 0; x < 4; ++x)
++          o[nt][x] = 0.f;
++#pragma unroll
++      for (int j = 0; j < 4; ++j) {
++        if (j <= rc) {
++          uint32_t a[4];
++          ldsm_x4(a, smem_addr(&ai_h[swz64(rc * kBC + (lane & 15), 2 * j + (lane >> 4))]));
++#pragma unroll
++          for (int p = 0; p < 2; ++p) {
++            uint32_t b[4];
++            ldsm_x4_t(b, smem_addr(&src[swz(j * kBC + (lane & 15), 4 * warp + 2 * p + (lane >> 4))]));
++            mma_bf16(o[2 * p], a, b[0], b[1]);
++            mma_bf16(o[2 * p + 1], a, b[2], b[3]);
++          }
++        }
++      }
++#pragma unroll
++      for (int nt = 0; nt < 4; ++nt) {
++        const int ch = 4 * warp + nt;
++        const int ra = rc * kBC + g8, rb = ra + 8;
++        *reinterpret_cast<uint32_t*>(&dst[swz(ra, ch) + 2 * t4]) = pack_bf16(o[nt][0], o[nt][1]);
++        *reinterpret_cast<uint32_t*>(&dst[swz(rb, ch) + 2 * t4]) = pack_bf16(o[nt][2], o[nt][3]);
++      }
++    }
++  }
++  __syncthreads();
++
++  {
++    bf16_t* ub = u + row0 * stride_qk + head_off;
++    bf16_t* wb = w + row0 * stride_qk + head_off;
++#pragma unroll
++    for (int i = 0; i < 8; ++i) {
++      const int idx = tid + i * kThreads;
++      const int row = idx >> 4, ch = idx & 15;
++      if (row < Tc) {
++        *reinterpret_cast<uint4*>(ub + row * stride_qk + ch * 8) =
++            *reinterpret_cast<const uint4*>(&stage[swz(row, ch)]);
++        *reinterpret_cast<uint4*>(wb + row * stride_qk + ch * 8) =
++            *reinterpret_cast<const uint4*>(&stage[kBT * kK + swz(row, ch)]);
++      }
++    }
++  }
++}
++
++}  // namespace kda_chunk_prep
++
++/// \brief Host launcher for the fused KDA chunk preparation (see file header).
++struct KdaChunkPrepKernel {
++  static void run(
++      const tvm::ffi::TensorView q,
++      const tvm::ffi::TensorView k,
++      const tvm::ffi::TensorView v,
++      const tvm::ffi::TensorView g,
++      const tvm::ffi::TensorView beta,
++      const tvm::ffi::TensorView Aqk,
++      const tvm::ffi::TensorView w,
++      const tvm::ffi::TensorView u,
++      const tvm::ffi::TensorView kg,
++      const tvm::ffi::TensorView cu_seqlens,
++      const tvm::ffi::TensorView chunk_indices,
++      double scale) {
++    using namespace host;
++    using namespace kda_chunk_prep;
++
++    auto T_ = SymbolicSize{"seqlen"};
++    auto H_ = SymbolicSize{"num_heads"};
++    auto N_ = SymbolicSize{"num_seqs_plus_1"};
++    auto NT_ = SymbolicSize{"num_chunks"};
++    auto Sv_ = SymbolicSize{"v_token_stride"};
++    auto device = SymbolicDevice{};
++    device.set_options<kDLCUDA>();
++
++    TensorMatcher({1, T_, H_, kK}).with_dtype<bf16_t>().with_device(device).verify(q).verify(k).verify(w).verify(
++        kg).verify(u);
++    TensorMatcher({1, T_, H_, kK})
++        .with_strides({-1, Sv_, kK, 1})
++        .with_dtype<bf16_t>()
++        .with_device(device)
++        .verify(v);
++    TensorMatcher({1, T_, H_, kK}).with_dtype<fp32_t>().with_device(device).verify(g);
++    TensorMatcher({1, T_, H_}).with_dtype<fp32_t>().with_device(device).verify(beta);
++    TensorMatcher({1, T_, H_, kBT}).with_dtype<bf16_t>().with_device(device).verify(Aqk);
++    TensorMatcher({N_}).with_dtype<int32_t>().with_device(device).verify(cu_seqlens);
++    TensorMatcher({NT_, 2}).with_dtype<int32_t>().with_device(device).verify(chunk_indices);
++
++    const int64_t H = H_.unwrap();
++    const int64_t NT = NT_.unwrap();
++    if (NT == 0) return;
++
++    constexpr size_t smem_bytes = sizeof(Smem);
++    static bool attr_set = false;
++    if (!attr_set) {
++      RuntimeDeviceCheck(cudaFuncSetAttribute(
++          kda_chunk_prep_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, static_cast<int>(smem_bytes)));
++      attr_set = true;
++    }
++    LaunchKernel(dim3(static_cast<uint32_t>(NT), static_cast<uint32_t>(H)), dim3(kThreads), device.unwrap(), smem_bytes)(
++        kda_chunk_prep_kernel,
++        static_cast<const bf16_t*>(q.data_ptr()),
++        static_cast<const bf16_t*>(k.data_ptr()),
++        static_cast<const bf16_t*>(v.data_ptr()),
++        static_cast<const float*>(g.data_ptr()),
++        static_cast<const float*>(beta.data_ptr()),
++        static_cast<bf16_t*>(Aqk.data_ptr()),
++        static_cast<bf16_t*>(w.data_ptr()),
++        static_cast<bf16_t*>(u.data_ptr()),
++        static_cast<bf16_t*>(kg.data_ptr()),
++        static_cast<const int32_t*>(cu_seqlens.data_ptr()),
++        static_cast<const int32_t*>(chunk_indices.data_ptr()),
++        static_cast<int64_t>(Sv_.unwrap()),
++        static_cast<int32_t>(H),
++        static_cast<float>(scale));
++  }
++};
++
++}  // namespace sglang
+diff -ruN -x __pycache__ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_lcprefill_claude/trial_4_tree_judged/kernels/ops/attention/fla/kda.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_lcprefill_claude/trial_5_tree_judged/kernels/ops/attention/fla/kda.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_lcprefill_claude/trial_4_tree_judged/kernels/ops/attention/fla/kda.py	2026-09-27 02:44:02.877742267 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_lcprefill_claude/trial_5_tree_judged/kernels/ops/attention/fla/kda.py	2026-09-27 17:12:44.926487240 -0700
+@@ -27,6 +27,8 @@
+     l2norm_fwd_strided_heads,
+ )
+ from sglang.kernels.ops.attention.fla.op import exp, exp2, log
++from sglang.kernels.ops.attention.kda_chunk_prep import covered as kda_chunk_prep_covered
++from sglang.kernels.ops.attention.kda_chunk_prep import kda_chunk_prep
+ from sglang.kernels.ops.attention.fla.utils import (
+     autotune_cache_kwargs,
+     check_shared_mem,
+@@ -1157,20 +1159,31 @@
+     _small_grid = _B * _NT_pr * _H_pr <= 256
+     if _small_grid:
+         v = v.contiguous()
+-    w, u, _, kg, Aqk, _ = chunk_kda_fwd_intra(
+-        q=q,
+-        k=k,
+-        v=v,
+-        gk=g,
+-        beta=beta,
+-        scale=scale,
+-        cu_seqlens=cu_seqlens,
+-        chunk_size=chunk_size,
+-        chunk_indices=chunk_indices,
+-        safe_gate=lower_bound is not None,
+-        fuse_diagonal=_small_grid,
+-        fuse_recompute=_small_grid,
+-    )
++    if (
++        not _small_grid
++        and lower_bound is not None
++        and kda_chunk_prep_covered(
++            q, k, v, g, beta, cu_seqlens, chunk_indices, chunk_size
++        )
++    ):
++        w, u, kg, Aqk = kda_chunk_prep(
++            q, k, v, g, beta, scale, cu_seqlens, chunk_indices
++        )
++    else:
++        w, u, _, kg, Aqk, _ = chunk_kda_fwd_intra(
++            q=q,
++            k=k,
++            v=v,
++            gk=g,
++            beta=beta,
++            scale=scale,
++            cu_seqlens=cu_seqlens,
++            chunk_size=chunk_size,
++            chunk_indices=chunk_indices,
++            safe_gate=lower_bound is not None,
++            fuse_diagonal=_small_grid,
++            fuse_recompute=_small_grid,
++        )
+ 
+     h, v_new = chunk_gated_delta_rule_fwd_h(
+         k=kg,
+diff -ruN -x __pycache__ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_lcprefill_claude/trial_4_tree_judged/kernels/ops/attention/kda_chunk_prep.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_lcprefill_claude/trial_5_tree_judged/kernels/ops/attention/kda_chunk_prep.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_lcprefill_claude/trial_4_tree_judged/kernels/ops/attention/kda_chunk_prep.py	1969-12-31 16:00:00.000000000 -0800
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_lcprefill_claude/trial_5_tree_judged/kernels/ops/attention/kda_chunk_prep.py	2026-09-27 17:02:39.092938946 -0700
+@@ -0,0 +1,93 @@
++"""Fused CUDA chunk preparation for KDA chunked prefill.
++
++One kernel for the safe-gate Triton chain intra_sub_chunk -> inter_solve_fused
++-> recompute_w_u of chunk_kda: returns (w, u, kg, Aqk) with the same operand
++precisions (see csrc/attention/kda_chunk_prep.cuh). ``covered()`` gates the
++inputs, the caller falls back to Triton for everything else.
++"""
++
++from __future__ import annotations
++
++from typing import TYPE_CHECKING, Tuple
++
++import torch
++
++from sglang.kernels.jit.utils import cache_once, load_jit
++
++if TYPE_CHECKING:
++    from tvm_ffi.module import Module
++
++
++@cache_once
++def _jit_kda_chunk_prep_module() -> Module:
++    return load_jit(
++        "kda_chunk_prep",
++        cuda_files=["attention/kda_chunk_prep.cuh"],
++        cuda_wrappers=[("run", "KdaChunkPrepKernel::run")],
++        extra_cuda_cflags=["-O3"],
++    )
++
++
++@cache_once
++def _arch_ok(device_index: int) -> bool:
++    return torch.cuda.get_device_capability(device_index)[0] >= 8
++
++
++def covered(
++    q: torch.Tensor,
++    k: torch.Tensor,
++    v: torch.Tensor,
++    g: torch.Tensor,
++    beta: torch.Tensor,
++    cu_seqlens: torch.Tensor | None,
++    chunk_indices: torch.Tensor | None,
++    chunk_size: int,
++) -> bool:
++    return (
++        q.is_cuda
++        and chunk_size == 64
++        and cu_seqlens is not None
++        and chunk_indices is not None
++        and cu_seqlens.dtype == torch.int32
++        and chunk_indices.dtype == torch.int32
++        and q.dim() == 4
++        and q.shape[0] == 1
++        and q.shape[-1] == 128
++        and v.shape == q.shape
++        and k.shape == q.shape
++        and q.dtype == torch.bfloat16
++        and k.dtype == torch.bfloat16
++        and v.dtype == torch.bfloat16
++        and g.dtype == torch.float32
++        and beta.dtype == torch.float32
++        and q.is_contiguous()
++        and k.is_contiguous()
++        and g.is_contiguous()
++        and beta.is_contiguous()
++        and v.stride(-1) == 1
++        and v.stride(-2) == v.shape[-1]
++        and _arch_ok(q.device.index)
++    )
++
++
++def kda_chunk_prep(
++    q: torch.Tensor,
++    k: torch.Tensor,
++    v: torch.Tensor,
++    g: torch.Tensor,
++    beta: torch.Tensor,
++    scale: float,
++    cu_seqlens: torch.Tensor,
++    chunk_indices: torch.Tensor,
++) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
++    """Returns (w, u, kg, Aqk); Aqk blocks above the diagonal are left
++    unwritten, as in the Triton path. Caller must have checked covered()."""
++    B, T, H, K = k.shape
++    w = torch.empty_like(k)
++    u = torch.empty(v.shape, dtype=v.dtype, device=v.device)
++    kg = torch.empty_like(k)
++    Aqk = k.new_empty(B, T, H, 64)
++    _jit_kda_chunk_prep_module().run(
++        q, k, v, g, beta, Aqk, w, u, kg, cu_seqlens, chunk_indices, scale
++    )
++    return w, u, kg, Aqk

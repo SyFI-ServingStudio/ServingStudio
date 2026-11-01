@@ -1,0 +1,2247 @@
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/pristine_tree/kernels/jit/csrc/attention/kda_fused_decode.cuh /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/trial_2_tree_judged/kernels/jit/csrc/attention/kda_fused_decode.cuh
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/pristine_tree/kernels/jit/csrc/attention/kda_fused_decode.cuh	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/trial_2_tree_judged/kernels/jit/csrc/attention/kda_fused_decode.cuh	2026-09-27 00:19:33.226205422 -0700
+@@ -42,6 +42,7 @@
+ 
+ #include <cstdint>
+ #include <cstdlib>
++#include <type_traits>
+ #include <cuda_bf16.h>
+ #include <cuda_runtime.h>
+ 
+@@ -153,36 +154,83 @@
+   return __float2bfloat16(value);
+ }
+ 
+-template <bool kUseCacheGlobalStore>
+-SGL_DEVICE void store_state_float4(float* ptr, float4 value) {
+-  if constexpr (kUseCacheGlobalStore) {
+-    __stcg(reinterpret_cast<float4*>(ptr), value);
++SGL_DEVICE float bf16_round(float value) {
++  return __bfloat162float(__float2bfloat16(value));
++}
++
++SGL_DEVICE float conv_silu_bf16(float value) {
++  return bf16_round(value / (1.0f + expf(-value)));
++}
++
++template <typename StateT>
++SGL_DEVICE float4 load_state4(const StateT* ptr) {
++  if constexpr (std::is_same_v<StateT, float>) {
++    return *reinterpret_cast<const float4*>(ptr);
++  } else {
++    // One 8-byte load of 4 bf16 (ptr is 8B-aligned: k offset is a multiple of 4).
++    const uint2 raw = *reinterpret_cast<const uint2*>(ptr);
++    const float2 lo = __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162*>(&raw.x));
++    const float2 hi = __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162*>(&raw.y));
++    return make_float4(lo.x, lo.y, hi.x, hi.y);
++  }
++}
++
++template <bool kUseCacheGlobalStore, typename StateT>
++SGL_DEVICE void store_state4(StateT* ptr, float4 value) {
++  if constexpr (std::is_same_v<StateT, float>) {
++    if constexpr (kUseCacheGlobalStore) {
++      __stcg(reinterpret_cast<float4*>(ptr), value);
++    } else {
++      *reinterpret_cast<float4*>(ptr) = value;
++    }
+   } else {
+-    *reinterpret_cast<float4*>(ptr) = value;
++    // One 8-byte store so a warp writes full 32B sectors.
++    const __nv_bfloat162 lo = __float22bfloat162_rn(make_float2(value.x, value.y));
++    const __nv_bfloat162 hi = __float22bfloat162_rn(make_float2(value.z, value.w));
++    uint2 packed;
++    packed.x = *reinterpret_cast<const uint32_t*>(&lo);
++    packed.y = *reinterpret_cast<const uint32_t*>(&hi);
++    *reinterpret_cast<uint2*>(ptr) = packed;
+   }
+ }
+ 
+-template <int kCopyThreads>
++template <typename StateT>
++inline constexpr int kKdaMinBlocksPerSm = std::is_same_v<StateT, float> ? 2 : 5;
++
++template <int kCopyThreads, typename StateT>
+ SGL_DEVICE void
+-cp_async_state_chunk_for(float* s_state, const float* state, int slot, int i_hv, int64_t state_slot_stride, int chunk) {
+-  constexpr int kFloat4PerChunk = kChunkV * kDimK / 4;
++cp_async_state_chunk_for(
++    StateT* s_state,
++    const StateT* state,
++    int slot,
++    int i_hv,
++    int64_t state_slot_stride,
++    int chunk) {
++  constexpr int kElementsPerCopy = 16 / sizeof(StateT);
++  constexpr int kCopiesPerChunk = kChunkV * kDimK / kElementsPerCopy;
+   const int tid = threadIdx.x;
+   const int stage = chunk & 1;
+   const int v_base = chunk * kChunkV;
+   const int64_t slot_base = static_cast<int64_t>(slot) * state_slot_stride;
+-  for (int linear4 = tid; linear4 < kFloat4PerChunk; linear4 += kCopyThreads) {
+-    const int elem = linear4 * 4;
++  for (int linear = tid; linear < kCopiesPerChunk; linear += kCopyThreads) {
++    const int elem = linear * kElementsPerCopy;
+     const int row = elem / kDimK;
+     const int k = elem - row * kDimK;
+-    float* dst = s_state + (stage * kChunkV + row) * kDimK + k;
+-    const float* src = state + slot_base + ((i_hv * kDimV + v_base + row) * kDimK + k);
++    StateT* dst = s_state + (stage * kChunkV + row) * kDimK + k;
++    const StateT* src = state + slot_base + ((i_hv * kDimV + v_base + row) * kDimK + k);
+     ptx::cp_async_cg_16b(dst, src);
+   }
+   ptx::cp_async_commit_group();
+ }
+ 
+-SGL_DEVICE void
+-cp_async_state_chunk(float* s_state, const float* state, int slot, int i_hv, int64_t state_slot_stride, int chunk) {
++template <typename StateT>
++SGL_DEVICE void cp_async_state_chunk(
++    StateT* s_state,
++    const StateT* state,
++    int slot,
++    int i_hv,
++    int64_t state_slot_stride,
++    int chunk) {
+   cp_async_state_chunk_for<kThreads>(s_state, state, slot, i_hv, state_slot_stride, chunk);
+ }
+ 
+@@ -194,23 +242,23 @@
+ 
+ // 1D TMA bulk copy gmem -> smem; the issuing thread arrives with expect-tx on
+ // the mbarrier, completion is observed via ptx::mbar_wait_parity.
+-template <int kStageChunkV>
++template <int kStageChunkV, typename StateT>
+ SGL_DEVICE void tma_state_chunk_stage(
+-    float* s_state,
+-    const float* state,
++    StateT* s_state,
++    const StateT* state,
+     int slot,
+     int i_hv,
+     int64_t state_slot_stride,
+     int chunk,
+     int stage,
+     uint64_t* bar) {
+-  constexpr uint32_t kBytes = kStageChunkV * kDimK * sizeof(float);
+-  float* dst = s_state + stage * kStageChunkV * kDimK;
++  constexpr uint32_t kBytes = kStageChunkV * kDimK * sizeof(StateT);
++  StateT* dst = s_state + stage * kStageChunkV * kDimK;
+   // 16B-aligned for any slot iff state_slot_stride*sizeof(float) % 16 == 0
+   // (host gates TMA off otherwise); the intra-slot chunk offset is a multiple
+   // of kStageChunkV*kDimK*4, always 16B-aligned.
+   const int64_t slot_base = static_cast<int64_t>(slot) * state_slot_stride;
+-  const float* src = state + slot_base + ((i_hv * kDimV + chunk * kStageChunkV) * kDimK);
++  const StateT* src = state + slot_base + ((i_hv * kDimV + chunk * kStageChunkV) * kDimK);
+ #if KDA_FUSED_DECODE_HAS_TMA
+   ptx::fence_async_smem();
+   ptx::mbar_arrive_expect_tx(bar, kBytes);
+@@ -252,6 +300,28 @@
+   return {device::warp::reduce_sum(x), device::warp::reduce_sum(y)};
+ }
+ 
++// One butterfly for two sums: after the xor-16 step lanes 0-15 carry x and
++// lanes 16-31 carry y. Bitwise equal to reduce_sum(x) / reduce_sum(y) (same
++// xor order, commutative adds); returns x's total in the low half, y's in the high.
++SGL_DEVICE float warp_reduce_sum_pair_split(float x, float y) {
++  const bool upper = (threadIdx.x & 16) != 0;
++  float value = upper ? y : x;
++  value += __shfl_xor_sync(0xffffffffu, upper ? x : y, 16);
++#pragma unroll
++  for (int mask = 8; mask >= 1; mask >>= 1) {
++    value += __shfl_xor_sync(0xffffffffu, value, mask);
++  }
++  return value;
++}
++
++// Both totals in every lane (one extra shuffle across the halves).
++SGL_DEVICE Sum2 warp_reduce_sum_pair_packed(float x, float y) {
++  const float value = warp_reduce_sum_pair_split(x, y);
++  const float other = __shfl_xor_sync(0xffffffffu, value, 16);
++  const bool upper = (threadIdx.x & 16) != 0;
++  return {upper ? other : value, upper ? value : other};
++}
++
+ template <int kReduceWarps>
+ SGL_DEVICE Sum2 block_reduce_sum2_for(float x, float y, float* scratch) {
+   const int lane = threadIdx.x & 31;
+@@ -386,13 +456,16 @@
+     bool kApplyBetaSigmoid = true,
+     bool kUseTmaLoad = false,
+     int kTmaStages = kNumChunks,
+-    bool kUsePDL = false>
++    bool kUsePDL = false,
++    typename StateT = float>
+ // Shapes below use K3's per-TP-rank sizing (linear_attn_config: num_heads=96 over
+ // TP={8,16,32} -> H=HV={12,6,3} local heads; head_dim=128 -> kDimK=kDimV=128; kSeg = H*128;
+ // short_conv_kernel_size=4 -> kKernelWidth=4, kConvStateWidth=3). B is the live
+ // (post-padding, under kUseStaticDecodeLayout) decode batch size; slots is the
+ // recurrent-state / conv-cache pool capacity, addressed by ssm_state_indices, not B.
+-__global__ __launch_bounds__(kThreads, 2) void kda_decode_fusion_many_heads_kernel(
++// bf16 state: 32KB smem allows 5 blocks/SM, capping regs at 48 (no spills);
++// measured 93->82us at B=512 on B200. fp32 state stays smem-bound at 2.
++__global__ __launch_bounds__(kThreads, kKdaMinBlocksPerSm<StateT>) void kda_decode_fusion_many_heads_kernel(
+     const __nv_bfloat16* __restrict__ x_q,  // [B, H*128] row bos*x_row_stride + hk, sliced from mixed_qkv q-segment
+     const __nv_bfloat16* __restrict__ x_k,  // [B, H*128] row bos*x_row_stride + hk, sliced from mixed_qkv k-segment
+     const __nv_bfloat16* __restrict__ x_v,  // [B, HV*128] row bos*x_row_stride + hvv, sliced from mixed_qkv v-segment
+@@ -415,7 +488,7 @@
+     const int* __restrict__ ssm_state_indices,  // [B] recurrent-state slot per token; <0 marks a padded cuda-graph slot
+     const int* __restrict__ cu_seqlens,         // [B+1] token offsets into x_q/x_k/x_v/g/beta; unused under
+                                                 // kUseStaticDecodeLayout
+-    float* __restrict__ state,  // [slots, HV, 128, 128] recurrent KDA state h, inner [V,K] contiguous, slot pitch =
++    StateT* __restrict__ state,  // [slots, HV, 128, 128] recurrent KDA state h, inner [V,K] contiguous, slot pitch =
+                                 // state_slot_stride
+     __nv_bfloat16* __restrict__ out,  // [B, hv_count*128] fused-decode output, row i_n, col i_hv*128 + v
+     int B,                            // live decode batch size (token count for this launch)
+@@ -488,7 +561,8 @@
+ 
+   // Dynamic size: 2 cp.async stages (32KB) or kTmaStages TMA stages (16KB per
+   // stage; kTmaStages == kNumChunks means no buffer reuse).
+-  extern __shared__ __align__(16) float s_state[];
++  extern __shared__ __align__(16) unsigned char s_state_storage[];
++  StateT* s_state = reinterpret_cast<StateT*>(s_state_storage);
+   __shared__ float s_q[kDimK];
+   __shared__ float s_k[kDimK];
+   __shared__ float s_decay[kDimK];
+@@ -522,48 +596,37 @@
+   }
+ 
+   if constexpr (kUpdateConvState) {
+-    if (tid < kDimK) {
+-      const int k = tid;
+-      const int hk = hk_off + k;
+-      const int64_t cs_base = slot * cs_slot_stride + hk;
+-      const int64_t xq_idx = bos * x_row_stride + hk;
+-      const float exp_a = __shfl_sync(0xffffffffu, lane == 0 ? __expf(a_log[i_h]) : 0.0f, 0);
+-
+-      float q_acc = bias_q[hk];
+-      float k_acc = bias_k[hk];
+-      __nv_bfloat16 q_shift0 = __float2bfloat16(0.0f);
+-      __nv_bfloat16 q_shift1 = __float2bfloat16(0.0f);
+-      __nv_bfloat16 k_shift0 = __float2bfloat16(0.0f);
+-      __nv_bfloat16 k_shift1 = __float2bfloat16(0.0f);
++    // Lower warps: q conv + decay; upper warps: k conv, then the v conv below.
++    const bool is_q = tid < kDimK;
++    const int k = is_q ? tid : tid - (kThreads - kDimK);
++    const int hk = hk_off + k;
++    const int64_t cs_base = slot * cs_slot_stride + hk;
++    __nv_bfloat16* cs_qk = is_q ? cs_q : cs_k;
++    const float* w_qk_t = is_q ? w_q_t : w_k_t;
++
++    float acc = is_q ? bias_q[hk] : bias_k[hk];
++    __nv_bfloat16 shift0 = __float2bfloat16(0.0f);
++    __nv_bfloat16 shift1 = __float2bfloat16(0.0f);
+ #pragma unroll
+-      for (int w = 0; w < kConvStateWidth; ++w) {
+-        const __nv_bfloat16 q_state = cs_q[cs_base + w * cs_w_stride];
+-        const __nv_bfloat16 k_state = cs_k[cs_base + w * cs_w_stride];
+-        q_acc += __bfloat162float(q_state) * fp32_at(w_q_t, w * hkv_dim + hk);
+-        k_acc += __bfloat162float(k_state) * fp32_at(w_k_t, w * hkv_dim + hk);
+-        if (w == 1) {
+-          q_shift0 = q_state;
+-          k_shift0 = k_state;
+-        } else if (w == 2) {
+-          q_shift1 = q_state;
+-          k_shift1 = k_state;
+-        }
+-      }
+-      const __nv_bfloat16 q_new = x_q[xq_idx];
+-      const __nv_bfloat16 k_new = x_k[xq_idx];
+-      q_acc += __bfloat162float(q_new) * fp32_at(w_q_t, (kKernelWidth - 1) * hkv_dim + hk);
+-      k_acc += __bfloat162float(k_new) * fp32_at(w_k_t, (kKernelWidth - 1) * hkv_dim + hk);
+-
+-      cs_q[cs_base + 0] = q_shift0;
+-      cs_q[cs_base + cs_w_stride] = q_shift1;
+-      cs_q[cs_base + 2 * cs_w_stride] = q_new;
+-      cs_k[cs_base + 0] = k_shift0;
+-      cs_k[cs_base + cs_w_stride] = k_shift1;
+-      cs_k[cs_base + 2 * cs_w_stride] = k_new;
+-
+-      s_q[k] = device::math::silu_fast(q_acc);
+-      s_k[k] = device::math::silu_fast(k_acc);
++    for (int w = 0; w < kConvStateWidth; ++w) {
++      const __nv_bfloat16 state_w = cs_qk[cs_base + w * cs_w_stride];
++      acc += __bfloat162float(state_w) * fp32_at(w_qk_t, w * hkv_dim + hk);
++      if (w == 1) {
++        shift0 = state_w;
++      } else if (w == 2) {
++        shift1 = state_w;
++      }
++    }
++    const __nv_bfloat16 x_new = (is_q ? x_q : x_k)[bos * x_row_stride + hk];
++    acc += __bfloat162float(x_new) * fp32_at(w_qk_t, (kKernelWidth - 1) * hkv_dim + hk);
++
++    cs_qk[cs_base + 0] = shift0;
++    cs_qk[cs_base + cs_w_stride] = shift1;
++    cs_qk[cs_base + 2 * cs_w_stride] = x_new;
++    (is_q ? s_q : s_k)[k] = conv_silu_bf16(acc);
+ 
++    if (is_q) {
++      const float exp_a = __shfl_sync(0xffffffffu, lane == 0 ? __expf(a_log[i_h]) : 0.0f, 0);
+       const float g_raw = bf16_load(g, bos * g_row_stride + i_hv * kDimK + k) + dt_bias[hk];
+       if constexpr (kUseLowerBound) {
+         s_decay[k] = __expf(lower_bound * device::math::sigmoid_fast(exp_a * g_raw));
+@@ -588,8 +651,8 @@
+       q_acc += bf16_load(x_q, bos * x_row_stride + hk) * fp32_at(w_q_t, (kKernelWidth - 1) * hkv_dim + hk);
+       k_acc += bf16_load(x_k, bos * x_row_stride + hk) * fp32_at(w_k_t, (kKernelWidth - 1) * hkv_dim + hk);
+ 
+-      s_q[k] = device::math::silu_fast(q_acc);
+-      s_k[k] = device::math::silu_fast(k_acc);
++      s_q[k] = conv_silu_bf16(q_acc);
++      s_k[k] = conv_silu_bf16(k_acc);
+ 
+       const float g_raw = bf16_load(g, bos * g_row_stride + i_hv * kDimK + k) + dt_bias[hk];
+       if constexpr (kUseLowerBound) {
+@@ -600,9 +663,11 @@
+     }
+   }
+ 
++  static_assert(kThreads >= kDimK + kDimV);
++  // The v conv runs on the upper warps, concurrently with the q/k conv on the lower ones.
+   if constexpr (kUpdateConvState) {
+-    if (tid < kDimV) {
+-      const int v = tid;
++    if (tid >= kThreads - kDimV) {
++      const int v = tid - (kThreads - kDimV);
+       const int hvv = hv_off + v;
+       const int64_t cs_base = slot * cs_slot_stride + hvv;
+       const int64_t xv_idx = bos * x_row_stride + hvv;
+@@ -625,17 +690,11 @@
+       cs_v[cs_base + 0] = v_shift0;
+       cs_v[cs_base + cs_w_stride] = v_shift1;
+       cs_v[cs_base + 2 * cs_w_stride] = v_new;
+-      s_v[v] = device::math::silu_fast(v_acc);
+-
+-      if constexpr (kApplyOnorm && kPreloadOnormParams) {
+-        const int64_t onorm_idx = i_n * onormg_row_stride + i_hv * kDimV + v;
+-        pre_onorm_gate = device::math::sigmoid_fast(bf16_load(onorm_g, onorm_idx));
+-        pre_onorm_weight = onorm_weight[v];
+-      }
++      s_v[v] = conv_silu_bf16(v_acc);
+     }
+   } else {
+-    if (tid < kDimV) {
+-      const int v = tid;
++    if (tid >= kThreads - kDimV) {
++      const int v = tid - (kThreads - kDimV);
+       const int hvv = hv_off + v;
+ 
+       float v_acc = bias_v[hvv];
+@@ -645,13 +704,16 @@
+         v_acc += bf16_load(cs_v, cs_idx) * fp32_at(w_v_t, w * hvv_dim + hvv);
+       }
+       v_acc += bf16_load(x_v, bos * x_row_stride + hvv) * fp32_at(w_v_t, (kKernelWidth - 1) * hvv_dim + hvv);
+-      s_v[v] = device::math::silu_fast(v_acc);
++      s_v[v] = conv_silu_bf16(v_acc);
++    }
++  }
+ 
+-      if constexpr (kApplyOnorm && kPreloadOnormParams) {
+-        const int64_t onorm_idx = i_n * onormg_row_stride + i_hv * kDimV + v;
+-        pre_onorm_gate = device::math::sigmoid_fast(bf16_load(onorm_g, onorm_idx));
+-        pre_onorm_weight = onorm_weight[v];
+-      }
++  if constexpr (kApplyOnorm && kPreloadOnormParams) {
++    // Loaded by the threads that write `out` in the epilogue.
++    if (tid < kDimV) {
++      const int64_t onorm_idx = i_n * onormg_row_stride + i_hv * kDimV + tid;
++      pre_onorm_gate = device::math::sigmoid_fast(bf16_load(onorm_g, onorm_idx));
++      pre_onorm_weight = onorm_weight[tid];
+     }
+   }
+ 
+@@ -719,7 +781,7 @@
+       }
+     }
+ 
+-    const float* state_stage = s_state + (kUseTmaLoad ? (chunk % kTmaStages) : (chunk & 1)) * kChunkV * kDimK;
++    const StateT* state_stage = s_state + (kUseTmaLoad ? (chunk % kTmaStages) : (chunk & 1)) * kChunkV * kDimK;
+ 
+ #pragma unroll
+     for (int row = 0; row < kRowsPerWarp; row += 2) {
+@@ -732,8 +794,8 @@
+       float dot_hk_a = 0.0f;
+       float dot_hk_b = 0.0f;
+ 
+-      const float4 raw_h_a = *reinterpret_cast<const float4*>(state_stage + v_row_a * kDimK + k_base);
+-      const float4 raw_h_b = *reinterpret_cast<const float4*>(state_stage + v_row_b * kDimK + k_base);
++      const float4 raw_h_a = load_state4(state_stage + v_row_a * kDimK + k_base);
++      const float4 raw_h_b = load_state4(state_stage + v_row_b * kDimK + k_base);
+       h_a_vals[0] = raw_h_a.x * r_decay[0];
+       h_a_vals[1] = raw_h_a.y * r_decay[1];
+       h_a_vals[2] = raw_h_a.z * r_decay[2];
+@@ -745,7 +807,7 @@
+       dot_hk_a = h_a_vals[0] * r_k[0] + h_a_vals[1] * r_k[1] + h_a_vals[2] * r_k[2] + h_a_vals[3] * r_k[3];
+       dot_hk_b = h_b_vals[0] * r_k[0] + h_b_vals[1] * r_k[1] + h_b_vals[2] * r_k[2] + h_b_vals[3] * r_k[3];
+ 
+-      const Sum2 dot_hk = warp_reduce_sum_pair(dot_hk_a, dot_hk_b);
++      const Sum2 dot_hk = warp_reduce_sum_pair_packed(dot_hk_a, dot_hk_b);
+       const float v_new0 = (s_v[v0] - dot_hk.x) * s_beta;
+       const float v_new1 = (s_v[v1] - dot_hk.y) * s_beta;
+ 
+@@ -767,22 +829,27 @@
+       if constexpr (kComputeOutputBeforeStore) {
+         dot_hq_a = h_a_0 * r_q[0] + h_a_1 * r_q[1] + h_a_2 * r_q[2] + h_a_3 * r_q[3];
+         dot_hq_b = h_b_0 * r_q[0] + h_b_1 * r_q[1] + h_b_2 * r_q[2] + h_b_3 * r_q[3];
+-        store_state_float4<kUseCacheGlobalStore>(state + state_idx_a, make_float4(h_a_0, h_a_1, h_a_2, h_a_3));
+-        store_state_float4<kUseCacheGlobalStore>(state + state_idx_b, make_float4(h_b_0, h_b_1, h_b_2, h_b_3));
++        store_state4<kUseCacheGlobalStore>(state + state_idx_a, make_float4(h_a_0, h_a_1, h_a_2, h_a_3));
++        store_state4<kUseCacheGlobalStore>(state + state_idx_b, make_float4(h_b_0, h_b_1, h_b_2, h_b_3));
+       } else {
+-        store_state_float4<kUseCacheGlobalStore>(state + state_idx_a, make_float4(h_a_0, h_a_1, h_a_2, h_a_3));
+-        store_state_float4<kUseCacheGlobalStore>(state + state_idx_b, make_float4(h_b_0, h_b_1, h_b_2, h_b_3));
++        store_state4<kUseCacheGlobalStore>(state + state_idx_a, make_float4(h_a_0, h_a_1, h_a_2, h_a_3));
++        store_state4<kUseCacheGlobalStore>(state + state_idx_b, make_float4(h_b_0, h_b_1, h_b_2, h_b_3));
+         dot_hq_a = h_a_0 * r_q[0] + h_a_1 * r_q[1] + h_a_2 * r_q[2] + h_a_3 * r_q[3];
+         dot_hq_b = h_b_0 * r_q[0] + h_b_1 * r_q[1] + h_b_2 * r_q[2] + h_b_3 * r_q[3];
+       }
+ 
+-      const Sum2 dot_hq = warp_reduce_sum_pair(dot_hq_a, dot_hq_b);
+-      if (lane == 0) {
+-        s_o[v0] = dot_hq.x;
+-        s_o[v1] = dot_hq.y;
+-        if constexpr (kApplyOnorm && kAccumulateOnormSumsq) {
++      if constexpr (kApplyOnorm && kAccumulateOnormSumsq) {
++        const Sum2 dot_hq = warp_reduce_sum_pair(dot_hq_a, dot_hq_b);
++        if (lane == 0) {
++          s_o[v0] = bf16_round(dot_hq.x);
++          s_o[v1] = bf16_round(dot_hq.y);
+           o_sumsq += dot_hq.x * dot_hq.x + dot_hq.y * dot_hq.y;
+         }
++      } else {
++        const float dot_hq = warp_reduce_sum_pair_split(dot_hq_a, dot_hq_b);
++        if ((lane & 15) == 0) {
++          s_o[lane == 0 ? v0 : v1] = bf16_round(dot_hq);
++        }
+       }
+     }
+ 
+@@ -887,7 +954,13 @@
+ // and lower-bounded sigmoid) and selected at launch from the model config.
+ // kUseTmaLoad/kTmaStages select the 1D-TMA state-staging path in place of the
+ // cp.async fallback used for a misaligned recurrent-state slot stride.
+-template <int kFixedHeads, bool kUseLowerBound, bool kUsePDL, bool kUseTmaLoad = false, int kTmaStages = kNumChunks>
++template <
++    int kFixedHeads,
++    bool kUseLowerBound,
++    bool kUsePDL,
++    typename StateT = float,
++    bool kUseTmaLoad = false,
++    int kTmaStages = kNumChunks>
+ constexpr auto kda_fused_decode_k3_kernel = kda_decode_fusion_many_heads_kernel<
+     /*kApplyOnorm=*/true,
+     /*kUseStaticDecodeLayout=*/true,
+@@ -907,26 +980,28 @@
+     /*kApplyBetaSigmoid=*/true,
+     kUseTmaLoad,
+     kTmaStages,
+-    kUsePDL>;
++    kUsePDL,
++    StateT>;
+ 
+-template <int kFixedHeads, bool kUsePDL>
++template <int kFixedHeads, bool kUsePDL, typename StateT>
+ auto select_kda_fused_decode_k3_kernel(bool use_lower_bound, int tma_stages) {
+   if (tma_stages == 3) {
+-    return use_lower_bound ? kda_fused_decode_k3_kernel<kFixedHeads, true, kUsePDL, true, 3>
+-                           : kda_fused_decode_k3_kernel<kFixedHeads, false, kUsePDL, true, 3>;
++    return use_lower_bound ? kda_fused_decode_k3_kernel<kFixedHeads, true, kUsePDL, StateT, true, 3>
++                           : kda_fused_decode_k3_kernel<kFixedHeads, false, kUsePDL, StateT, true, 3>;
+   }
+   if (tma_stages == 4) {
+-    return use_lower_bound ? kda_fused_decode_k3_kernel<kFixedHeads, true, kUsePDL, true, 4>
+-                           : kda_fused_decode_k3_kernel<kFixedHeads, false, kUsePDL, true, 4>;
++    return use_lower_bound ? kda_fused_decode_k3_kernel<kFixedHeads, true, kUsePDL, StateT, true, 4>
++                           : kda_fused_decode_k3_kernel<kFixedHeads, false, kUsePDL, StateT, true, 4>;
+   }
+-  return use_lower_bound ? kda_fused_decode_k3_kernel<kFixedHeads, true, kUsePDL>
+-                         : kda_fused_decode_k3_kernel<kFixedHeads, false, kUsePDL>;
++  return use_lower_bound ? kda_fused_decode_k3_kernel<kFixedHeads, true, kUsePDL, StateT>
++                         : kda_fused_decode_k3_kernel<kFixedHeads, false, kUsePDL, StateT>;
+ }
+ 
+ template <bool kUsePDL>
+ struct KdaFusedDecodeKernel {
++  template <typename StateT>
+   static void
+-  run(const tvm::ffi::TensorView mixed_qkv,     // [B, 3*H*128] bf16, row-strided
++  run_impl(const tvm::ffi::TensorView mixed_qkv,     // [B, 3*H*128] bf16, row-strided
+       const tvm::ffi::TensorView a,             // [B, H*128] bf16 raw forget gate
+       const tvm::ffi::TensorView b,             // [B, H] bf16 raw beta logits
+       const tvm::ffi::TensorView conv_states,   // [slots, 3, conv_dim] bf16 pool
+@@ -938,7 +1013,7 @@
+       const tvm::ffi::TensorView dt_bias,       // [H*128] fp32
+       const tvm::ffi::TensorView onorm_g,       // [B, H*128] bf16, row-strided
+       const tvm::ffi::TensorView onorm_weight,  // [128] fp32
+-      const tvm::ffi::TensorView state,         // [slots, H, 128, 128] fp32; inner-contiguous, any slot pitch
++      const tvm::ffi::TensorView state,         // [slots, H, 128, 128] state dtype; inner-contiguous, any slot pitch
+       const tvm::ffi::TensorView indices,       // [B] int32 (< 0 = padded slot)
+       const tvm::ffi::TensorView out,           // [B, H*128] bf16 dense
+       double scale,
+@@ -978,7 +1053,7 @@
+     // slot pitch from state.stride(0); only the inner [HV, V, K] contiguity
+     // (strides {V*K, K, 1}) is load-bearing here.
+     TensorMatcher({Slots_, kH, 128, 128})
+-        .with_dtype<fp32_t>()
++        .with_dtype<StateT>()
+         .with_device(device)
+         .with_strides({-1, 128 * 128, 128, 1})
+         .verify(state);
+@@ -1000,23 +1075,27 @@
+     // TMA 1D-bulk needs the per-slot source address (state + slot*stride) 16B
+     // aligned for every slot. state.data_ptr() is torch-aligned and each chunk
+     // offset is a multiple of kChunkV*kDimK*4 B, so alignment holds iff the slot
+-    // pitch itself is 16B-aligned, i.e. state_slot_stride % 4 == 0 (fp32). The
++    // pitch itself is 16B-aligned, i.e. state_slot_stride % (16 / sizeof(StateT)) == 0. The
+     // K3 envelope pitch (14,042,880 elems, %4==0) and the dense pitch both
+     // satisfy this; a pathological stride falls back to cp.async (still fully
+     // fused, just no TMA) rather than silently mis-addressing the descriptor.
+-    const bool tma_slot_stride_aligned = (state_slot_stride % 4) == 0;
++    const bool tma_slot_stride_aligned = (state_slot_stride % (16 / sizeof(StateT))) == 0;
+     if (tma_slot_stride_aligned) {
+       // Full-state staging (4 stages, 64KB, sync-free) wins while the grid
+       // is small enough that occupancy isn't the limiter; past that the
+       // 48KB 3-stage variant (one sync for the single stage reuse) benches
+       // fastest.
+-      tma_stages = B * static_cast<int>(kH) >= 512 ? 3 : 4;
++      if constexpr (std::is_same_v<StateT, float>) {
++        tma_stages = B * static_cast<int>(kH) >= 512 ? 3 : 4;
++      } else {
++        tma_stages = 4;
++      }
+     }
+-    auto kernel = kH == 3 ? select_kda_fused_decode_k3_kernel<3, kUsePDL>(use_lower_bound, tma_stages)
+-                          : (kH == 6 ? select_kda_fused_decode_k3_kernel<6, kUsePDL>(use_lower_bound, tma_stages)
+-                                     : select_kda_fused_decode_k3_kernel<12, kUsePDL>(use_lower_bound, tma_stages));
++    auto kernel = kH == 3 ? select_kda_fused_decode_k3_kernel<3, kUsePDL, StateT>(use_lower_bound, tma_stages)
++                          : (kH == 6 ? select_kda_fused_decode_k3_kernel<6, kUsePDL, StateT>(use_lower_bound, tma_stages)
++                                     : select_kda_fused_decode_k3_kernel<12, kUsePDL, StateT>(use_lower_bound, tma_stages));
+     const int smem_stages = tma_stages == 0 ? 2 : tma_stages;
+-    const size_t smem_bytes = static_cast<size_t>(smem_stages) * kChunkV * kDimK * sizeof(float);
++    const size_t smem_bytes = static_cast<size_t>(smem_stages) * kChunkV * kDimK * sizeof(StateT);
+     host::RuntimeDeviceCheck(
+         cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, static_cast<int>(smem_bytes)));
+ 
+@@ -1043,7 +1122,7 @@
+             static_cast<const fp32_t*>(onorm_weight.data_ptr()),
+             static_cast<const int32_t*>(indices.data_ptr()),
+             /*cu_seqlens=*/static_cast<const int32_t*>(nullptr),
+-            static_cast<fp32_t*>(state.data_ptr()),
++            static_cast<StateT*>(state.data_ptr()),
+             static_cast<__nv_bfloat16*>(out.data_ptr()),
+             B,
+             /*H=*/static_cast<int>(kH),
+@@ -1059,6 +1138,74 @@
+             conv_states.stride(1),
+             state_slot_stride);
+   }
++
++  static void
++  run(const tvm::ffi::TensorView mixed_qkv,
++      const tvm::ffi::TensorView a,
++      const tvm::ffi::TensorView b,
++      const tvm::ffi::TensorView conv_states,
++      const tvm::ffi::TensorView w_q_t,
++      const tvm::ffi::TensorView w_k_t,
++      const tvm::ffi::TensorView w_v_t,
++      const tvm::ffi::TensorView conv_bias,
++      const tvm::ffi::TensorView A_log,
++      const tvm::ffi::TensorView dt_bias,
++      const tvm::ffi::TensorView onorm_g,
++      const tvm::ffi::TensorView onorm_weight,
++      const tvm::ffi::TensorView state,
++      const tvm::ffi::TensorView indices,
++      const tvm::ffi::TensorView out,
++      double scale,
++      double onorm_eps,
++      double lower_bound,
++      bool use_lower_bound) {
++    using namespace host;
++    if (is_type<bf16_t>(state.dtype())) {
++      run_impl<bf16_t>(
++          mixed_qkv,
++          a,
++          b,
++          conv_states,
++          w_q_t,
++          w_k_t,
++          w_v_t,
++          conv_bias,
++          A_log,
++          dt_bias,
++          onorm_g,
++          onorm_weight,
++          state,
++          indices,
++          out,
++          scale,
++          onorm_eps,
++          lower_bound,
++          use_lower_bound);
++    } else if (is_type<fp32_t>(state.dtype())) {
++      run_impl<fp32_t>(
++          mixed_qkv,
++          a,
++          b,
++          conv_states,
++          w_q_t,
++          w_k_t,
++          w_v_t,
++          conv_bias,
++          A_log,
++          dt_bias,
++          onorm_g,
++          onorm_weight,
++          state,
++          indices,
++          out,
++          scale,
++          onorm_eps,
++          lower_bound,
++          use_lower_bound);
++    } else {
++      RuntimeCheck(false, "KDA fused decode state must be bfloat16 or float32, got ", state.dtype());
++    }
++  }
+ };
+ 
+ }  // namespace sglang
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/pristine_tree/kernels/jit/csrc/elementwise/l2_prefetch.cuh /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/trial_2_tree_judged/kernels/jit/csrc/elementwise/l2_prefetch.cuh
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/pristine_tree/kernels/jit/csrc/elementwise/l2_prefetch.cuh	1969-12-31 16:00:00.000000000 -0800
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/trial_2_tree_judged/kernels/jit/csrc/elementwise/l2_prefetch.cuh	2026-09-27 00:50:56.631296257 -0700
+@@ -0,0 +1,64 @@
++#include <sgl_kernel/tensor.h>
++#include <sgl_kernel/utils.h>
++
++#include <sgl_kernel/type.cuh>
++#include <sgl_kernel/utils.cuh>
++
++#include <tvm/ffi/container/tensor.h>
++
++#include <cstdint>
++
++namespace sglang {
++
++// Fire-and-forget L2 warm-up of a strided 2-D byte range (rows of row_bytes,
++// row_stride_bytes apart): every thread issues per-line prefetch.global.L2
++// hints in a grid-stride loop. Nothing is read
++// into the SM and nothing is written, so it cannot change any result. Meant
++// to run on a side stream while the main stream is latency-bound, so that a
++// later weight-streaming GEMM finds its operand already in L2.
++struct L2PrefetchParams {
++  const char* __restrict__ ptr;
++  int64_t row_stride_bytes;
++  int64_t lines_per_row;
++  int64_t num_lines;
++};
++
++constexpr int64_t kL2LineBytes = 128;
++
++__global__ void l2_prefetch_kernel(const __grid_constant__ L2PrefetchParams params) {
++  const int64_t stride = static_cast<int64_t>(gridDim.x) * blockDim.x;
++  for (int64_t line = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x; line < params.num_lines;
++       line += stride) {
++    const int64_t row = line / params.lines_per_row;
++    const int64_t col = line - row * params.lines_per_row;
++    const char* addr = params.ptr + row * params.row_stride_bytes + col * kL2LineBytes;
++    asm volatile("prefetch.global.L2::evict_normal [%0];" ::"l"(addr) : "memory");
++  }
++}
++
++struct L2PrefetchKernel {
++  static constexpr int kThreads = 128;
++
++  static void launch(const tvm::ffi::TensorView x, const int64_t num_blocks) {
++    using namespace host;
++    auto R = SymbolicSize{"rows"};
++    auto C = SymbolicSize{"cols"};
++    auto S = SymbolicSize{"row_stride"};
++    auto device = SymbolicDevice{};
++    device.set_options<kDLCUDA>();
++    TensorMatcher({R, C}).with_strides({S, 1}).with_dtype<bf16_t>().with_device(device).verify(x);
++    const int64_t row_bytes = C.unwrap() * static_cast<int64_t>(sizeof(bf16_t));
++    const int64_t lines_per_row = (row_bytes + kL2LineBytes - 1) / kL2LineBytes;
++    const int64_t num_lines = R.unwrap() * lines_per_row;
++    if (num_lines == 0) return;
++    const auto params = L2PrefetchParams{
++        .ptr = static_cast<const char*>(x.data_ptr()),
++        .row_stride_bytes = S.unwrap() * static_cast<int64_t>(sizeof(bf16_t)),
++        .lines_per_row = lines_per_row,
++        .num_lines = num_lines,
++    };
++    LaunchKernel(num_blocks, kThreads, device.unwrap())(l2_prefetch_kernel, params);
++  }
++};
++
++}  // namespace sglang
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/pristine_tree/kernels/jit/csrc/kimi_k3/attn_res/fused_tma.cuh /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/trial_2_tree_judged/kernels/jit/csrc/kimi_k3/attn_res/fused_tma.cuh
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/pristine_tree/kernels/jit/csrc/kimi_k3/attn_res/fused_tma.cuh	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/trial_2_tree_judged/kernels/jit/csrc/kimi_k3/attn_res/fused_tma.cuh	2026-09-27 02:22:52.158100137 -0700
+@@ -181,6 +181,9 @@
+   const uint8_t* input_mc;
+   const bf16_t* residual;
+   bf16_t* prefix_out;
++  // Fused local add (nullptr = off): prefix_out = residual + addend, rounded
++  // like the unfused bf16 add, then aggregated in place of prefix_sum.
++  const bf16_t* addend;
+   device::distributed::Semaphore* sem_local;
+   device::distributed::Semaphore* sem_mc;
+   uint8_t* output_mc;
+@@ -624,6 +627,56 @@
+   device::distributed::McBarrier::arrive_at<true>(params.sem_local, params.sem_mc, params.world_size, exit_base);
+ }
+ 
++// Local pending add + attention-residual aggregation: the whole CTA
++// materializes prefix_out = residual + addend for its tokens, then the TMA
++// pipeline aggregates that row. Each CTA only reads back rows it wrote.
++template <typename Trait, uint32_t kOccupancy>
++__global__ void __launch_bounds__(Trait::kNumThreads, kOccupancy)
++    attn_res_fused_add_kernel(const __grid_constant__ AttnResTMAParams params) {
++  using vec_t = device::AlignedVector<bf16x2_t, 4>;
++  constexpr uint32_t kRowVecs = Trait::kDim * sizeof(bf16_t) / sizeof(vec_t);
++  constexpr uint32_t kVecsPerThread = (kRowVecs + Trait::kNumThreads - 1) / Trait::kNumThreads;
++  device::PDLWaitPrimary<true>();
++  for (auto token = blockIdx.x; token < params.num_tokens; token += gridDim.x) {
++    const auto row = static_cast<int64_t>(token) * Trait::kDim;
++    vec_t va[kVecsPerThread];
++    vec_t vb[kVecsPerThread];
++#pragma unroll
++    for (uint32_t i = 0; i < kVecsPerThread; ++i) {
++      const uint32_t vid = threadIdx.x + i * Trait::kNumThreads;
++      if (vid < kRowVecs) {
++        va[i].load(params.residual + row, vid);
++        vb[i].load(params.addend + row, vid);
++      }
++    }
++#pragma unroll
++    for (uint32_t i = 0; i < kVecsPerThread; ++i) {
++      const uint32_t vid = threadIdx.x + i * Trait::kNumThreads;
++      if (vid < kRowVecs) {
++        vec_t sum;
++#pragma unroll
++        for (uint32_t j = 0; j < 4; ++j) {
++          const auto fa = device::cast<float2>(va[i][j]);
++          const auto fb = device::cast<float2>(vb[i][j]);
++          float2 fs;
++          // Explicit non-ftz fp32 add: the module builds with --use_fast_math,
++          // and torch's bf16 add (fp32 sum, one RN cast) keeps denormals.
++          asm("add.rn.f32 %0, %1, %2;" : "=f"(fs.x) : "f"(fa.x), "f"(fb.x));
++          asm("add.rn.f32 %0, %1, %2;" : "=f"(fs.y) : "f"(fa.y), "f"(fb.y));
++          sum[j] = __float22bfloat162_rn(fs);
++        }
++        sum.store(params.prefix_out + row, vid);
++      }
++    }
++  }
++  // Generic-proxy stores above are read back by the producer's bulk copies.
++  asm volatile("fence.proxy.async.global;" ::: "memory");
++  __syncthreads();
++
++  extern __shared__ char smem_raw[];
++  Trait::forward(params, reinterpret_cast<typename Trait::Smem*>(smem_raw));
++}
++
+ // Local attention-residual aggregation + direct AG epilogue. The consumer
+ // threads already hold each normalized 16B output vector in registers, so
+ // Trait::forward multicast-stores those vectors into every peer's symmetric
+@@ -646,6 +699,155 @@
+   __syncthreads();
+   device::distributed::McBarrier::arrive_at<true>(params.sem_local, params.sem_mc, params.world_size, exit_base);
+ }
++
++// Register-direct aggregation for decode-sized batches (one token per CTA,
++// T <= #SMs). With nvb + 1 rows of one token there is too little data to
++// hide the TMA kernel's serial phases (add -> store -> proxy fence -> bulk
++// reload -> TMEM staging); here each of the kDim / 8 threads owns one 16B
++// vector of every row, so the residual/addend/bank/cw/ow loads go out in a
++// single round trip. Same math as KimiK3AttnResTrait::forward (fp32 scores,
++// max-shifted exp2 softmax, fma mixing in row order, fused out norm); only
++// the fp32 reduction order of the row sums differs. The pending add keeps
++// the explicit add.rn + RN cast, so prefix_out and the bank row are
++// bit-identical to the TMA path.
++template <int64_t kDim, uint32_t kNvb>
++struct AttnResDirect {
++  static constexpr uint32_t kVecElems = 8;
++  static constexpr uint32_t kNumThreads = kDim / kVecElems;
++  static constexpr uint32_t kNumWarps = kNumThreads / device::kWarpThreads;
++  static constexpr uint32_t kRows = kNvb + 1;  // bank rows + prefix row
++  static_assert(kDim % (kVecElems * device::kWarpThreads) == 0);
++  static_assert(kNumThreads <= 1024);
++  static_assert(2 * kRows <= device::kWarpThreads);
++};
++
++template <int64_t kDim, uint32_t kNvb>
++__global__ void __launch_bounds__(AttnResDirect<kDim, kNvb>::kNumThreads, 1)
++    attn_res_direct_kernel(const __grid_constant__ AttnResTMAParams params) {
++  using namespace device;
++  using D = AttnResDirect<kDim, kNvb>;
++  using vec_t = AlignedVector<bf16x2_t, 4>;
++  constexpr uint32_t kRows = D::kRows;
++  __shared__ float red_rows[D::kNumWarps][2 * kRows];
++  __shared__ float tot_rows[2 * kRows];
++  __shared__ float red_sq[D::kNumWarps];
++
++  const uint32_t tx = threadIdx.x;
++  const uint32_t warp_id = tx / kWarpThreads;
++  const uint32_t lane_id = tx % kWarpThreads;
++
++  // Static weights: safe to read before the dependency wait.
++  vec_t cw_v, ow_v;
++  cw_v.load(params.cw, tx);
++  ow_v.load(params.ow, tx);
++  PDLWaitPrimary<true>();
++
++  for (uint32_t token = blockIdx.x; token < params.num_tokens; token += gridDim.x) {
++    const int64_t row_off = static_cast<int64_t>(token) * (kDim / D::kVecElems);
++    const bf16_t* bank_tok = params.bank + static_cast<int64_t>(token) * params.stride_bm;
++    vec_t rows[kRows];
++#pragma unroll
++    for (uint32_t r = 0; r < kNvb; ++r) {
++      rows[r].load(bank_tok + r * kDim, tx);
++    }
++    if (params.addend != nullptr) {
++      vec_t va, vb;
++      va.load(params.residual, row_off + tx);
++      vb.load(params.addend, row_off + tx);
++#pragma unroll
++      for (uint32_t j = 0; j < 4; ++j) {
++        const auto fa = cast<float2>(va[j]);
++        const auto fb = cast<float2>(vb[j]);
++        float2 fs;
++        // Explicit non-ftz fp32 add, as in attn_res_fused_add_kernel.
++        asm("add.rn.f32 %0, %1, %2;" : "=f"(fs.x) : "f"(fa.x), "f"(fb.x));
++        asm("add.rn.f32 %0, %1, %2;" : "=f"(fs.y) : "f"(fa.y), "f"(fb.y));
++        rows[kNvb][j] = __float22bfloat162_rn(fs);
++      }
++      rows[kNvb].store(params.prefix_out, row_off + tx);
++    } else {
++      rows[kNvb].load(params.prefix_sum, row_off + tx);
++    }
++    if (token + gridDim.x >= params.num_tokens) PDLTriggerSecondary<true>();
++    if (params.prefix_dst != nullptr) {
++      rows[kNvb].store(params.prefix_dst + static_cast<int64_t>(token) * params.stride_bm, tx);
++    }
++
++    // Score pass: per-row sum of squares and cw dot.
++    const auto* q2 = reinterpret_cast<const bf16x2_t*>(&cw_v);
++    float part[2 * kRows];
++#pragma unroll
++    for (uint32_t r = 0; r < kRows; ++r) {
++      float2 rms2 = make_float2(0.f, 0.f);
++      float2 dot2 = make_float2(0.f, 0.f);
++#pragma unroll
++      for (uint32_t j = 0; j < 4; ++j) {
++        const auto f = cast<float2>(rows[r][j]);
++        rms2 = fma_f32x2(f, f, rms2);
++        dot2 = fma_f32x2(f, cast<float2>(q2[j]), dot2);
++      }
++      part[2 * r] = warp::reduce_sum(rms2.x + rms2.y);
++      part[2 * r + 1] = warp::reduce_sum(dot2.x + dot2.y);
++    }
++    if (lane_id == 0) {
++#pragma unroll
++      for (uint32_t i = 0; i < 2 * kRows; ++i) red_rows[warp_id][i] = part[i];
++    }
++    __syncthreads();
++    if (warp_id == 0 && lane_id < 2 * kRows) {
++      float t = 0.f;
++#pragma unroll
++      for (uint32_t w = 0; w < D::kNumWarps; ++w) t += red_rows[w][lane_id];
++      tot_rows[lane_id] = t;
++    }
++    __syncthreads();
++
++    constexpr float kScale = 1.f / static_cast<float>(kDim);
++    float logit[kRows];
++    float row_max = -FLT_MAX;
++#pragma unroll
++    for (uint32_t r = 0; r < kRows; ++r) {
++      logit[r] = tot_rows[2 * r + 1] * rsqrtf(tot_rows[2 * r] * kScale + params.eps);
++      row_max = fmaxf(row_max, logit[r]);
++    }
++    float weight_sum = 0.f;
++    float2 acc[4] = {};
++#pragma unroll
++    for (uint32_t r = 0; r < kRows; ++r) {
++      const float w = exp2f((logit[r] - row_max) * math::log2e);
++      weight_sum += w;
++      const float2 w2 = make_float2(w, w);
++#pragma unroll
++      for (uint32_t j = 0; j < 4; ++j) {
++        acc[j] = fma_f32x2(w2, cast<float2>(rows[r][j]), acc[j]);
++      }
++    }
++
++    // Fused out norm: mixed = acc / weight_sum, out = rmsnorm(mixed) * ow.
++    const float inv_sum = 1.f / weight_sum;
++    float2 sq2 = make_float2(0.f, 0.f);
++#pragma unroll
++    for (uint32_t j = 0; j < 4; ++j) sq2 = fma_f32x2(acc[j], acc[j], sq2);
++    const float sq = warp::reduce_sum(sq2.x + sq2.y);
++    if (lane_id == 0) red_sq[warp_id] = sq;
++    __syncthreads();
++    float total_sq = 0.f;
++#pragma unroll
++    for (uint32_t w = 0; w < D::kNumWarps; ++w) total_sq += red_sq[w];
++    const float scale = inv_sum * rsqrtf(total_sq * inv_sum * inv_sum / static_cast<float>(kDim) + params.eps);
++    const float2 scale2 = make_float2(scale, scale);
++    const auto* o2 = reinterpret_cast<const bf16x2_t*>(&ow_v);
++    vec_t out_vec;
++#pragma unroll
++    for (uint32_t j = 0; j < 4; ++j) {
++      out_vec[j] = cast<bf16x2_t>(mul_f32x2(mul_f32x2(acc[j], scale2), cast<float2>(o2[j])));
++    }
++    out_vec.store(params.out, row_off + tx);
++    // red_rows / tot_rows / red_sq are reused by the next token.
++    __syncthreads();
++  }
++}
++
+ using host::distributed::CommunicatorRef;
+ 
+ // Host launcher: constexpr kernel table over nvb.
+@@ -676,6 +878,151 @@
+         nullptr, attn_res_fused_direct_ag_kernel<Trait<I + 1>, kOccupancy>...};
+   }
+   static constexpr auto kAgTable = make_ag_table(std::make_index_sequence<kMaxBankRows>{});
++  template <std::size_t... I>
++  static constexpr auto make_add_table(std::index_sequence<I...>) {
++    return std::array<KernelFn, kMaxBankRows + 1>{nullptr, attn_res_fused_add_kernel<Trait<I + 1>, kOccupancy>...};
++  }
++  static constexpr auto kAddTable = make_add_table(std::make_index_sequence<kMaxBankRows>{});
++
++  template <std::size_t... I>
++  static constexpr auto make_direct_table(std::index_sequence<I...>) {
++    return std::array<KernelFn, kMaxBankRows + 1>{nullptr, attn_res_direct_kernel<kDim, I + 1>...};
++  }
++  static constexpr auto kDirectTable = make_direct_table(std::make_index_sequence<kMaxBankRows>{});
++
++  // Register-direct path (attn_res_direct_kernel) for decode-sized batches.
++  // prefix_b given: prefix_out = prefix_a + prefix_b is materialized and
++  // aggregated (run_add semantics); otherwise prefix_a is aggregated as is
++  // (run semantics) and prefix_out is ignored.
++  static void run_direct(
++      const tvm::ffi::TensorView prefix_a,
++      std::optional<tvm::ffi::TensorView> prefix_b,
++      const tvm::ffi::TensorView bank,
++      const tvm::ffi::TensorView cw,
++      const tvm::ffi::TensorView ow,
++      const tvm::ffi::TensorView out,
++      const tvm::ffi::TensorView prefix_out,
++      int64_t nvb,
++      double eps,
++      bool write_prefix) {
++    using namespace host;
++
++    auto T_ = SymbolicSize{"num_tokens"};
++    auto H_ = SymbolicSize{"hidden_size"};
++    auto NB_ = SymbolicSize{"num_bank_slots"};
++    auto device = SymbolicDevice{};
++    device.set_options<kDLCUDA>();
++
++    TensorMatcher({T_, H_}).with_dtype<bf16_t>().with_device(device).verify(prefix_a).verify(out).verify(prefix_out);
++    if (prefix_b.has_value()) {
++      TensorMatcher({T_, H_}).with_dtype<bf16_t>().with_device(device).verify(prefix_b.value());
++    }
++    TensorMatcher({T_, NB_, H_}).with_dtype<bf16_t>().with_device(device).verify(bank);
++    TensorMatcher({H_}).with_dtype<bf16_t>().with_device(device).verify(cw).verify(ow);
++
++    const auto num_tokens = static_cast<int64_t>(T_.unwrap());
++    const auto H = static_cast<int64_t>(H_.unwrap());
++    const auto NB = static_cast<int64_t>(NB_.unwrap());
++    RuntimeCheck(H == kDim, "attn_res_direct: H must be ", kDim, ", got ", H);
++    RuntimeCheck(1 <= nvb && nvb <= kMaxBankRows && nvb <= NB, "attn_res_direct: invalid nvb=", nvb, " NB=", NB);
++    RuntimeCheck(!write_prefix || nvb < NB, "attn_res_direct: write_prefix targets bank row nvb, needs nvb < NB");
++    if (num_tokens == 0) return;
++
++    const auto num_sm = runtime::get_sm_count(device.unwrap().device_id);
++    const auto grid = std::min<int64_t>((int64_t)num_sm, num_tokens);
++    const bool add = prefix_b.has_value();
++    const auto params = AttnResTMAParams{
++        .prefix_sum = static_cast<const bf16_t*>(prefix_a.data_ptr()),
++        .bank = static_cast<const bf16_t*>(bank.data_ptr()),
++        .cw = static_cast<const bf16_t*>(cw.data_ptr()),
++        .ow = static_cast<const bf16_t*>(ow.data_ptr()),
++        .out = static_cast<bf16_t*>(out.data_ptr()),
++        .prefix_dst = write_prefix ? static_cast<bf16_t*>(bank.data_ptr()) + nvb * H : nullptr,
++        .input_mc = nullptr,
++        .residual = add ? static_cast<const bf16_t*>(prefix_a.data_ptr()) : nullptr,
++        .prefix_out = add ? static_cast<bf16_t*>(prefix_out.data_ptr()) : nullptr,
++        .addend = add ? static_cast<const bf16_t*>(prefix_b.value().data_ptr()) : nullptr,
++        .sem_local = nullptr,
++        .sem_mc = nullptr,
++        .output_mc = nullptr,
++        .world_size = 0,
++        .rank = 0,
++        .stride_bm = NB * H,
++        .eps = static_cast<float>(eps),
++        .num_tokens = static_cast<uint32_t>(num_tokens),
++    };
++    LaunchKernel(grid, AttnResDirect<kDim, 1>::kNumThreads, device.unwrap()).enable_pdl(true)(kDirectTable[nvb], params);
++  }
++
++  static void run_add(
++      const tvm::ffi::TensorView prefix_a,
++      const tvm::ffi::TensorView prefix_b,
++      const tvm::ffi::TensorView bank,
++      const tvm::ffi::TensorView cw,
++      const tvm::ffi::TensorView ow,
++      const tvm::ffi::TensorView out,
++      const tvm::ffi::TensorView prefix_out,
++      int64_t nvb,
++      double eps,
++      bool write_prefix) {
++    using namespace host;
++
++    auto T_ = SymbolicSize{"num_tokens"};
++    auto H_ = SymbolicSize{"hidden_size"};
++    auto NB_ = SymbolicSize{"num_bank_slots"};
++    auto device = SymbolicDevice{};
++    device.set_options<kDLCUDA>();
++
++    TensorMatcher({T_, H_})
++        .with_dtype<bf16_t>()
++        .with_device(device)
++        .verify(prefix_a)
++        .verify(prefix_b)
++        .verify(out)
++        .verify(prefix_out);
++    TensorMatcher({T_, NB_, H_}).with_dtype<bf16_t>().with_device(device).verify(bank);
++    TensorMatcher({H_}).with_dtype<bf16_t>().with_device(device).verify(cw).verify(ow);
++
++    const auto num_tokens = static_cast<int64_t>(T_.unwrap());
++    const auto H = static_cast<int64_t>(H_.unwrap());
++    const auto NB = static_cast<int64_t>(NB_.unwrap());
++    RuntimeCheck(H == kDim, "attn_res_fused_add: H must be ", kDim, ", got ", H);
++    RuntimeCheck(1 <= nvb && nvb <= kMaxBankRows && nvb <= NB, "attn_res_fused_add: invalid nvb=", nvb, " NB=", NB);
++    RuntimeCheck(!write_prefix || nvb < NB, "attn_res_fused_add: write_prefix targets bank row nvb, needs nvb < NB");
++    if (num_tokens == 0) return;
++
++    [[maybe_unused]] static const bool attrs_set = [] {
++      for (uint32_t i = 1; i <= kMaxBankRows; ++i) {
++        RuntimeDeviceCheck(
++            cudaFuncSetAttribute(kAddTable[i], cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemBytes));
++      }
++      return true;
++    }();
++
++    const auto num_sm = runtime::get_sm_count(device.unwrap().device_id);
++    const auto grid = std::min<int64_t>((int64_t)num_sm * kOccupancy, num_tokens);
++    const auto params = AttnResTMAParams{
++        .prefix_sum = static_cast<const bf16_t*>(prefix_out.data_ptr()),
++        .bank = static_cast<const bf16_t*>(bank.data_ptr()),
++        .cw = static_cast<const bf16_t*>(cw.data_ptr()),
++        .ow = static_cast<const bf16_t*>(ow.data_ptr()),
++        .out = static_cast<bf16_t*>(out.data_ptr()),
++        .prefix_dst = write_prefix ? static_cast<bf16_t*>(bank.data_ptr()) + nvb * H : nullptr,
++        .input_mc = nullptr,
++        .residual = static_cast<const bf16_t*>(prefix_a.data_ptr()),
++        .prefix_out = static_cast<bf16_t*>(prefix_out.data_ptr()),
++        .addend = static_cast<const bf16_t*>(prefix_b.data_ptr()),
++        .sem_local = nullptr,
++        .sem_mc = nullptr,
++        .output_mc = nullptr,
++        .world_size = 0,
++        .rank = 0,
++        .stride_bm = NB * H,
++        .eps = static_cast<float>(eps),
++        .num_tokens = static_cast<uint32_t>(num_tokens),
++    };
++    LaunchKernel(grid, kNumThreads, device.unwrap(), kSmemBytes).enable_pdl(true)(kAddTable[nvb], params);
++  }
+ 
+   static void
+   run(const tvm::ffi::TensorView prefix_sum,
+@@ -739,6 +1086,7 @@
+         .input_mc = nullptr,
+         .residual = nullptr,
+         .prefix_out = nullptr,
++        .addend = nullptr,
+         .sem_local = nullptr,
+         .sem_mc = nullptr,
+         .output_mc = nullptr,
+@@ -820,6 +1168,7 @@
+                     pull.rank * local_elems * sizeof(bf16_t),
+         .residual = residual.has_value() ? static_cast<const bf16_t*>(residual.value().data_ptr()) : nullptr,
+         .prefix_out = static_cast<bf16_t*>(prefix_out.data_ptr()),
++        .addend = nullptr,
+         .sem_local = pull.semaphores[pull.rank],
+         .sem_mc = pull.mc_semaphore,
+         .output_mc = nullptr,
+@@ -895,6 +1244,7 @@
+         .input_mc = nullptr,
+         .residual = nullptr,
+         .prefix_out = nullptr,
++        .addend = nullptr,
+         .sem_local = pull.semaphores[pull.rank],
+         .sem_mc = pull.mc_semaphore,
+         .output_mc = reinterpret_cast<uint8_t*>(static_cast<uintptr_t>(output_mc_ptr)),
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/pristine_tree/kernels/ops/attention/fla/fused_norm_gate.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/trial_2_tree_judged/kernels/ops/attention/fla/fused_norm_gate.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/pristine_tree/kernels/ops/attention/fla/fused_norm_gate.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/trial_2_tree_judged/kernels/ops/attention/fla/fused_norm_gate.py	2026-09-28 02:26:41.988742828 -0700
+@@ -8,6 +8,7 @@
+ import triton.language as tl
+ 
+ from sglang.kernels.jit.utils import is_arch_support_pdl
++from sglang.kernels.ops.triton_launch import fast_launch
+ from sglang.srt.utils import (
+     cdiv,
+     cpu_has_amx_support,
+@@ -46,6 +47,8 @@
+     HAS_WEIGHT: tl.constexpr,
+     HAS_BIAS: tl.constexpr,
+     USE_GDC: tl.constexpr = False,
++    stride_g=0,
++    G_HEADS: tl.constexpr = 0,
+ ):
+     # PDL: x is the producer's output (e.g. the fused KDA verify kernel, which
+     # triggers its dependents right after the o store), so every load sits
+@@ -98,8 +101,19 @@
+         b_y = b_y + b_b[None, :]
+ 
+     # swish/sigmoid output gate
+-    p_g = tl.make_block_ptr(g, (T, D), (D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
+-    b_g = tl.load(p_g, boundary_check=(0, 1)).to(tl.float32)
++    if G_HEADS > 0:
++        # Strided gate [T // G_HEADS, G_HEADS, D] with row stride stride_g:
++        # read in place instead of materializing a contiguous copy.
++        o_t = i_t * BT + tl.arange(0, BT)
++        p_g = g + ((o_t // G_HEADS) * stride_g + (o_t % G_HEADS) * D)[:, None]
++        b_g = tl.load(
++            p_g + o_d[None, :], mask=(o_t < T)[:, None] & m_d[None, :]
++        ).to(tl.float32)
++    else:
++        p_g = tl.make_block_ptr(
++            g, (T, D), (D, 1), (i_t * BT, 0), (BT, BD), (1, 0)
++        )
++        b_g = tl.load(p_g, boundary_check=(0, 1)).to(tl.float32)
+     if ACTIVATION == "swish" or ACTIVATION == "silu":
+         b_y = b_y * b_g * tl.sigmoid(b_g)
+     elif ACTIVATION == "sigmoid":
+@@ -195,6 +209,14 @@
+     if residual is not None:
+         residual_dtype = residual.dtype
+     T, D = x.shape
++    g_heads = 0
++    if g.dim() == 3:
++        # [T // H, H, D] gate with unit inner strides (see
++        # _flatten_norm_gate); only the D <= 512 kernel reads it strided.
++        if D <= 512:
++            g_heads = g.shape[1]
++        else:
++            g = g.reshape(T, D)
+     if residual is not None:
+         assert residual.shape == (T, D)
+     if weight is not None:
+@@ -227,7 +249,11 @@
+         pdl_kwargs = (
+             {"USE_GDC": True, "launch_pdl": True} if is_arch_support_pdl() else {}
+         )
+-        layer_norm_gated_fwd_kernel[(cdiv(T, BT),)](
++        if g_heads:
++            pdl_kwargs.update(stride_g=g.stride(0), G_HEADS=g_heads)
++        fast_launch(
++            layer_norm_gated_fwd_kernel,
++            (cdiv(T, BT),),
+             x=x,
+             g=g,
+             y=y,
+@@ -277,6 +303,52 @@
+     return y, mean, rstd, residual_out if residual_out is not None else x
+ 
+ 
++def _flatten_norm_gate(g: torch.Tensor, rows: int) -> torch.Tensor:
++    # A head-split view of a wider projection ([..., H, D] with unit strides
++    # over H and D but a padded row stride) stays 3D so the kernel can read
++    # it strided; everything else is flattened to 2D as before.
++    if (
++        g.dim() >= 3
++        and g.stride(-1) == 1
++        and g.stride(-2) == g.shape[-1]
++        and not g.is_contiguous()
++        and rows == g.shape[:-1].numel()
++    ):
++        g = g.reshape(-1, g.shape[-2], g.shape[-1])
++        if g.stride(1) == g.shape[-1] and g.stride(2) == 1:
++            return g
++    return g.reshape(-1, g.shape[-1])
++
++
++def _layer_norm_gated_fwd_nd(
++    x, g, weight, bias, activation, residual, eps, residual_in_fp32, is_rms_norm
++):
++    x_shape_og = x.shape
++    # reshape input data into 2D tensor
++    x = x.reshape(-1, x.shape[-1])
++    g = _flatten_norm_gate(g, x.shape[0])
++    if residual is not None:
++        assert residual.shape == x_shape_og
++        residual = residual.reshape(-1, residual.shape[-1])
++    residual_dtype = (
++        residual.dtype
++        if residual is not None
++        else (torch.float if residual_in_fp32 else None)
++    )
++    y, mean, rstd, residual_out = layer_norm_gated_fwd(
++        x=x,
++        g=g,
++        weight=weight,
++        bias=bias,
++        activation=activation,
++        eps=eps,
++        residual=residual,
++        residual_dtype=residual_dtype,
++        is_rms_norm=is_rms_norm,
++    )
++    return x, g, y, mean, rstd, residual_out
++
++
+ class LayerNormGatedFunction(torch.autograd.Function):
+     @staticmethod
+     def forward(
+@@ -294,27 +366,9 @@
+     ):
+         x_shape_og = x.shape
+         g_shape_og = g.shape
+-        # reshape input data into 2D tensor
+-        x = x.reshape(-1, x.shape[-1])
+-        g = g.reshape(-1, g.shape[-1])
+-        if residual is not None:
+-            assert residual.shape == x_shape_og
+-            residual = residual.reshape(-1, residual.shape[-1])
+-        residual_dtype = (
+-            residual.dtype
+-            if residual is not None
+-            else (torch.float if residual_in_fp32 else None)
+-        )
+-        y, mean, rstd, residual_out = layer_norm_gated_fwd(
+-            x=x,
+-            g=g,
+-            weight=weight,
+-            bias=bias,
+-            activation=activation,
+-            eps=eps,
+-            residual=residual,
+-            residual_dtype=residual_dtype,
+-            is_rms_norm=is_rms_norm,
++        x, g, y, mean, rstd, residual_out = _layer_norm_gated_fwd_nd(
++            x, g, weight, bias, activation, residual, eps, residual_in_fp32,
++            is_rms_norm,
+         )
+         ctx.save_for_backward(residual_out, g, weight, bias, mean, rstd)
+         ctx.x_shape_og = x_shape_og
+@@ -340,6 +394,14 @@
+     residual_in_fp32: bool = False,
+     eps: float = 1e-6,
+ ):
++    if not torch.is_grad_enabled():
++        # Inference: skip the autograd.Function dispatch (same kernel/args).
++        x_shape_og = x.shape
++        _, _, y, _, _, residual_out = _layer_norm_gated_fwd_nd(
++            x, g, weight, bias, activation, residual, eps, residual_in_fp32, True
++        )
++        y = y.reshape(x_shape_og)
++        return y if not prenorm else (y, residual_out.reshape(x_shape_og))
+     return LayerNormGatedFunction.apply(
+         x,
+         g,
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/pristine_tree/kernels/ops/attention/fla/fused_recurrent.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/trial_2_tree_judged/kernels/ops/attention/fla/fused_recurrent.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/pristine_tree/kernels/ops/attention/fla/fused_recurrent.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/trial_2_tree_judged/kernels/ops/attention/fla/fused_recurrent.py	2026-09-27 00:19:33.227205339 -0700
+@@ -628,6 +628,8 @@
+     # part (~9.6 TB/s) where this triton kernel tops out at ~5 TB/s holding a
+     # [BV, K] register tile per warp. ULP-level output differences only
+     # (reduction order); small batches keep triton (launch-bound anyway).
++    # kda_packed_decode.cuh implements both the standard softplus gate and
++    # KDA's safe lower-bound gate; pass the bound through to that kernel.
+     if use_qk_l2norm_in_kernel:
+         from sglang.kernels.ops.attention import kda_packed_decode as kda_decode_cuda
+ 
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/pristine_tree/kernels/ops/attention/fla/fused_sigmoid_gating_recurrent.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/trial_2_tree_judged/kernels/ops/attention/fla/fused_sigmoid_gating_recurrent.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/pristine_tree/kernels/ops/attention/fla/fused_sigmoid_gating_recurrent.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/trial_2_tree_judged/kernels/ops/attention/fla/fused_sigmoid_gating_recurrent.py	2026-09-28 02:26:28.702841681 -0700
+@@ -5,6 +5,7 @@
+ import triton.language as tl
+ 
+ from sglang.kernels.jit.utils import is_arch_support_pdl
++from sglang.kernels.ops.triton_launch import fast_launch
+ 
+ 
+ @triton.jit(do_not_specialize=["T"])
+@@ -464,7 +465,9 @@
+     # KDA and GDN recurrent paths.
+     pdl_kwargs = {"USE_GDC": True, "launch_pdl": True} if is_arch_support_pdl() else {}
+ 
+-    fused_sigmoid_gating_delta_rule_update_kernel[grid](
++    fast_launch(
++        fused_sigmoid_gating_delta_rule_update_kernel,
++        grid,
+         A_log=A_log,
+         a=a,
+         dt_bias=dt_bias,
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/pristine_tree/kernels/ops/attention/kda_fused_decode.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/trial_2_tree_judged/kernels/ops/attention/kda_fused_decode.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/pristine_tree/kernels/ops/attention/kda_fused_decode.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/trial_2_tree_judged/kernels/ops/attention/kda_fused_decode.py	2026-09-27 00:19:33.227205339 -0700
+@@ -61,8 +61,8 @@
+     onorm_g: torch.Tensor,
+ ) -> bool:
+     """The kernel is compiled for the K3 KDA decode regime: H heads of 128,
+-    packed [T, 3*H*128] qkv rows, transposed [slots, 3, 3*H*128] conv pool, fp32
+-    [slots, H, 128, 128] ssm pool (inner-contiguous, any slot pitch — the
++    packed [T, 3*H*128] qkv rows, transposed [slots, 3, 3*H*128] conv pool, BF16
++    or FP32 [slots, H, 128, 128] ssm pool (inner-contiguous, any slot pitch — the
+     kernel reads the real slot stride), one token per request."""
+     if ssm_states.ndim < 4:
+         return False
+@@ -89,7 +89,7 @@
+         and b.dtype == torch.bfloat16
+         and onorm_g.dtype == torch.bfloat16
+         and conv_states.dtype == torch.bfloat16
+-        and ssm_states.dtype == torch.float32
++        and ssm_states.dtype in (torch.bfloat16, torch.float32)
+         and cache_indices.dtype == torch.int32
+         and mixed_qkv.stride(-1) == 1
+         and a.stride(-1) == 1
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/pristine_tree/kernels/ops/elementwise/l2_prefetch.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/trial_2_tree_judged/kernels/ops/elementwise/l2_prefetch.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/pristine_tree/kernels/ops/elementwise/l2_prefetch.py	1969-12-31 16:00:00.000000000 -0800
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/trial_2_tree_judged/kernels/ops/elementwise/l2_prefetch.py	2026-09-27 00:50:56.631296257 -0700
+@@ -0,0 +1,31 @@
++"""CUDA JIT L2 warm-up: prefetch a bf16 tensor (or row-strided 2-D view) into L2."""
++
++from __future__ import annotations
++
++from typing import TYPE_CHECKING
++
++import torch
++
++from sglang.kernels.jit.utils import cache_once, load_jit
++
++if TYPE_CHECKING:
++    from tvm_ffi.module import Module
++
++
++@cache_once
++def _jit_l2_prefetch_module() -> Module:
++    return load_jit(
++        "l2_prefetch_bf16",
++        cuda_files=["elementwise/l2_prefetch.cuh"],
++        cuda_wrappers=[("run", "L2PrefetchKernel::launch")],
++        extra_cuda_cflags=["-O3"],
++    )
++
++
++def l2_prefetch(x: torch.Tensor, num_blocks: int = 148) -> None:
++    """Hint the bytes of bf16 ``x`` into L2 (no reads into SMs, no writes;
++    completion is not tracked). ``x`` is contiguous, or a 2-D view with unit
++    column stride (e.g. a K-prefix ``w[:, :k]`` of a weight). Results of
++    later kernels are unaffected -- only where their loads are served from."""
++    x = x.view(1, -1) if x.is_contiguous() else x
++    _jit_l2_prefetch_module().run(x, num_blocks)
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/pristine_tree/kernels/ops/kimi_k3/attn_res.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/trial_2_tree_judged/kernels/ops/kimi_k3/attn_res.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/pristine_tree/kernels/ops/kimi_k3/attn_res.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/trial_2_tree_judged/kernels/ops/kimi_k3/attn_res.py	2026-09-27 02:22:52.159100054 -0700
+@@ -57,6 +57,8 @@
+                 ("run", f"AttnResFusedTmaKernel<{args}>::run"),
+                 ("run_pull_rs", f"AttnResFusedTmaKernel<{args}>::run_pull_rs"),
+                 ("run_direct_ag", f"AttnResFusedTmaKernel<{args}>::run_direct_ag"),
++                ("run_add", f"AttnResFusedTmaKernel<{args}>::run_add"),
++                ("run_direct", f"AttnResFusedTmaKernel<{args}>::run_direct"),
+             ],
+             extra_cuda_cflags=["-O3", "--use_fast_math"],
+         )
+@@ -83,6 +85,13 @@
+ }
+ 
+ 
++# Decode-sized batches (one token per CTA) take the register-direct kernel
++# (attn_res_direct_kernel): with nvb + 1 rows per token the TMA kernel's
++# serial add/fence/bulk-reload/TMEM phases dominate its latency. Capped at 32
++# so larger batches keep the TMA path bit-for-bit.
++_DIRECT_MAX_TOKENS: int = 32
++
++
+ def _tuning(nvb: int, num_tokens: int) -> tuple[int, int, int]:
+     """(chunk_rows, occupancy, consumer_regs) for this aggregation point.
+ 
+@@ -183,8 +192,39 @@
+                  (bit-exact copy, fused into the score pass which already
+                  has the row in registers); requires NB > nvb
+     """
+-    _jit_fused_tma_module(*_tuning(nvb, prefix_sum.shape[0])).run(
+-        prefix_sum, bank, cw, ow, out, nvb, eps, write_prefix
++    module = _jit_fused_tma_module(*_tuning(nvb, prefix_sum.shape[0]))
++    if prefix_sum.shape[0] <= _DIRECT_MAX_TOKENS:
++        module.run_direct(
++            prefix_sum, None, bank, cw, ow, out, out, nvb, eps, write_prefix
++        )
++        return
++    module.run(prefix_sum, bank, cw, ow, out, nvb, eps, write_prefix)
++
++
++def attn_res_fused_tma_add(
++    prefix_a: torch.Tensor,
++    prefix_b: torch.Tensor,
++    bank: torch.Tensor,
++    cw: torch.Tensor,
++    ow: torch.Tensor,
++    out: torch.Tensor,
++    prefix_out: torch.Tensor,
++    nvb: int,
++    eps: float,
++    *,
++    write_prefix: bool = False,
++) -> None:
++    """attn_res_fused_tma with the pending residual add folded in: writes
++    prefix_out = prefix_a + prefix_b (bit-identical to the bf16 torch add) and
++    aggregates it. prefix_out must not alias prefix_a / prefix_b."""
++    module = _jit_fused_tma_module(*_tuning(nvb, prefix_a.shape[0]))
++    if prefix_a.shape[0] <= _DIRECT_MAX_TOKENS:
++        module.run_direct(
++            prefix_a, prefix_b, bank, cw, ow, out, prefix_out, nvb, eps, write_prefix
++        )
++        return
++    module.run_add(
++        prefix_a, prefix_b, bank, cw, ow, out, prefix_out, nvb, eps, write_prefix
+     )
+ 
+ 
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/pristine_tree/kernels/ops/mamba/causal_conv1d_triton.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/trial_2_tree_judged/kernels/ops/mamba/causal_conv1d_triton.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/pristine_tree/kernels/ops/mamba/causal_conv1d_triton.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/trial_2_tree_judged/kernels/ops/mamba/causal_conv1d_triton.py	2026-09-28 02:26:28.703841598 -0700
+@@ -11,6 +11,7 @@
+ import triton.language as tl
+ 
+ from sglang.kernels.jit.utils import is_arch_support_pdl
++from sglang.kernels.ops.triton_launch import fast_launch
+ 
+ PAD_SLOT_ID = -1
+ 
+@@ -1144,7 +1145,9 @@
+ 
+     pdl_kwargs = {"USE_GDC": True, "launch_pdl": True} if is_arch_support_pdl() else {}
+ 
+-    _causal_conv1d_update_kernel[grid](
++    fast_launch(
++        _causal_conv1d_update_kernel,
++        grid,
+         # Pointers to matrices
+         x,
+         weight,
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/pristine_tree/kernels/ops/moe/moe_fused_gate.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/trial_2_tree_judged/kernels/ops/moe/moe_fused_gate.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/pristine_tree/kernels/ops/moe/moe_fused_gate.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/trial_2_tree_judged/kernels/ops/moe/moe_fused_gate.py	2026-09-28 02:26:28.703841598 -0700
+@@ -10,6 +10,7 @@
+ from sglang.kernels.jit.utils import cache_once, is_arch_support_pdl, load_jit
+ from sglang.kernels.kernel_api_logging import debug_kernel_api
+ from sglang.kernels.ops.moe import moe_route_radix
++from sglang.kernels.ops.triton_launch import fast_launch
+ 
+ if TYPE_CHECKING:
+     from tvm_ffi.module import Module
+@@ -363,7 +364,9 @@
+     grid = (triton.cdiv(M, BLOCK_M),)
+     use_pdl = is_arch_support_pdl()
+     extra = {"launch_pdl": True} if use_pdl else {}
+-    _router_triton_kernel[grid](
++    fast_launch(
++        _router_triton_kernel,
++        grid,
+         scores,
+         bias if bias is not None else scores,
+         weights,
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/pristine_tree/kernels/ops/triton_launch.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/trial_2_tree_judged/kernels/ops/triton_launch.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/pristine_tree/kernels/ops/triton_launch.py	1969-12-31 16:00:00.000000000 -0800
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/trial_2_tree_judged/kernels/ops/triton_launch.py	2026-09-28 02:26:41.989742745 -0700
+@@ -0,0 +1,72 @@
++"""Low-overhead launch of already-compiled ``@triton.jit`` kernels.
++
++``fast_launch(kernel, grid, *args, **kwargs)`` is equivalent to
++``kernel[grid](*args, **kwargs)``. It keeps Triton's own binder and cache
++key, so specialization (dtypes, 16-byte alignment, ``== 1`` / ``% 16`` ints,
++constexprs and launch options) resolves to exactly the kernel
++``JITFunction.run`` would pick. On a cache hit it launches that kernel
++directly, skipping the rest of ``run``'s per-call Python bookkeeping, which
++dominates small eager decode/verify steps. Anything unusual (first
++compile, run/launch hooks, stage-inspection pipelines) falls back to the
++regular path.
++"""
++
++from triton import knobs
++from triton.knobs import HookChain
++from triton.runtime.driver import driver
++from triton.runtime.jit import compute_cache_key
++
++_MISSING = object()
++
++
++def _no_hook(hook) -> bool:
++    # knobs.runtime.launch_{enter,exit}_hook: HookChain, empty unless a tool
++    # (e.g. proton) registered one.
++    return hook is None or (isinstance(hook, HookChain) and not hook.calls)
++
++
++def fast_launch(kernel, grid, *args, **kwargs):
++    runtime = knobs.runtime
++    if (
++        kernel.pre_run_hooks
++        or runtime.add_stages_inspection_hook is not None
++        or not _no_hook(runtime.launch_enter_hook)
++        or not _no_hook(runtime.launch_exit_hook)
++    ):
++        return kernel[grid](*args, **kwargs)
++
++    # Same option injection as JITFunction.run.
++    opts = dict(kwargs)
++    opts["debug"] = opts.get("debug", kernel.debug) or runtime.debug
++    opts["instrumentation_mode"] = knobs.compilation.instrumentation_mode
++
++    device = driver.active.get_current_device()
++    kernel_cache, kernel_key_cache, _, _, binder = kernel.device_caches[device]
++    bound_args, specialization, options = binder(*args, **opts)
++    compiled = kernel_cache.get(
++        compute_cache_key(kernel_key_cache, specialization, options), None
++    )
++    if compiled is None:
++        return kernel[grid](*args, **kwargs)
++
++    for (name, _), (val, globals_dict) in kernel.used_global_vals.items():
++        if globals_dict.get(name, _MISSING) != val:
++            # Let JITFunction.run raise its usual error.
++            return kernel[grid](*args, **kwargs)
++
++    if callable(grid):
++        grid = grid(bound_args)
++    grid_size = len(grid)
++    compiled.run(
++        grid[0],
++        grid[1] if grid_size > 1 else 1,
++        grid[2] if grid_size > 2 else 1,
++        driver.active.get_current_stream(device),
++        compiled.function,
++        compiled.packed_metadata,
++        None,  # launch_metadata: only read by launch hooks, none registered
++        None,
++        None,
++        *bound_args.values(),
++    )
++    return compiled
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/pristine_tree/srt/layers/attention/linear/kda_backend.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/trial_2_tree_judged/srt/layers/attention/linear/kda_backend.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/pristine_tree/srt/layers/attention/linear/kda_backend.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/trial_2_tree_judged/srt/layers/attention/linear/kda_backend.py	2026-09-27 00:19:33.228205256 -0700
+@@ -735,11 +735,9 @@
+             conv_state_indices=cache_indices,
+         )
+ 
+-        # The packed kernel assumes one token per request.
+-        if (
+-            self.kernel_dispatcher.supports_packed_decode
+-            and getattr(layer, "lower_bound", None) is None
+-        ):
++        # The packed kernel assumes one token per request. Its Triton KDA
++        # implementation also handles the KDA safe gate (lower_bound).
++        if self.kernel_dispatcher.supports_packed_decode:
+             assert qkv.shape[0] == cache_indices.shape[0], (
+                 "KDA packed decode requires one token per sequence (T=1): "
+                 f"got {qkv.shape[0]} tokens for {cache_indices.shape[0]} requests."
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/pristine_tree/srt/layers/attn_residual.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/trial_2_tree_judged/srt/layers/attn_residual.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/pristine_tree/srt/layers/attn_residual.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/trial_2_tree_judged/srt/layers/attn_residual.py	2026-09-27 00:19:33.228205256 -0700
+@@ -117,6 +117,39 @@
+     return out
+ 
+ 
++def _aggregate_fast_add(
++    prefix_a: torch.Tensor,
++    prefix_b: torch.Tensor,
++    bank: torch.Tensor,
++    nvb: int,
++    score_proj: ReplicatedLinear,
++    score_norm: RMSNorm,
++    out_norm: RMSNorm,
++    write_bank_row: bool = False,
++) -> tuple[torch.Tensor, torch.Tensor]:
++    """_aggregate_fast with the pending prefix add done in the same kernel."""
++    from sglang.kernels.ops.kimi_k3.attn_res import attn_res_fused_tma_add
++
++    assert score_norm.variance_epsilon == out_norm.variance_epsilon
++
++    cw = get_cw(score_proj, score_norm, dtype=torch.bfloat16)
++    out = torch.empty_like(prefix_a)
++    prefix = torch.empty_like(prefix_a)
++    attn_res_fused_tma_add(
++        prefix_a,
++        prefix_b,
++        bank,
++        cw,
++        out_norm.weight,
++        out,
++        prefix,
++        nvb,
++        score_norm.variance_epsilon,
++        write_prefix=write_bank_row,
++    )
++    return out, prefix
++
++
+ @triton.jit
+ def _score_kernel(
+     prefix_ptr,  # [T, H]
+@@ -376,6 +409,22 @@
+             prefix_a,
+             prefix_b,
+             bank,
++            nvb,
++            score_proj,
++            score_norm,
++            out_norm,
++            write_bank_row=write_bank_row,
++        )
++    if (
++        _use_fast(prefix_a.shape[1])
++        and prefix_a.shape[0] > 0
++        and prefix_a.is_contiguous()
++        and prefix_b.is_contiguous()
++    ):
++        return _aggregate_fast_add(
++            prefix_a,
++            prefix_b,
++            bank,
+             nvb,
+             score_proj,
+             score_norm,
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/pristine_tree/srt/layers/moe/moe_runner/flashinfer_trtllm.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/trial_2_tree_judged/srt/layers/moe/moe_runner/flashinfer_trtllm.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/pristine_tree/srt/layers/moe/moe_runner/flashinfer_trtllm.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/trial_2_tree_judged/srt/layers/moe/moe_runner/flashinfer_trtllm.py	2026-09-28 02:16:12.647808761 -0700
+@@ -1,5 +1,6 @@
+ from __future__ import annotations
+ 
++import contextlib
+ import contextvars
+ from contextlib import contextmanager
+ from dataclasses import dataclass
+@@ -56,6 +57,215 @@
+     return is_arch_support_pdl() and num_tokens <= _TRTLLM_MOE_PDL_MAX_TOKENS
+ 
+ 
++_MXFP4_TUNE_OP = "flashinfer::trtllm_fp4_block_scale_moe"
++# FlashInfer's untuned fallback tile_N; see _mxfp4_moe_tune_context.
++_MXFP4_MIN_TILE_N = 8
++_mxfp4_self_tuned_buckets: set[int] = set()
++# flashinfer.tllm_enums RoutingMethodType.TopK / ActivationType.Situ.
++_MXFP4_ROUTING_TOPK = 5
++_MXFP4_ACT_SITU = 10
++
++
++def _mxfp4_moe_tune_context(num_tokens: int, top_k: int, num_local_experts: int):
++    """Profile the trtllm-gen MXFP4 tactic of this token bucket once, eagerly.
++
++    Untuned, FlashInfer runs the tile_N one below nextPow2(rows per expert), so
++    above 8 rows/expert each expert's weights are split over 2+ CTAs (B=512
++    over 112 local experts: tile 8, ~15% slower than a tuned tile-16 tactic).
++    Only engaged in that regime, when no runner-level autotune pass produced
++    data for this op, outside graph capture; one bucket is profiled per shape.
++    """
++    from flashinfer.autotuner import AutoTuner, autotune
++
++    if num_tokens * top_k <= _MXFP4_MIN_TILE_N * num_local_experts:
++        return contextlib.nullcontext()
++    bucket = 1 << (num_tokens.bit_length() - 1)
++    tuner = AutoTuner.get()
++    if (
++        bucket in _mxfp4_self_tuned_buckets
++        or tuner.is_tuning_mode
++        or torch.cuda.is_current_stream_capturing()
++    ):
++        return contextlib.nullcontext()
++    if not _mxfp4_self_tuned_buckets:
++        if _flashinfer_autotune_disabled() or any(
++            k.custom_op == _MXFP4_TUNE_OP for k in tuner.profiling_cache
++        ):
++            _mxfp4_self_tuned_buckets.add(-1)
++    if -1 in _mxfp4_self_tuned_buckets:
++        return contextlib.nullcontext()
++    _mxfp4_self_tuned_buckets.add(bucket)
++    return autotune(True, tuning_buckets=(bucket,))
++
++
++# Fast relaunch of the routed MXFP4 op. FlashInfer's Python wrapper rebuilds
++# its MoERunner / tuning config and re-queries the autotuner on every call
++# (~100 us of host time per layer); once the tactic of a shape is known, the
++# same C++ launch is issued directly with identical arguments.
++_mxfp4_fast_moe_op = None
++_mxfp4_fast_tactics: dict = {}
++
++
++def _mxfp4_fast_get_moe_op():
++    global _mxfp4_fast_moe_op
++    if _mxfp4_fast_moe_op is None:
++        _mxfp4_fast_moe_op = False
++        try:
++            from flashinfer.fused_moe.core import get_trtllm_moe_sm100_module
++
++            fn = get_trtllm_moe_sm100_module().trtllm_fp4_block_scale_moe
++            cells = dict(zip(fn.__code__.co_freevars, fn.__closure__ or ()))
++            op = cells["moe_op"].cell_contents
++            if callable(getattr(op, "trtllm_fp4_block_scale_moe", None)):
++                _mxfp4_fast_moe_op = op
++        except Exception:
++            logger.debug("MXFP4 fast MoE relaunch unavailable", exc_info=True)
++    return _mxfp4_fast_moe_op or None
++
++
++def _mxfp4_fast_key(tuner, routing, x_quant, x_scale, quant_info, top_k, pdl):
++    ids = routing[0] if isinstance(routing, tuple) else routing
++    w = routing[1] if isinstance(routing, tuple) else None
++    return (
++        x_quant.shape,
++        x_quant.dtype,
++        None if x_scale is None else (x_scale.shape, x_scale.dtype),
++        ids.shape,
++        None if w is None else w.dtype,
++        top_k,
++        pdl,
++        id(quant_info.w13_weight),
++        id(quant_info.w2_weight),
++        len(tuner.profiling_cache),
++        len(tuner._file_configs),
++    )
++
++
++def _mxfp4_fast_routed_moe(routing, x_quant, x_scale, quant_info, top_k, pdl, out):
++    """Relaunch trtllm_fp4_block_scale_routed_moe (TopK/SiTU, finalized) with a
++    cached tactic; returns False when the shape has no cached tactic yet."""
++    from flashinfer.autotuner import AutoTuner
++    from flashinfer.fused_moe.da_config import is_trtllm_da_enabled
++
++    tuner = AutoTuner.get()
++    if tuner.is_tuning_mode or is_trtllm_da_enabled():
++        _mxfp4_fast_tactics.clear()
++        return False
++    key = _mxfp4_fast_key(tuner, routing, x_quant, x_scale, quant_info, top_k, pdl)
++    entry = _mxfp4_fast_tactics.get(key)
++    if entry is None:
++        return False
++    moe_op, tactic, routing_mode, enable_pdl = entry
++    if isinstance(routing, tuple):
++        topk_ids, topk_weights = routing
++    else:
++        topk_ids = routing
++        # Same bf16 scratch FlashInfer allocates for packed routing.
++        topk_weights = torch.empty(
++            topk_ids.shape, dtype=torch.bfloat16, device=x_quant.device
++        )
++    moe_op.trtllm_fp4_block_scale_moe(
++        routing_mode,
++        None,  # routing_logits
++        topk_ids,
++        topk_weights,
++        None,  # routing_bias
++        x_quant,
++        x_scale,
++        quant_info.w13_weight,
++        quant_info.w13_weight_scale,
++        None,  # gemm1_bias
++        None,  # gemm1_lora_delta
++        quant_info.gemm1_alpha,
++        quant_info.gemm1_clamp_limit,  # gemm1_beta
++        None,  # gemm1_clamp_limit
++        quant_info.w2_weight,
++        quant_info.w2_weight_scale,
++        None,  # gemm2_bias
++        None,  # output1_scale_scalar
++        None,  # output1_scale_gate_scalar
++        None,  # output2_scale_scalar
++        None,  # per_token_scale
++        quant_info.global_num_experts,
++        top_k,
++        0,  # num_fused_shared_experts
++        None,  # n_group
++        None,  # topk_group
++        quant_info.intermediate_size_per_partition,
++        quant_info.local_expert_offset,
++        quant_info.local_num_experts,
++        None,  # routed_scaling_factor
++        _MXFP4_ROUTING_TOPK,
++        True,  # do_finalize
++        enable_pdl,
++        _MXFP4_ACT_SITU,
++        out,
++        [-1, -1] if tactic == -1 else tactic,
++        True,  # norm_topk_prob
++        None,  # routing_replay_out
++        [],
++        [],
++        False,
++    )
++    return True
++
++
++@contextmanager
++def _mxfp4_fast_record(routing, x_quant, x_scale, quant_info, top_k, pdl):
++    """Run the regular FlashInfer call once, recording the tactic its
++    autotuner picks so later calls of the same shape take the fast path."""
++    from flashinfer.autotuner import AutoTuner
++    from flashinfer.fused_moe.core import (
++        _device_support_moe_pdl,
++        _enabled_trtllm_da_config,
++        _split_precomputed_routing,
++    )
++
++    tuner = AutoTuner.get()
++    moe_op = _mxfp4_fast_get_moe_op()
++    # Distribution-aware tactics are picked per call; never cache those.
++    if (
++        moe_op is None
++        or tuner.is_tuning_mode
++        or "choose_one" in tuner.__dict__
++        or _enabled_trtllm_da_config() is not None
++    ):
++        yield
++        return
++    key = _mxfp4_fast_key(tuner, routing, x_quant, x_scale, quant_info, top_k, pdl)
++    orig = tuner.choose_one
++    picked = []
++
++    def spy(custom_op, *args, **kwargs):
++        res = orig(custom_op, *args, **kwargs)
++        picked.append((custom_op, res[1]))
++        return res
++
++    tuner.choose_one = spy
++    try:
++        yield
++    finally:
++        del tuner.choose_one
++    if len(picked) == 1 and picked[0][0] == _MXFP4_TUNE_OP and not tuner.is_tuning_mode:
++        _, _, routing_mode = _split_precomputed_routing(routing)
++        enable_pdl = pdl and _device_support_moe_pdl(x_quant.device)
++        _mxfp4_fast_tactics[key] = (moe_op, picked[0][1], routing_mode, enable_pdl)
++
++
++def _flashinfer_autotune_disabled() -> bool:
++    from sglang.srt.runtime_context import get_exec
++
++    try:
++        exec_cfg = get_exec()
++        return bool(
++            exec_cfg.kernel.disable_flashinfer_autotune
++            or exec_cfg.deterministic.enable_deterministic_inference
++        )
++    except Exception:
++        # No server config (standalone layer drivers): nothing disabled it.
++        return False
++
++
+ @dataclass
+ class FlashInferTrtllmDeferredFinalizeOutput:
+     gemm2_out: torch.Tensor
+@@ -1105,38 +1315,64 @@
+             routed_top_k = _routing_top_k(routing)
+ 
+             defer_finalize = _deferred_finalize_enabled.get()
+-            result = trtllm_fp4_block_scale_routed_moe(
+-                topk_ids=routing,
+-                routing_bias=None,
+-                hidden_states=x_quant,
+-                hidden_states_scale=x_scale,
+-                gemm1_weights=quant_info.w13_weight,
+-                gemm1_weights_scale=quant_info.w13_weight_scale,
+-                gemm1_bias=None,
+-                gemm1_alpha=quant_info.gemm1_alpha,
+-                gemm1_beta=quant_info.gemm1_clamp_limit,
+-                gemm1_clamp_limit=None,
+-                gemm2_weights=quant_info.w2_weight,
+-                gemm2_weights_scale=quant_info.w2_weight_scale,
+-                gemm2_bias=None,
+-                output1_scale_scalar=None,
+-                output1_scale_gate_scalar=None,
+-                output2_scale_scalar=None,
+-                num_experts=quant_info.global_num_experts,
++            enable_pdl = trtllm_moe_enable_pdl(x_quant.shape[0])
++            tune_ctx = _mxfp4_moe_tune_context(
++                num_tokens=x_quant.shape[0],
+                 top_k=routed_top_k,
+-                n_group=None,
+-                topk_group=None,
+-                intermediate_size=quant_info.intermediate_size_per_partition,
+-                local_expert_offset=quant_info.local_expert_offset,
+-                local_num_experts=quant_info.local_num_experts,
+-                routed_scaling_factor=None,
+-                routing_method_type=RoutingMethodType.TopK.value,
+-                activation_type=ActivationType.Situ.value,
+-                tune_max_num_tokens=next_power_of_2(x_quant.shape[0]),
+-                output=symm_output,
+-                do_finalize=not defer_finalize,
+-                enable_pdl=trtllm_moe_enable_pdl(x_quant.shape[0]),
++                num_local_experts=quant_info.local_num_experts,
++            )
++            fast_ok = (
++                not defer_finalize
++                and type(tune_ctx) is contextlib.nullcontext
++                and not torch.cuda.is_current_stream_capturing()
++            )
++            if not fast_ok:
++                _mxfp4_fast_tactics.clear()
++            elif _mxfp4_fast_routed_moe(
++                routing, x_quant, x_scale, quant_info, routed_top_k, enable_pdl,
++                symm_output,
++            ):
++                return StandardCombineInput(hidden_states=symm_output)
++            record_ctx = (
++                _mxfp4_fast_record(
++                    routing, x_quant, x_scale, quant_info, routed_top_k, enable_pdl
++                )
++                if fast_ok
++                else contextlib.nullcontext()
+             )
++            with tune_ctx, record_ctx:
++                result = trtllm_fp4_block_scale_routed_moe(
++                    topk_ids=routing,
++                    routing_bias=None,
++                    hidden_states=x_quant,
++                    hidden_states_scale=x_scale,
++                    gemm1_weights=quant_info.w13_weight,
++                    gemm1_weights_scale=quant_info.w13_weight_scale,
++                    gemm1_bias=None,
++                    gemm1_alpha=quant_info.gemm1_alpha,
++                    gemm1_beta=quant_info.gemm1_clamp_limit,
++                    gemm1_clamp_limit=None,
++                    gemm2_weights=quant_info.w2_weight,
++                    gemm2_weights_scale=quant_info.w2_weight_scale,
++                    gemm2_bias=None,
++                    output1_scale_scalar=None,
++                    output1_scale_gate_scalar=None,
++                    output2_scale_scalar=None,
++                    num_experts=quant_info.global_num_experts,
++                    top_k=routed_top_k,
++                    n_group=None,
++                    topk_group=None,
++                    intermediate_size=quant_info.intermediate_size_per_partition,
++                    local_expert_offset=quant_info.local_expert_offset,
++                    local_num_experts=quant_info.local_num_experts,
++                    routed_scaling_factor=None,
++                    routing_method_type=RoutingMethodType.TopK.value,
++                    activation_type=ActivationType.Situ.value,
++                    tune_max_num_tokens=next_power_of_2(x_quant.shape[0]),
++                    output=symm_output,
++                    do_finalize=not defer_finalize,
++                    enable_pdl=enable_pdl,
++                )
+             if defer_finalize:
+                 gemm2_out, topk_weights, expanded_idx = result
+                 result = FlashInferTrtllmDeferredFinalizeOutput(
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/pristine_tree/srt/layers/moe/topk.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/trial_2_tree_judged/srt/layers/moe/topk.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/pristine_tree/srt/layers/moe/topk.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/trial_2_tree_judged/srt/layers/moe/topk.py	2026-09-28 02:30:50.821118312 -0700
+@@ -2174,7 +2174,11 @@
+             # Per-rank shared-slot remap later adds shared slots to the topk ID
+             # space, so keep the routed physical ids separately for statistics.
+             recorder_topk_ids = routed_cols
+-        else:
++        elif (
++            expert_location_dispatch_info is not None
++            or num_token_non_padded is not None
++        ):
++            # Identity otherwise; skip the torch.compile entry (~30 us host).
+             topk_ids = _biased_grouped_topk_postprocess(
+                 topk_ids, expert_location_dispatch_info, num_token_non_padded
+             )
+diff -ruN -x __pycache__ -x '*.pyc' /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/pristine_tree/srt/models/kimi_k3.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/trial_2_tree_judged/srt/models/kimi_k3.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/pristine_tree/srt/models/kimi_k3.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/trial_2_tree_judged/srt/models/kimi_k3.py	2026-09-28 02:34:17.652927683 -0700
+@@ -181,6 +181,40 @@
+     )
+ 
+ 
++def _k3_current_stream(device_index: int) -> torch.cuda.Stream:
++    # torch.cuda.current_stream() minus its per-call device-index resolution.
++    stream_id, device_index, device_type = torch._C._cuda_getCurrentStream(
++        device_index
++    )
++    return torch.cuda.Stream(
++        stream_id=stream_id, device_index=device_index, device_type=device_type
++    )
++
++
++class _K3OnStream:
++    """torch.cuda.stream(stream) for a side stream on the current device."""
++
++    __slots__ = ("stream", "prev")
++
++    def __init__(self, stream: torch.cuda.Stream):
++        self.stream = stream
++
++    def __enter__(self):
++        stream = self.stream
++        self.prev = torch._C._cuda_getCurrentStream(stream.device_index)
++        torch._C._cuda_setStream(
++            stream_id=stream.stream_id,
++            device_index=stream.device_index,
++            device_type=stream.device_type,
++        )
++
++    def __exit__(self, *exc):
++        stream_id, device_index, device_type = self.prev
++        torch._C._cuda_setStream(
++            stream_id=stream_id, device_index=device_index, device_type=device_type
++        )
++
++
+ def _k3_bf16_gemm(
+     x: torch.Tensor,
+     weight: torch.Tensor,
+@@ -196,6 +230,20 @@
+             (x.shape[0], weight.shape[0]), dtype=out_dtype, device=x.device
+         )
+     if x.dtype == torch.bfloat16 and weight.dtype == torch.bfloat16:
++        if (
++            out_dtype is None
++            and weight.shape == (7168, 6144)
++            and x.shape[0] <= 128
++            and x.is_contiguous()
++        ):
++            from sglang.kernels.ops.gemm.cutedsl_bf16_gemm import (
++                cutedsl_bf16_gemm,
++                cutedsl_bf16_gemm_out,
++            )
++
++            if out is None:
++                return cutedsl_bf16_gemm(x, weight)
++            return cutedsl_bf16_gemm_out(x, weight, out)
+         from sglang.srt.layers.quantization.unquant import get_bf16_gemm_backend
+ 
+         if get_bf16_gemm_backend().is_cutedsl():
+@@ -771,6 +819,60 @@
+             and self._front_w.dtype == torch.bfloat16
+         )
+ 
++    @cached_property
++    def _split_front_eligible(self) -> bool:
++        """Whether small decode batches may issue the merged front as two TGV
++        GEMMs ([router | latent down] first, shared gate_up on the side
++        stream). Single-rank schedule only: the multi-rank and AR-fusion
++        tails keep the merged GEMM."""
++        from sglang.srt.utils import is_sm100_supported
++
++        return (
++            self._front_fp32
++            and self.alt_stream is not None
++            and self.tp_size == 1
++            and not k3_ar_fusion.enabled()
++            and len(self._front_sizes) == 3
++            and is_sm100_supported()
++        )
++
++    def l2_prefetch_ahead(
++        self, num_tokens: int, tensors: Tuple[torch.Tensor, ...]
++    ) -> None:
++        """Warm L2 with ``tensors`` (weights read later in the layer) on
++        alt_stream while the main stream is latency-bound and HBM mostly
++        idle, so the weight-streaming GEMMs that follow find part of their
++        operand in L2. Prefetch writes nothing, so every result is unchanged.
++        Only on the split-front schedule, which forks alt_stream from the
++        current stream again and joins it back (shared_event) before the
++        layer returns."""
++        if not (
++            get_is_capture_mode()
++            and not self._dp_attention
++            and self._eligible_for_fused_front
++            and self._split_front_eligible
++            and 0 < num_tokens <= self._l2_prefetch_bs_limit
++        ):
++            return
++        from sglang.kernels.ops.elementwise.l2_prefetch import l2_prefetch
++
++        cur = torch.cuda.current_stream()
++        self.alt_stream.wait_stream(cur)
++        with torch.cuda.stream(self.alt_stream):
++            for t in tensors:
++                l2_prefetch(t, self._l2_prefetch_blocks)
++
++    @property
++    def routed_front_weight(self) -> torch.Tensor:
++        """[router | latent down] rows of the merged front weight."""
++        return self._front_w[self._front_sizes[0] :]
++
++    # split_front covers <= 32 tokens. 32 prefetch CTAs keep the hint stream
++    # off most SMs: a full 148-CTA grid slows the 12-CTA KDA recurrence it
++    # overlaps by ~3us (measured on B200, one KDA layer).
++    _l2_prefetch_bs_limit = 32
++    _l2_prefetch_blocks = 32
++
+     def _forward_mega_experts(
+         self, routed_input: torch.Tensor, topk_output
+     ) -> torch.Tensor:
+@@ -1228,14 +1330,43 @@
+             )
+ 
+         num_tokens, hidden_size = hidden_states.shape
+-        fused = _k3_bf16_gemm(
+-            hidden_states,
+-            self._front_w,
+-            out_dtype=torch.float32 if self._front_fp32 else None,
+-        )
+-        gate_up, router_logits, routed_input = torch.split(
+-            fused, self._front_sizes, dim=-1
+-        )
++        split_front = (
++            self._split_front_eligible
++            and num_tokens <= 32
++            and not k3_ar_fusion.enabled()
++        )
++        if split_front:
++            # Small-batch decode: the routed chain (router, quant, MXFP4
++            # GEMMs, finalize) is launch-latency bound and only needs the
++            # [router | latent down] rows, so issue that slice alone and let
++            # the shared gate_up rows run on the side stream alongside the
++            # routed experts. Both are row views of the merged weight, and
++            # the TGV kernel keeps the full-K fp32 reduction per output, so
++            # the logits and activations are bit-identical to the merged GEMM.
++            from sglang.kernels.ops.gemm.cutedsl_bf16_gemm import (
++                cutedsl_bf16_gemm_out,
++            )
++
++            n_gu = self._front_sizes[0]
++            routed_front = hidden_states.new_empty(
++                (num_tokens, self._front_w.shape[0] - n_gu), dtype=torch.float32
++            )
++            current_stream = torch.cuda.current_stream()
++            self.alt_stream.wait_stream(current_stream)
++            cutedsl_bf16_gemm_out(hidden_states, self._front_w[n_gu:], routed_front)
++            router_logits, routed_input = torch.split(
++                routed_front, self._front_sizes[1:], dim=-1
++            )
++            gate_up = None
++        else:
++            fused = _k3_bf16_gemm(
++                hidden_states,
++                self._front_w,
++                out_dtype=torch.float32 if self._front_fp32 else None,
++            )
++            gate_up, router_logits, routed_input = torch.split(
++                fused, self._front_sizes, dim=-1
++            )
+         if num_tokens > 1 and _is_hip and not _aiter_k3_opt:
+             router_logits = router_logits.contiguous()
+         if self._moe_front_needs_dense_bf16:
+@@ -1318,8 +1449,44 @@
+                     prefix_sum,
+                 )
+         else:  # single collective over the flat [latent | shared] pair
+-            self._forward_shared(gate_up, shared_output)
++            # With one rank there is no collective to overlap, so issue the
++            # independent shared-down GEMM on the existing side stream while
++            # the routed MXFP4 path uses the current stream. Keep the
++            # multi-rank and AR-fusion schedules unchanged.
++            overlap_shared = (
++                self.alt_stream is not None
++                and self.tp_size == 1
++                and not k3_ar_fusion.enabled()
++            )
++            shared_event = None
++            if split_front:
++                # alt_stream already forked ahead of the routed front GEMM
++                with torch.cuda.stream(self.alt_stream):
++                    gate_up = hidden_states.new_empty(
++                        (num_tokens, n_gu), dtype=torch.float32
++                    )
++                    cutedsl_bf16_gemm_out(
++                        hidden_states, self._front_w[:n_gu], gate_up
++                    )
++                    self._forward_shared(gate_up, shared_output)
++                    shared_event = self.alt_stream.record_event()
++                self._forward_routed(hidden_states, router_logits, routed_input, latent)
++                # tp_size == 1: no collective; run the latent tail before the
++                # join so it also overlaps the shared experts.
++                out, _ = self.routed_expert_up_proj(self._latent_norm(latent))
++                current_stream.wait_event(shared_event)
++                return _add3(out, shared_output, prefix_sum, prefetch_bc=True)
++            if overlap_shared:
++                current_stream = _k3_current_stream(self.alt_stream.device_index)
++                self.alt_stream.wait_stream(current_stream)
++                with _K3OnStream(self.alt_stream):
++                    self._forward_shared(gate_up, shared_output)
++                    shared_event = self.alt_stream.record_event()
++            else:
++                self._forward_shared(gate_up, shared_output)
+             self._forward_routed(hidden_states, router_logits, routed_input, latent)
++            if shared_event is not None:
++                current_stream.wait_event(shared_event)
+             if self.fuse_ar_norm and k3_ar_fusion.enabled():
+                 fused_norm = True
+                 k3_ar_fusion.all_reduce_norm(
+@@ -1406,10 +1573,14 @@
+         # Side stream for the [f_a|b] + f_b tiny GEMVs: they read only
+         # hidden_states, so they can run concurrently with the wide fused
+         # [q,k,v,g] GEMM on the main stream (graphed decode/verify only).
+-        # Same SM bound rationale as the MLA gate stream.
++        # Same SM bound rationale as the MLA gate stream; on B200 the overlap
++        # still wins at 256/512 tokens (measured, single KDA layer decode).
+         self._bfa_alt_stream = bfa_alt_stream
++        # Set by the decoder layer: called right after the wide [q,k,v,g]
++        # GEMM is issued (graphed decode), to warm L2 on a side stream.
++        self._post_front_hook = None
+         self._bfa_bs_limit = (
+-            (128 if get_platform().is_blackwell else 64)
++            (512 if get_platform().is_blackwell else 64)
+             if bfa_alt_stream is not None
+             else 0
+         )
+@@ -1960,6 +2131,8 @@
+                         )
+                         beta = bfa[..., n_fa : n_fa + n_b]
+                     fused_states, _ = self.fused_qkvg_proj(hidden_states)
++                    if self._post_front_hook is not None:
++                        self._post_front_hook(hidden_states.shape[0])
+                     qkv, g_proj_states = torch.split(
+                         fused_states, self.split_sizes, dim=-1
+                     )
+@@ -2420,6 +2593,11 @@
+                 activation_situ_beta=config.activation_situ_beta,
+                 activation_situ_linear_beta=config.activation_situ_linear_beta,
+             )
++        if isinstance(self.self_attn, KimiK3DeltaAttention) and isinstance(
++            self.mlp, KimiK3MoE
++        ):
++            self.self_attn._post_front_hook = self._l2_prefetch_after_attn_front
++            self._l2_prefetch_start = True
+         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+         self.post_attention_layernorm = RMSNorm(
+             config.hidden_size, eps=config.rms_norm_eps
+@@ -2510,6 +2688,26 @@
+             return out, group.rank_in_group * shard, False
+         return group.all_reduce(attn_out), -1, False
+ 
++    _l2_prefetch_start = False
++    import json as _j, os as _o  # TEMP_KNOB
++    _TK = _j.load(open("/workspace/opt_run/knob.json")) if _o.path.exists("/workspace/opt_run/knob.json") else {}  # TEMP_KNOB
++    _TEMP_KP_NUM, _TEMP_KP_DEN = _TK.get("kp", [1, 3])  # TEMP_KNOB
++
++    def _l2_prefetch_layer_start(self, num_tokens: int) -> None:
++        if self._TK.get("off"): return  # TEMP_KNOB
++        # During the attention-side aggregation (one CTA): a K-prefix of the
++        # [q,k,v,g] weight, since every TGV CTA streams its rows along K.
++        w = self.self_attn.fused_qkvg_proj.weight
++        if w.dtype == torch.bfloat16 and w.dim() == 2 and w.is_contiguous():
++            k = w.shape[1] * self._TEMP_KP_NUM // self._TEMP_KP_DEN // 64 * 64
++            self.mlp.l2_prefetch_ahead(num_tokens, (w[:, :k],))
++
++    def _l2_prefetch_after_attn_front(self, num_tokens: int) -> None:
++        # During the KDA recurrence: o_proj, then the routed MoE front.
++        o_w = self.self_attn.o_proj.weight
++        head = (o_w,) if o_w.dtype == torch.bfloat16 and o_w.is_contiguous() else ()
++        self.mlp.l2_prefetch_ahead(num_tokens, (*head, self.mlp.routed_front_weight))
++
+     def _run_self_attn(
+         self,
+         hidden_states: torch.Tensor,
+@@ -2678,6 +2876,8 @@
+                 # gather the normalized tensor consumed by attention.
+                 hidden_states = _sp_all_gather_rows(hidden_states)
+         else:
++            if self._l2_prefetch_start:
++                self._l2_prefetch_layer_start(hidden_states.shape[0])
+             hidden_states, prefix_sum = attn_res.forward(
+                 hidden_states,
+                 prefix_sum,

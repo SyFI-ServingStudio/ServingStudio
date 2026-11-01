@@ -1,0 +1,192 @@
+diff -ruN -x __pycache__ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_lcprefill_claude/best_tree/kernels/jit/csrc/attention/kda_conv_l2norm.cuh /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_mixed_claude/trial_1_tree_judged/kernels/jit/csrc/attention/kda_conv_l2norm.cuh
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_lcprefill_claude/best_tree/kernels/jit/csrc/attention/kda_conv_l2norm.cuh	2026-09-27 15:47:33.195171557 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_mixed_claude/trial_1_tree_judged/kernels/jit/csrc/attention/kda_conv_l2norm.cuh	2026-09-27 20:45:59.979955777 -0700
+@@ -147,7 +147,9 @@
+ }
+ 
+ /**
+- * \brief grid (dim / 256, strips of kWarps * kStrip tokens, num_seqs), kThreads threads.
++ * \brief grid (dim / 256, total strips of kWarps * kStrip tokens over all sequences), kThreads threads.
++ *        Block y maps to (sequence, strip) through the cumulative per-sequence strip counts, so a
++ *        mixed batch (one long chunk + many 1-token rows) launches only the strips that hold tokens.
+  * \param x          [T, dim] pre-conv packed qkv rows (row stride x_stride)
+  * \param w          [dim, 4] fp32 conv weights
+  * \param out        [3, T, group]: l2norm(q), l2norm(k), v
+@@ -166,13 +168,41 @@
+     int32_t num_tokens,
+     int32_t dim,
+     int32_t group,
++    int32_t num_seqs,
+     float eps) {
+   const int lane = threadIdx.x & 31;
+   const int warp = threadIdx.x >> 5;
+-  const int seq = blockIdx.z;
++  constexpr int kStripTokens = kWarps * kStrip;
++  // (sequence, strip) of this block: first sequence whose inclusive
++  // cumulative strip count exceeds blockIdx.y (warp-wide scan, 32 per step).
++  int seq = 0;
++  int strip = blockIdx.y;
++  if (num_seqs > 1) {
++    int base = 0;
++    seq = -1;
++    for (int j0 = 0; j0 < num_seqs; j0 += 32) {
++      const int j = j0 + lane;
++      const int cnt = j < num_seqs ? (query_start_loc[j + 1] - query_start_loc[j] + kStripTokens - 1) / kStripTokens : 0;
++      int incl = cnt;
++#pragma unroll
++      for (int o = 1; o < 32; o <<= 1) {
++        const int n = __shfl_up_sync(0xffffffffu, incl, o);
++        if (lane >= o) incl += n;
++      }
++      const unsigned hit = __ballot_sync(0xffffffffu, base + incl > static_cast<int>(blockIdx.y));
++      if (hit != 0) {
++        const int src = __ffs(hit) - 1;
++        seq = j0 + src;
++        strip = static_cast<int>(blockIdx.y) - base - __shfl_sync(0xffffffffu, incl - cnt, src);
++        break;
++      }
++      base += __shfl_sync(0xffffffffu, incl, 31);
++    }
++    if (seq < 0) return;
++  }
+   const int bos = query_start_loc[seq];
+   const int seqlen = query_start_loc[seq + 1] - bos;
+-  const int t0 = (blockIdx.y * kWarps + warp) * kStrip;
++  const int t0 = (strip * kWarps + warp) * kStrip;
+   if (t0 >= seqlen) return;
+ 
+   const int c = blockIdx.x * kWarpChannels + lane * kVec;
+@@ -249,7 +279,7 @@
+       const tvm::ffi::TensorView has_initial_state,
+       const tvm::ffi::TensorView query_start_loc,
+       const tvm::ffi::TensorView out,
+-      int64_t max_seqlen,
++      int64_t num_strips,
+       double eps,
+       bool has_init) {
+     using namespace host;
+@@ -289,13 +319,9 @@
+           << "kda_conv_l2norm: has_initial_state must be [num_seqs] bool";
+       init_ptr = static_cast<const uint8_t*>(has_initial_state.data_ptr());
+     }
+-    if (N == 0 || max_seqlen <= 0) return;
++    if (N == 0 || num_strips <= 0) return;
+ 
+-    const int64_t strip_tokens = kWarps * kStrip;
+-    const dim3 grid(
+-        static_cast<uint32_t>(dim / kWarpChannels),
+-        static_cast<uint32_t>((max_seqlen + strip_tokens - 1) / strip_tokens),
+-        static_cast<uint32_t>(N));
++    const dim3 grid(static_cast<uint32_t>(dim / kWarpChannels), static_cast<uint32_t>(num_strips), 1u);
+     LaunchKernel(grid, dim3(kThreads), device.unwrap())(
+         kda_conv_l2norm_kernel,
+         static_cast<const __nv_bfloat16*>(x.data_ptr()),
+@@ -310,6 +336,7 @@
+         static_cast<int32_t>(T),
+         static_cast<int32_t>(dim),
+         static_cast<int32_t>(group),
++        static_cast<int32_t>(N),
+         static_cast<float>(eps));
+   }
+ };
+diff -ruN -x __pycache__ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_lcprefill_claude/best_tree/kernels/ops/attention/fla/chunk_delta_h.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_mixed_claude/trial_1_tree_judged/kernels/ops/attention/fla/chunk_delta_h.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_lcprefill_claude/best_tree/kernels/ops/attention/fla/chunk_delta_h.py	2026-09-27 02:44:02.879742101 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_mixed_claude/trial_1_tree_judged/kernels/ops/attention/fla/chunk_delta_h.py	2026-09-27 20:15:10.675641389 -0700
+@@ -12,6 +12,7 @@
+ from sglang.kernels.ops.attention.kda_chunk_h import covered as kda_chunk_h_covered
+ from sglang.kernels.ops.attention.kda_chunk_h import kda_chunk_h
+ from sglang.kernels.ops.attention.fla.index import (
++    prepare_chunk_counts,
+     prepare_chunk_indices,
+     prepare_chunk_offsets,
+ )
+@@ -372,6 +373,26 @@
+             tl.store(p_ht, b_h4.to(p_ht.dtype.element_ty), boundary_check=(0, 1))
+ 
+ 
++def _use_cuda_scan(cu_seqlens, N: int, H: int, V: int, device_index: int) -> bool:
++    num_sms = get_multiprocessor_count(device_index)
++    ctas_per_seq = triton.cdiv(V, 16) * H
++    if ctas_per_seq * N <= num_sms:
++        return True
++    if cu_seqlens is None:
++        return False
++    # Mixed prefill-chunk + decode batch: a few long sequences plus many
++    # 1-chunk ones (decode rows riding along as 1-token extends). The CUDA scan
++    # is ~2.5x faster per chunk step on the long sequences but slower on the
++    # 1-chunk CTAs (one resident CTA per SM), so take it while the long CTAs
++    # fit in one wave and the serial-scan saving (~1.1 us per chunk of the
++    # longest sequence) outweighs the short-CTA cost (~1.2 us per 1-chunk
++    # sequence), both measured on B200. Reuses prepare_chunk_indices' host
++    # list, so no extra device->host read.
++    counts = prepare_chunk_counts(cu_seqlens, CHUNK_SIZE)
++    n_long = sum(1 for c in counts if c > 1)
++    return ctas_per_seq * n_long <= num_sms and 11 * max(counts) > 12 * (N - n_long)
++
++
+ def chunk_gated_delta_rule_fwd_h(
+     k: torch.Tensor,
+     w: torch.Tensor,
+@@ -423,7 +444,7 @@
+     # It derives the chunk offsets itself, so no host round trip either.
+     if (
+         k.is_cuda
+-        and triton.cdiv(V, 16) * N * H <= get_multiprocessor_count(k.device.index)
++        and _use_cuda_scan(cu_seqlens, N, H, V, k.device.index)
+         and kda_chunk_h_covered(
+             k=k,
+             w=w,
+diff -ruN -x __pycache__ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_lcprefill_claude/best_tree/kernels/ops/attention/fla/index.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_mixed_claude/trial_1_tree_judged/kernels/ops/attention/fla/index.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_lcprefill_claude/best_tree/kernels/ops/attention/fla/index.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_mixed_claude/trial_1_tree_judged/kernels/ops/attention/fla/index.py	2026-09-27 20:14:57.970697626 -0700
+@@ -14,14 +14,18 @@
+ 
+ 
+ @tensor_cache
++def prepare_chunk_counts(cu_seqlens: torch.LongTensor, chunk_size: int) -> list:
++    """Host list of per-sequence chunk counts (the one device->host read that
++    prepare_chunk_indices needs anyway; cached so kernel dispatch can reuse it)."""
++    return triton.cdiv(prepare_lens(cu_seqlens), chunk_size).tolist()
++
++
++@tensor_cache
+ def prepare_chunk_indices(
+     cu_seqlens: torch.LongTensor, chunk_size: int
+ ) -> torch.LongTensor:
+     indices = torch.cat(
+-        [
+-            torch.arange(n)
+-            for n in triton.cdiv(prepare_lens(cu_seqlens), chunk_size).tolist()
+-        ]
++        [torch.arange(n) for n in prepare_chunk_counts(cu_seqlens, chunk_size)]
+     )
+     return torch.stack([indices.eq(0).cumsum(0) - 1, indices], 1).to(cu_seqlens)
+ 
+diff -ruN -x __pycache__ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_lcprefill_claude/best_tree/kernels/ops/attention/kda_conv_l2norm.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_mixed_claude/trial_1_tree_judged/kernels/ops/attention/kda_conv_l2norm.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_lcprefill_claude/best_tree/kernels/ops/attention/kda_conv_l2norm.py	2026-09-27 15:47:48.438901650 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_mixed_claude/trial_1_tree_judged/kernels/ops/attention/kda_conv_l2norm.py	2026-09-27 20:45:59.981955611 -0700
+@@ -68,6 +68,15 @@
+     )
+ 
+ 
++def _num_strips(seq_lens_cpu: List[int], num_seqs: int) -> int:
++    """Grid rows: one per 128-token strip (4 warps x 32 tokens) of each
++    sequence; the kernel maps a row to its (sequence, strip)."""
++    if len(seq_lens_cpu) == num_seqs:
++        return sum((n + 127) // 128 for n in seq_lens_cpu)
++    # host lengths do not cover every sequence: bound each by the longest
++    return num_seqs * ((max(seq_lens_cpu, default=0) + 127) // 128)
++
++
+ def kda_conv_l2norm(
+     x: torch.Tensor,
+     weight: torch.Tensor,
+@@ -90,7 +99,7 @@
+         has_initial_state if has_initial_state is not None else cache_indices,
+         query_start_loc,
+         out,
+-        max(seq_lens_cpu) if len(seq_lens_cpu) > 0 else 0,
++        _num_strips(seq_lens_cpu, cache_indices.shape[0]),
+         eps,
+         has_initial_state is not None,
+     )

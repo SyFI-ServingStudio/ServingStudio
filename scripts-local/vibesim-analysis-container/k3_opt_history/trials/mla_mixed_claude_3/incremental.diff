@@ -1,0 +1,255 @@
+diff -ruN -x __pycache__ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_mixed_claude/trial_2_tree_judged/srt/layers/attention/trtllm_mla_backend.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_mixed_claude/trial_3_tree_judged/srt/layers/attention/trtllm_mla_backend.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_mixed_claude/trial_2_tree_judged/srt/layers/attention/trtllm_mla_backend.py	2026-09-28 12:59:54.483875533 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_mixed_claude/trial_3_tree_judged/srt/layers/attention/trtllm_mla_backend.py	2026-09-28 14:19:44.129394899 -0700
+@@ -1154,13 +1154,48 @@
+         layer: RadixAttention,
+         forward_batch: ForwardBatch,
+         first_req: int,
++        side_stream: bool = False,
+     ) -> torch.Tensor:
+         """Absorbed MLA decode for requests [first_req:] of an extend batch,
+         each with one new token whose latent KV is already in the cache.
+ 
+         q_nope_out [n, H, kv_lora_rank] and q_pe [n, H, rope] (post-RoPE) are
+         bf16; returns the latent attention output [n, H, kv_lora_rank].
++        side_stream: the caller overlaps this with the trtllm-gen causal pass,
++        so the decode kernel gets its own zeroed workspace.
+         """
++        _, block_kv_indices, seq_lens_k, max_seq = self.prepare_mixed_decode_rows(
++            forward_batch, first_req
++        )
++
++        # Unit-scale fp8 query, as the fp8 decode path builds it.
++        query = torch.cat([q_nope_out, q_pe], dim=-1)
++        query = query.clamp_(-448.0, 448.0).to(self.data_type).unsqueeze(1)
++        k_cache = self.token_to_kv_pool.get_key_buffer(layer.layer_id)
++        kv_cache = k_cache.view(-1, self.page_size, self.kv_cache_dim).unsqueeze(1)
++        shared_workspace = self.workspace_buffer
++        if side_stream:
++            self.workspace_buffer = get_buffer(
++                "trtllm_mla_mixed_decode_workspace",
++                lambda: torch.zeros(
++                    self.workspace_size, dtype=torch.int8, device=q_pe.device
++                ),
++            )
++        try:
++            raw_out = self._run_decode_kernel(
++                query=query,
++                kv_cache=kv_cache,
++                block_tables=block_kv_indices,
++                seq_lens=seq_lens_k,
++                max_seq_len=max_seq,
++                layer=layer,
++            )
++        finally:
++            self.workspace_buffer = shared_workspace
++        return raw_out.view(-1, layer.tp_q_head_num, self.kv_lora_rank)
++
++    def prepare_mixed_decode_rows(self, forward_batch: ForwardBatch, first_req: int):
++        """Build (once per batch) the block table of the decode rows [first_req:]."""
+         metadata = forward_batch.mixed_decode_metadata
+         if metadata is None or metadata[0] != first_req:
+             seq_lens = forward_batch.seq_lens[first_req:]
+@@ -1177,22 +1212,12 @@
+             )
+             metadata = (first_req, block_kv_indices, seq_lens.to(torch.int32), max_seq)
+             forward_batch.mixed_decode_metadata = metadata
+-        _, block_kv_indices, seq_lens_k, max_seq = metadata
++        return metadata
+ 
+-        # Unit-scale fp8 query, as the fp8 decode path builds it.
+-        query = torch.cat([q_nope_out, q_pe], dim=-1)
+-        query = query.clamp_(-448.0, 448.0).to(self.data_type).unsqueeze(1)
+-        k_cache = self.token_to_kv_pool.get_key_buffer(layer.layer_id)
+-        kv_cache = k_cache.view(-1, self.page_size, self.kv_cache_dim).unsqueeze(1)
+-        raw_out = self._run_decode_kernel(
+-            query=query,
+-            kv_cache=kv_cache,
+-            block_tables=block_kv_indices,
+-            seq_lens=seq_lens_k,
+-            max_seq_len=max_seq,
+-            layer=layer,
+-        )
+-        return raw_out.view(-1, layer.tp_q_head_num, self.kv_lora_rank)
++    def can_overlap_mixed_decode_rows(self) -> bool:
++        # the decode rows only need their own workspace to run next to the
++        # causal pass (forward_mixed_decode_rows(side_stream=True))
++        return self.backend == "trtllm-gen"
+ 
+     def can_overlap_causal_with_prefix(self) -> bool:
+         # Only the cute-dsl prefix pass may run next to the causal trtllm-gen
+diff -ruN -x __pycache__ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_mixed_claude/trial_2_tree_judged/srt/models/deepseek_common/attention_forward_methods/forward_mha.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_mixed_claude/trial_3_tree_judged/srt/models/deepseek_common/attention_forward_methods/forward_mha.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_mixed_claude/trial_2_tree_judged/srt/models/deepseek_common/attention_forward_methods/forward_mha.py	2026-09-28 13:14:55.549768388 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_mixed_claude/trial_3_tree_judged/srt/models/deepseek_common/attention_forward_methods/forward_mha.py	2026-09-28 14:19:44.129394899 -0700
+@@ -399,6 +399,17 @@
+         # The causal pass covers every row; the prefix passes only the
+         # prefill rows (all rows without a decode split).
+         q_prefix = q if decode_split is None else q[:num_prefill_tokens]
++        decode_output = decode_done = None
++        if (
++            decode_split is not None
++            and not has_extend_prefix
++            and self._overlap_mixed_decode_rows(backend)
++        ):
++            # The memory-bound decode rows run beside the compute-bound causal
++            # pass instead of after it.
++            decode_output, decode_done = self._mixed_decode_rows_attn_on_alt_stream(
++                backend, q_decode, forward_batch, num_prefill_reqs
++            )
+         if has_extend_prefix and self._overlap_causal_with_prefix(backend):
+             forward_batch.set_attn_attend_prefix_cache(True)
+             attn_output = self._chunked_prefix_attn_mha(
+@@ -424,9 +435,12 @@
+                 )
+ 
+         if decode_split is not None:
+-            decode_output = self._mixed_decode_rows_attn(
+-                backend, q_decode, forward_batch, num_prefill_reqs
+-            )
++            if decode_done is not None:
++                torch.cuda.current_stream().wait_event(decode_done)
++            else:
++                decode_output = self._mixed_decode_rows_attn(
++                    backend, q_decode, forward_batch, num_prefill_reqs
++                )
+             hidden = self.num_local_heads * self.v_head_dim
+             attn_output = torch.cat(
+                 [
+@@ -740,18 +754,53 @@
+         q: torch.Tensor,
+         forward_batch: ForwardBatch,
+         first_req: int,
++        side_stream: bool = False,
+     ) -> torch.Tensor:
+         """Absorbed MLA attention of the decode rows q [n, H, qk_head_dim]
+         (post-RoPE, bf16) over their cached latent KV -> [n, H, v_head_dim]."""
+         q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
+         q_nope_out = torch.bmm(q_nope.transpose(0, 1), self.w_kc).transpose(0, 1)
+         latent = backend.forward_mixed_decode_rows(
+-            q_nope_out, q_pe, self.attn_mqa, forward_batch, first_req
++            q_nope_out,
++            q_pe,
++            self.attn_mqa,
++            forward_batch,
++            first_req,
++            **({"side_stream": True} if side_stream else {}),
+         )
+         output = latent.new_empty((latent.shape[0], self.num_local_heads, self.v_head_dim))
+         torch.bmm(latent.transpose(0, 1), self.w_vc, out=output.transpose(0, 1))
+         return output
+ 
++    def _mixed_decode_rows_attn_on_alt_stream(
++        self: DeepseekV2AttentionMLA,
++        backend,
++        q: torch.Tensor,
++        forward_batch: ForwardBatch,
++        first_req: int,
++    ) -> tuple[torch.Tensor, torch.cuda.Event]:
++        # metadata allocated on the main stream: it outlives this layer
++        backend.prepare_mixed_decode_rows(forward_batch, first_req)
++        current_stream = torch.cuda.current_stream()
++        self.alt_stream.wait_stream(current_stream)
++        with torch.cuda.stream(self.alt_stream):
++            output = self._mixed_decode_rows_attn(
++                backend, q, forward_batch, first_req, side_stream=True
++            )
++        q.record_stream(self.alt_stream)
++        output.record_stream(current_stream)
++        return output, self.alt_stream.record_event()
++
++    def _overlap_mixed_decode_rows(self: DeepseekV2AttentionMLA, backend) -> bool:
++        if (
++            self.alt_stream is None
++            or torch.cuda.is_current_stream_capturing()
++            or __import__("os").environ.get("K3X_NODECOVL")
++        ):
++            return False
++        can_overlap = getattr(backend, "can_overlap_mixed_decode_rows", None)
++        return can_overlap is not None and can_overlap()
++
+     def _overlap_causal_with_prefix(self: DeepseekV2AttentionMLA, backend) -> bool:
+         if self.alt_stream is None or torch.cuda.is_current_stream_capturing():
+             return False
+diff -ruN -x __pycache__ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_mixed_claude/trial_2_tree_judged/srt/models/kimi_k3.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_mixed_claude/trial_3_tree_judged/srt/models/kimi_k3.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_mixed_claude/trial_2_tree_judged/srt/models/kimi_k3.py	2026-09-24 05:40:30.721083030 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_mixed_claude/trial_3_tree_judged/srt/models/kimi_k3.py	2026-09-28 14:13:52.679431981 -0700
+@@ -1229,13 +1229,17 @@
+         finally:
+             route_quant_handoff.clear()
+ 
+-    def _forward_shared(self, gate_up, shared_output):
++    def _forward_shared(self, gate_up, shared_output, accumulate=False):
+         shared = self.shared_experts
+         if TYPE_CHECKING:
+             assert shared is not None and isinstance(
+                 shared.down_proj.weight, torch.Tensor
+             )
+         assert shared is not None
++        if accumulate:
++            # beta=1 epilogue in place: shared_output += act @ W^T
++            shared_output.addmm_(shared.act_fn(gate_up), shared.down_proj.weight.t())
++            return
+         _k3_bf16_gemm(
+             shared.act_fn(gate_up),
+             shared.down_proj.weight,
+@@ -1268,6 +1272,27 @@
+             )
+ 
+         num_tokens, hidden_size = hidden_states.shape
++        # Large-m tail fold: the shared down GEMM and then the latent up GEMM
++        # accumulate into prefix_sum in place (beta=1 epilogues; consumed
++        # here, dead afterwards), so the 3-way tail add pass disappears.
++        # Only valid when the shared output is not all-reduced (a folded
++        # prefix_sum would be summed tp times).
++        up_weight = getattr(self.routed_expert_up_proj, "weight", None)
++        fold_tail = (
++            prefix_sum is not None
++            and num_tokens > 16
++            and self.tp_size == 1
++            and self.alt_stream is not None
++            and not k3_ar_fusion.enabled()
++            and not (_is_hip and _aiter_k3_opt)
++            and prefix_sum.dtype == torch.bfloat16
++            and prefix_sum.is_contiguous()
++            and tuple(prefix_sum.shape) == (num_tokens, hidden_size)
++            and isinstance(up_weight, torch.Tensor)
++            and up_weight.dtype == torch.bfloat16
++            and tuple(up_weight.shape) == (hidden_size, self.moe_hidden_size)
++            and getattr(self.routed_expert_up_proj, "bias", None) is None
++        )
+         fused = _k3_bf16_gemm(
+             hidden_states,
+             self._front_w,
+@@ -1362,7 +1387,11 @@
+                 current_stream = torch.cuda.current_stream()
+                 self.alt_stream.wait_stream(current_stream)
+                 with torch.cuda.stream(self.alt_stream):
+-                    self._forward_shared(gate_up, shared_output)
++                    self._forward_shared(
++                        gate_up,
++                        prefix_sum if fold_tail else shared_output,
++                        accumulate=fold_tail,
++                    )
+                 self._forward_routed(hidden_states, router_logits, routed_input, latent)
+                 current_stream.wait_stream(self.alt_stream)
+             else:
+@@ -1384,7 +1413,8 @@
+         shared_output = buf[latent_numel:].view(num_tokens, hidden_size)
+         if not fused_norm:
+             latent = self._latent_norm(latent)
+-        up_weight = getattr(self.routed_expert_up_proj, "weight", None)
++        if fold_tail:
++            return prefix_sum.addmm_(latent, up_weight.t())
+         if (
+             isinstance(up_weight, torch.Tensor)
+             and up_weight.dtype == torch.bfloat16
+@@ -1411,7 +1441,8 @@
+     ) -> torch.Tensor:
+         """A pending prefix_sum is always consumed here: folded into the
+         3-way JIT tail add when covered, plain adds otherwise (bit-identical
+-        either way).
++        either way); at large m on a single rank the fused path accumulates
++        the tail GEMMs into it in place, so callers must not reuse it.
+ 
+         Under DP attention with TP-sharded experts (a2a none, forward_batch
+         given) the experts run on the DP-gathered global batch — the internal

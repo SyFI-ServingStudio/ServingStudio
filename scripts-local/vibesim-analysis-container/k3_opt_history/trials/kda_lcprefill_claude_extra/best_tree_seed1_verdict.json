@@ -1,0 +1,190 @@
+{
+  "agent_container": "recheck_kda_lcprefill_claude_seed1",
+  "case_key": "fff12ba674ab",
+  "points": {
+    "1,16384pf245760": {
+      "before_us": 8906.880378723145,
+      "before_sigma_us": 37.05928523071199,
+      "after_us": 8295.743942260742,
+      "after_lat": [
+        8295.743942260742,
+        8357.248306274414,
+        8242.560386657715,
+        8225.919723510742,
+        8350.943565368652
+      ],
+      "improvement": 0.0686,
+      "noise_frac_3sigma": 0.0125,
+      "correctness": {
+        "max_abs_err": 0.125,
+        "max_rel_err": 0.0070921981791660605,
+        "mean_rel_err": 0.0016372200334444642,
+        "nan": false,
+        "rows": 16384,
+        "rows_over_tol": 0,
+        "frac_rows_over_tol": 0.0,
+        "p99_row_rel_err": 0.007092198356986046,
+        "rule": "prefill_rowwise(frac_rows_over_tol<=0.005,p99<=tol,mean<=0.01)",
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "latency_mode": "eager",
+      "primary": true,
+      "mixed": "pf245760"
+    },
+    "1,32768pf229376": {
+      "before_us": 17677.31285095215,
+      "before_sigma_us": 103.93325212779946,
+      "after_us": 16442.399978637695,
+      "after_lat": [
+        16381.088256835938,
+        16395.519256591797,
+        16442.399978637695,
+        16446.687698364258,
+        16467.23175048828
+      ],
+      "improvement": 0.0699,
+      "noise_frac_3sigma": 0.0176,
+      "correctness": {
+        "max_abs_err": 0.125,
+        "max_rel_err": 0.007352940743944662,
+        "mean_rel_err": 0.0016366647323593497,
+        "nan": false,
+        "rows": 32768,
+        "rows_over_tol": 0,
+        "frac_rows_over_tol": 0.0,
+        "p99_row_rel_err": 0.007352940738201141,
+        "rule": "prefill_rowwise(frac_rows_over_tol<=0.005,p99<=tol,mean<=0.01)",
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "latency_mode": "eager",
+      "primary": false,
+      "mixed": "pf229376"
+    },
+    "1,16384pf131072": {
+      "before_us": 9119.808197021484,
+      "before_sigma_us": 124.36727903064943,
+      "after_us": 8344.927787780762,
+      "after_lat": [
+        8170.592308044434,
+        8357.0556640625,
+        8344.927787780762,
+        8256.99234008789,
+        8357.248306274414
+      ],
+      "improvement": 0.085,
+      "noise_frac_3sigma": 0.0409,
+      "correctness": {
+        "max_abs_err": 0.125,
+        "max_rel_err": 0.0070921981791660605,
+        "mean_rel_err": 0.0016372200334444642,
+        "nan": false,
+        "rows": 16384,
+        "rows_over_tol": 0,
+        "frac_rows_over_tol": 0.0,
+        "p99_row_rel_err": 0.007092198356986046,
+        "rule": "prefill_rowwise(frac_rows_over_tol<=0.005,p99<=tol,mean<=0.01)",
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "latency_mode": "eager",
+      "primary": false,
+      "mixed": "pf131072"
+    },
+    "1,32768pf131072": {
+      "before_us": 17633.407592773438,
+      "before_sigma_us": 92.7336267724564,
+      "after_us": 16473.27995300293,
+      "after_lat": [
+        16488.60740661621,
+        16366.783142089844,
+        16658.655166625977,
+        16330.976486206055,
+        16473.27995300293
+      ],
+      "improvement": 0.0658,
+      "noise_frac_3sigma": 0.0158,
+      "correctness": {
+        "max_abs_err": 0.125,
+        "max_rel_err": 0.007352940743944662,
+        "mean_rel_err": 0.0016366647323593497,
+        "nan": false,
+        "rows": 32768,
+        "rows_over_tol": 0,
+        "frac_rows_over_tol": 0.0,
+        "p99_row_rel_err": 0.007352940738201141,
+        "rule": "prefill_rowwise(frac_rows_over_tol<=0.005,p99<=tol,mean<=0.01)",
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "latency_mode": "eager",
+      "primary": false,
+      "mixed": "pf131072"
+    }
+  },
+  "driver_sha": "ff88e72e3180",
+  "pristine_points": {
+    "1,16384pf245760": {
+      "median": 8906.880378723145,
+      "sigma": 37.05928523071199
+    },
+    "1,32768pf229376": {
+      "median": 17677.31285095215,
+      "sigma": 103.93325212779946
+    },
+    "1,16384pf131072": {
+      "median": 9119.808197021484,
+      "sigma": 124.36727903064943
+    },
+    "1,32768pf131072": {
+      "median": 17633.407592773438,
+      "sigma": 92.7336267724564
+    }
+  },
+  "changed_files": [
+    "kernels/jit/csrc/attention/kda_fused_decode.cuh",
+    "kernels/jit/csrc/attention/kda_conv_l2norm.cuh",
+    "kernels/jit/csrc/attention/kda_chunk_h.cuh",
+    "kernels/jit/csrc/kimi_k3/situ_and_mul.cuh",
+    "kernels/jit/csrc/kimi_k3/attn_res/fused_tma.cuh",
+    "kernels/ops/attention/kda_chunk_h.py",
+    "kernels/ops/attention/kda_fused_decode.py",
+    "kernels/ops/attention/kda_conv_l2norm.py",
+    "kernels/ops/kimi_k3/attn_res.py",
+    "kernels/ops/mamba/causal_conv1d_triton.py",
+    "kernels/ops/attention/fla/fused_norm_gate.py",
+    "kernels/ops/attention/fla/kda.py",
+    "kernels/ops/attention/fla/fused_recurrent.py",
+    "kernels/ops/attention/fla/l2norm.py",
+    "kernels/ops/attention/fla/chunk_intra.py",
+    "kernels/ops/attention/fla/chunk_delta_h.py",
+    "kernels/ops/attention/linear/kda_ptx_prefill/__init__.py",
+    "srt/models/kimi_k3.py",
+    "srt/layers/attn_residual.py",
+    "srt/layers/attention/linear/kda_backend.py",
+    "srt/layers/attention/linear/kernels/kda_triton.py",
+    "srt/layers/attention/linear/kernels/kda_ptx.py"
+  ],
+  "diff_patch": "/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_lcprefill_claude/best_tree_judged.patch",
+  "diff_lines": 2862,
+  "gates": {
+    "correctness": true,
+    "latency_improved": true,
+    "no_secondary_regression": true
+  },
+  "required_improvement": 0.0125,
+  "before_us": 8906.880378723145,
+  "latency_us": 8295.743942260742,
+  "recovered_frac": 0.0686,
+  "correctness": {
+    "pass": true
+  },
+  "golden_dir": "/raid/yilegu/eval_goldens/golden_k3_fff12ba674ab",
+  "verdict": "PASS",
+  "reason": "all gates passed"
+}

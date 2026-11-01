@@ -1,0 +1,108 @@
+diff -ruN -x __pycache__ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_verify_claude/trial_1_tree_judged/srt/models/kimi_k3.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_verify_claude/trial_2_tree_judged/srt/models/kimi_k3.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_verify_claude/trial_1_tree_judged/srt/models/kimi_k3.py	2026-09-28 04:01:21.673608623 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_verify_claude/trial_2_tree_judged/srt/models/kimi_k3.py	2026-09-28 05:01:23.744091604 -0700
+@@ -1228,14 +1228,37 @@
+             )
+ 
+         num_tokens, hidden_size = hidden_states.shape
+-        fused = _k3_bf16_gemm(
+-            hidden_states,
+-            self._front_w,
+-            out_dtype=torch.float32 if self._front_fp32 else None,
+-        )
+-        gate_up, router_logits, routed_input = torch.split(
+-            fused, self._front_sizes, dim=-1
++        _xm = int(__import__("os").environ.get("K3X_SH", "0"))
++        _split_front = (
++            _xm in (6, 7)
++            and self.alt_stream is not None
++            and not k3_ar_fusion.enabled()
++            and len(self._front_sizes) == 3
+         )
++        if _split_front:
++            _g = self._front_sizes[0]
++            _od = torch.float32 if self._front_fp32 else None
++            _cs = torch.cuda.current_stream()
++            self.alt_stream.wait_stream(_cs)
++            with torch.cuda.stream(self.alt_stream):
++                if _xm == 7:
++                    torch._C._set_sm_carveout_experimental(int(__import__("os").environ.get("K3X_CO", "40")))
++                gate_up = _k3_bf16_gemm(hidden_states, self._front_w[:_g], out_dtype=_od)
++                if _xm == 7:
++                    torch._C._set_sm_carveout_experimental(None)
++            _rest = _k3_bf16_gemm(hidden_states, self._front_w[_g:], out_dtype=_od)
++            router_logits, routed_input = torch.split(
++                _rest, self._front_sizes[1:], dim=-1
++            )
++        else:
++            fused = _k3_bf16_gemm(
++                hidden_states,
++                self._front_w,
++                out_dtype=torch.float32 if self._front_fp32 else None,
++            )
++            gate_up, router_logits, routed_input = torch.split(
++                fused, self._front_sizes, dim=-1
++            )
+         if num_tokens > 1 and _is_hip and not _aiter_k3_opt:
+             router_logits = router_logits.contiguous()
+         if self._moe_front_needs_dense_bf16:
+@@ -1318,7 +1341,17 @@
+                     prefix_sum,
+                 )
+         else:  # single collective over the flat [latent | shared] pair
+-            if self.alt_stream is not None:
++            if _split_front:
++                current_stream = torch.cuda.current_stream()
++                with torch.cuda.stream(self.alt_stream):
++                    if _xm == 7:
++                        torch._C._set_sm_carveout_experimental(int(__import__("os").environ.get("K3X_CO", "40")))
++                    self._forward_shared(gate_up, shared_output)
++                    if _xm == 7:
++                        torch._C._set_sm_carveout_experimental(None)
++                self._forward_routed(hidden_states, router_logits, routed_input, latent)
++                current_stream.wait_stream(self.alt_stream)
++            elif self.alt_stream is not None and _xm == 0:
+                 # the shared experts write a disjoint slice of buf: overlap
+                 # them with the routed MoE, join before the collective
+                 current_stream = torch.cuda.current_stream()
+@@ -1327,6 +1360,40 @@
+                     self._forward_shared(gate_up, shared_output)
+                 self._forward_routed(hidden_states, router_logits, routed_input, latent)
+                 current_stream.wait_stream(self.alt_stream)
++            elif self.alt_stream is not None and _xm in (1, 2):
++                # carveout on the shared down GEMM
++                current_stream = torch.cuda.current_stream()
++                self.alt_stream.wait_stream(current_stream)
++                with torch.cuda.stream(self.alt_stream):
++                    torch._C._set_sm_carveout_experimental(int(__import__("os").environ.get("K3X_CO", "40")))
++                    self._forward_shared(gate_up, shared_output)
++                    torch._C._set_sm_carveout_experimental(None)
++                self._forward_routed(hidden_states, router_logits, routed_input, latent)
++                current_stream.wait_stream(self.alt_stream)
++            elif self.alt_stream is not None and _xm == 3:
++                # routed issued first in host order
++                current_stream = torch.cuda.current_stream()
++                self.alt_stream.wait_stream(current_stream)
++                self._forward_routed(hidden_states, router_logits, routed_input, latent)
++                with torch.cuda.stream(self.alt_stream):
++                    self._forward_shared(gate_up, shared_output)
++                current_stream.wait_stream(self.alt_stream)
++            elif self.alt_stream is not None and _xm == 4:
++                # situ on alt early; shared down on alt only after routed is issued
++                current_stream = torch.cuda.current_stream()
++                self.alt_stream.wait_stream(current_stream)
++                shared = self.shared_experts
++                with torch.cuda.stream(self.alt_stream):
++                    act = shared.act_fn(gate_up)
++                self._forward_routed(hidden_states, router_logits, routed_input, latent)
++                ev = current_stream.record_event()
++                with torch.cuda.stream(self.alt_stream):
++                    _k3_bf16_gemm(act, shared.down_proj.weight, out=shared_output)
++                current_stream.wait_stream(self.alt_stream)
++            elif _xm == 5:
++                # serial (no overlap)
++                self._forward_routed(hidden_states, router_logits, routed_input, latent)
++                self._forward_shared(gate_up, shared_output)
+             else:
+                 self._forward_shared(gate_up, shared_output)
+                 self._forward_routed(hidden_states, router_logits, routed_input, latent)

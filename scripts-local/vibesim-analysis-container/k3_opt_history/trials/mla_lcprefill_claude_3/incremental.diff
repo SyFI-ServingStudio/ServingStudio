@@ -1,0 +1,402 @@
+diff -ruN -x __pycache__ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_lcprefill_claude/trial_2_tree_judged/kernels/ops/attention/cute_dsl_fmha_fp8.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_lcprefill_claude/trial_3_tree_judged/kernels/ops/attention/cute_dsl_fmha_fp8.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_lcprefill_claude/trial_2_tree_judged/kernels/ops/attention/cute_dsl_fmha_fp8.py	2026-09-27 05:30:25.778007709 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_lcprefill_claude/trial_3_tree_judged/kernels/ops/attention/cute_dsl_fmha_fp8.py	2026-09-27 07:21:17.340293932 -0700
+@@ -15,6 +15,7 @@
+ import torch
+ import triton
+ import triton.language as tl
++from triton.language.extra import libdevice
+ 
+ # The kernel runs one 256-row Q tile (two 128-row softmax warpgroups) per CTA,
+ # one CTA per SM, and every CTA of a non-causal launch walks the full KV.
+@@ -104,6 +105,105 @@
+     )
+ 
+ 
++@functools.lru_cache(maxsize=64)
++def _chunk_split_indptrs(num_q: int, chunk_lens: tuple, chunk_splits: tuple, device):
++    """Per chunk, the same KV splits _split_indptrs gives a launch over just
++    that chunk, laid out back to back so one launch covers every chunk."""
++    cu_kv, split_off, max_step, start = [0], [0], 0, 0
++    for n, splits in zip(chunk_lens, chunk_splits):
++        step = -(-n // (splits * 128)) * 128 if splits > 1 else n
++        max_step = max(max_step, step)
++        cu_kv += [start + min((j + 1) * step, n) for j in range(splits)]
++        split_off.append(split_off[-1] + splits)
++        start += n
++    cu_q = [i * num_q for i in range(split_off[-1] + 1)]
++    return (
++        torch.tensor(cu_q, dtype=torch.int32, device=device),
++        torch.tensor(cu_kv, dtype=torch.int32, device=device),
++        torch.tensor(split_off, dtype=torch.int32, device=device),
++        max_step,
++    )
++
++
++@triton.jit
++def _merge_prefix_chunks_kernel(
++    o_ptr,  # [S * T, H, D] bf16 split partials
++    lse_ptr,  # [S * T, H] fp32, log2 domain (as the kernel writes it)
++    split_off_ptr,  # [C + 1] int32, first split of each chunk
++    acc_ptr,  # [T, H, D] bf16 running state before the prefix
++    acc_lse_ptr,  # [T, H] fp32
++    out_ptr,  # [T, H, D] bf16
++    T,
++    H: tl.constexpr,
++    D: tl.constexpr,
++    C: tl.constexpr,
++    MAX_SPC: tl.constexpr,
++    BLOCK_H: tl.constexpr,
++):
++    # Per chunk: rebuild the chunk state from its splits exactly like
++    # _merge_kv_splits_kernel (rounded to bf16), then fold it into the running
++    # state exactly like merge_state (merge_attn_states.cu: natural exp/log,
++    # bf16 output) -- the same arithmetic as one launch + merge per chunk.
++    t = tl.program_id(0).to(tl.int64)
++    offs_h = tl.arange(0, BLOCK_H)
++    offs_d = tl.arange(0, D)
++    mask_h = offs_h < H
++    a = tl.load(
++        acc_ptr + (t * H + offs_h[:, None]) * D + offs_d[None, :],
++        mask=mask_h[:, None],
++        other=0.0,
++    ).to(tl.float32)
++    a_lse = tl.load(acc_lse_ptr + t * H + offs_h, mask=mask_h, other=0.0)
++    for c in tl.static_range(C):
++        s0 = tl.load(split_off_ptr + c)
++        n_split = tl.load(split_off_ptr + c + 1) - s0
++        m = tl.full([BLOCK_H], float("-inf"), tl.float32)
++        for j in tl.static_range(MAX_SPC):
++            lse = tl.load(
++                lse_ptr + ((s0 + j) * T + t) * H + offs_h,
++                mask=mask_h & (j < n_split),
++                other=float("-inf"),
++            )
++            m = tl.maximum(m, lse)
++        m_safe = tl.where(m == float("-inf"), 0.0, m)
++        o_acc = tl.zeros([BLOCK_H, D], dtype=tl.float32)
++        den = tl.zeros([BLOCK_H], dtype=tl.float32)
++        for j in tl.static_range(MAX_SPC):
++            lse = tl.load(
++                lse_ptr + ((s0 + j) * T + t) * H + offs_h,
++                mask=mask_h & (j < n_split),
++                other=float("-inf"),
++            )
++            w = tl.exp2(lse - m_safe)
++            o = tl.load(
++                o_ptr + (((s0 + j) * T + t) * H + offs_h[:, None]) * D
++                + offs_d[None, :],
++                mask=mask_h[:, None] & (j < n_split),
++                other=0.0,
++            )
++            o_acc += w[:, None] * o.to(tl.float32)
++            den += w
++        has = den > 0
++        p = (o_acc / tl.where(has, den, 1.0)[:, None]).to(tl.bfloat16).to(tl.float32)
++        p_lse = tl.where(has, m_safe + tl.log2(tl.where(has, den, 1.0)), float("-inf"))
++
++        p_lse = tl.where(tl.abs(p_lse) == float("inf"), float("-inf"), p_lse)
++        s_lse = tl.where(tl.abs(a_lse) == float("inf"), float("-inf"), a_lse)
++        max_lse = tl.maximum(p_lse, s_lse)
++        p_se = libdevice.exp(p_lse - max_lse)
++        s_se = libdevice.exp(s_lse - max_lse)
++        out_se = p_se + s_se
++        p_scale = p_se / out_se
++        s_scale = s_se / out_se
++        a = (p * p_scale[:, None] + a * s_scale[:, None]).to(tl.bfloat16).to(tl.float32)
++        a_lse = libdevice.log(out_se) + max_lse
++    tl.store(
++        out_ptr + (t * H + offs_h[:, None]) * D + offs_d[None, :],
++        a.to(out_ptr.dtype.element_ty),
++        mask=mask_h[:, None],
++    )
++
++
+ @functools.lru_cache(maxsize=None)
+ def is_supported() -> bool:
+     # ex2 emulation below is tuned for CC 10.0; other Blackwell parts untested.
+@@ -505,3 +605,71 @@
+         max_kv_len=max_kv_len,
+         kernel_fn=kernel_fn,
+     )
++
++
++def cute_dsl_fmha_fp8_prefix_chunks(
++    *,
++    q: torch.Tensor,
++    k: torch.Tensor,
++    v: torch.Tensor,
++    chunk_lens: tuple,
++    accum_out: torch.Tensor,
++    accum_lse: torch.Tensor,
++    sm_scale: float,
++    v_scale: float,
++) -> torch.Tensor:
++    """Attend one request's Q to its whole chunked prefix in a single
++    non-causal launch and fold every chunk into ``accum_out``/``accum_lse``
++    in chunk order. Matches running each chunk through
++    ``cute_dsl_fmha_fp8_ragged_prefill`` followed by ``merge_state``.
++    q/k: [tokens, heads, d] fp8, v: [tokens, heads, dv] fp8, chunks packed
++    back to back in k/v. Returns the merged bf16 [tokens_q, heads, dv]."""
++    from flashinfer.attention.cute_dsl.fmha import cute_dsl_fmha_ragged_prefill
++
++    kernel_fn = _compile(q.shape[1], q.shape[2], v.shape[2], False)
++    num_q, num_heads = q.shape[0], q.shape[1]
++    num_ctas = -(-num_q // _CTA_Q_ROWS) * num_heads
++    num_sms = _num_sms(q.device.index)
++    chunk_splits = tuple(_num_kv_splits(num_ctas, n, num_sms) for n in chunk_lens)
++    cu_q, cu_kv, split_off, max_step = _chunk_split_indptrs(
++        num_q, tuple(chunk_lens), chunk_splits, q.device
++    )
++    splits = sum(chunk_splits)
++    q_rep = q.new_empty((splits, *q.shape))
++    for i in range(splits):
++        q_rep[i].copy_(q)
++    q_rep = q_rep.view(-1, *q.shape[1:])
++    o_rep = accum_out.new_empty((splits * num_q, num_heads, v.shape[-1]))
++    lse_rep = accum_lse.new_empty((splits * num_q, num_heads))
++    cute_dsl_fmha_ragged_prefill(
++        q=q_rep,
++        k=k,
++        v=v,
++        o=o_rep,
++        qo_indptr=cu_q,
++        kv_indptr=cu_kv,
++        is_causal=False,
++        sm_scale=sm_scale,
++        lse=lse_rep,
++        scale_v=v_scale,
++        max_qo_len=num_q,
++        max_kv_len=max_step,
++        kernel_fn=kernel_fn,
++    )
++    out = torch.empty_like(accum_out)
++    _merge_prefix_chunks_kernel[(num_q,)](
++        o_rep,
++        lse_rep,
++        split_off,
++        accum_out,
++        accum_lse,
++        out,
++        num_q,
++        H=num_heads,
++        D=v.shape[-1],
++        C=len(chunk_lens),
++        MAX_SPC=max(chunk_splits),
++        BLOCK_H=triton.next_power_of_2(num_heads),
++        num_warps=4,
++    )
++    return out
+diff -ruN -x __pycache__ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_lcprefill_claude/trial_2_tree_judged/srt/layers/attention/trtllm_mla_backend.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_lcprefill_claude/trial_3_tree_judged/srt/layers/attention/trtllm_mla_backend.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_lcprefill_claude/trial_2_tree_judged/srt/layers/attention/trtllm_mla_backend.py	2026-09-27 03:30:57.003959116 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_lcprefill_claude/trial_3_tree_judged/srt/layers/attention/trtllm_mla_backend.py	2026-09-27 07:07:32.045913585 -0700
+@@ -1225,17 +1225,37 @@
+             return None
+         return mla_kv_pack_quantize_fp8(k_nope, k_pe, v, enable_pdl=False)
+ 
++    def can_merge_prefix_chunks(self, forward_batch: ForwardBatch) -> bool:
++        """Whether a single-request chunked prefix can pack every chunk into
++        one fp8 buffer and run one prefix attention launch. Bounded to twice
++        the chunk capacity: fp8 K/V take 5/8 of the bf16 bytes per token."""
++        prefix_lens = forward_batch.extend_prefix_lens_cpu
++        return (
++            self._packs_fp8_prefill_kv(forward_batch)
++            and forward_batch.batch_size == 1
++            and forward_batch.num_prefix_chunks is not None
++            and forward_batch.num_prefix_chunks > 1
++            and prefix_lens is not None
++            and sum(prefix_lens) <= 2 * forward_batch.get_max_chunk_capacity()
++            and not any(forward_batch.prefix_chunk_has_zero_kv)
++        )
++
+     def pack_prefix_chunk_kv(
+         self,
+         k_nope: torch.Tensor,
+         k_pe: torch.Tensor,
+         v: torch.Tensor,
++        k_out: Optional[torch.Tensor] = None,
++        v_out: Optional[torch.Tensor] = None,
+     ) -> tuple[torch.Tensor, torch.Tensor]:
+         """Pack a materialized prefix chunk into contiguous K/V for the ragged
+         kernel: unit-scale fp8 in one launch for the fp8 KV cache, else the
+-        bf16 concat."""
++        bf16 concat. ``k_out``/``v_out`` (fp8 only) receive the packed rows."""
+         if self.data_type == torch.float8_e4m3fn:
+-            return mla_kv_pack_quantize_fp8(k_nope, k_pe, v, enable_pdl=False)
++            return mla_kv_pack_quantize_fp8(
++                k_nope, k_pe, v, k_out=k_out, v_out=v_out, enable_pdl=False
++            )
++        assert k_out is None and v_out is None
+         k = k_nope.new_empty(
+             (k_nope.shape[0], k_nope.shape[1], k_nope.shape[2] + k_pe.shape[-1])
+         )
+@@ -1865,6 +1885,16 @@
+             assert q_rope is None
+             assert k_rope is None
+             chunk_idx = forward_batch.prefix_chunk_idx
++            if forward_batch.prefix_merged_kv_meta is not None:
++                seq_lens_kv, cum_seq_lens_kv, max_kv_len = (
++                    forward_batch.prefix_merged_kv_meta
++                )
++                has_zero_kv = False
++            else:
++                seq_lens_kv = forward_batch.prefix_chunk_seq_lens[chunk_idx]
++                cum_seq_lens_kv = forward_batch.prefix_chunk_cu_seq_lens[chunk_idx]
++                max_kv_len = forward_batch.prefix_chunk_max_seq_lens[chunk_idx]
++                has_zero_kv = forward_batch.prefix_chunk_has_zero_kv[chunk_idx]
+ 
+             out = torch.empty(
+                 q.shape[0],
+@@ -1881,9 +1911,9 @@
+                 batch_size=forward_batch.batch_size,
+                 cum_seq_lens_q=self.forward_prefill_metadata.cum_seq_lens,
+                 max_q_len=self.forward_prefill_metadata.max_seq_len,
+-                seq_lens_kv=forward_batch.prefix_chunk_seq_lens[chunk_idx],
+-                cum_seq_lens_kv=forward_batch.prefix_chunk_cu_seq_lens[chunk_idx],
+-                max_kv_len=forward_batch.prefix_chunk_max_seq_lens[chunk_idx],
++                seq_lens_kv=seq_lens_kv,
++                cum_seq_lens_kv=cum_seq_lens_kv,
++                max_kv_len=max_kv_len,
+                 is_causal=False,
+                 return_lse=True,
+                 out_buffer=out,
+@@ -1897,12 +1927,12 @@
+             # zero-KV rows so that downstream merge_state ignores them.
+             # Skip entirely when this chunk has no zero-KV rows (pure CPU
+             # check, precomputed in prepare_chunked_prefix_cache_info).
+-            if forward_batch.prefix_chunk_has_zero_kv[chunk_idx]:
++            if has_zero_kv:
+                 out_tensor, lse_tensor = result
+                 fixup_zero_kv_rows(
+                     out_tensor,
+                     lse_tensor,
+-                    forward_batch.prefix_chunk_seq_lens[chunk_idx],
++                    seq_lens_kv,
+                     self.forward_prefill_metadata.cum_seq_lens,
+                     self.forward_prefill_metadata.max_seq_len,
+                 )
+diff -ruN -x __pycache__ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_lcprefill_claude/trial_2_tree_judged/srt/model_executor/forward_batch_deepseek_mha_mixin.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_lcprefill_claude/trial_3_tree_judged/srt/model_executor/forward_batch_deepseek_mha_mixin.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_lcprefill_claude/trial_2_tree_judged/srt/model_executor/forward_batch_deepseek_mha_mixin.py	2026-09-25 05:23:54.025488318 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_lcprefill_claude/trial_3_tree_judged/srt/model_executor/forward_batch_deepseek_mha_mixin.py	2026-09-27 07:07:49.507463012 -0700
+@@ -61,6 +61,10 @@
+     # These are set only for the duration of an attention call.
+     fused_prefix_k: Optional[torch.Tensor] = None
+     fused_prefix_v: Optional[torch.Tensor] = None
++    # (seq_lens, cu_seq_lens, max_seq_len) spanning all prefix chunks, set only
++    # while the chunks run as one prefix attention launch.
++    prefix_merged_kv_meta: Optional[tuple] = None
++    prefix_merged_kv_meta_cache: Optional[tuple] = None
+     # Whether to apply MHA_ONE_SHOT forward method
+     mha_one_shot: Optional[bool] = None
+     # KV Indices for MHA_ONE_SHOT forward method
+@@ -170,6 +174,7 @@
+         single_chunk: bool = False,
+         dense_metadata: bool = False,
+     ):
++        self.prefix_merged_kv_meta_cache = None
+ 
+         from sglang.srt.mem_cache.memory_pool import (
+             HybridLinearKVPool,
+diff -ruN -x __pycache__ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_lcprefill_claude/trial_2_tree_judged/srt/models/deepseek_common/attention_forward_methods/forward_mha.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_lcprefill_claude/trial_3_tree_judged/srt/models/deepseek_common/attention_forward_methods/forward_mha.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_lcprefill_claude/trial_2_tree_judged/srt/models/deepseek_common/attention_forward_methods/forward_mha.py	2026-09-25 05:02:58.010498115 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_lcprefill_claude/trial_3_tree_judged/srt/models/deepseek_common/attention_forward_methods/forward_mha.py	2026-09-27 07:07:42.513044066 -0700
+@@ -511,6 +511,16 @@
+             del kv_a_normed, k_pe, kv, k_nope, v_dense
+ 
+         assert forward_batch.num_prefix_chunks is not None
++        if (
++            not pack_all_prefix_chunks
++            and not get_parallel().dcp_enabled
++            and getattr(backend, "can_merge_prefix_chunks", None) is not None
++            and backend.can_merge_prefix_chunks(forward_batch)
++        ):
++            return self._merged_prefix_attn_mha(
++                q, accum_output, accum_lse, forward_batch, pack_fn, get_mla_kv_buffer
++            )
++
+         packed_offset = 0
+         for i in range(forward_batch.num_prefix_chunks):
+             forward_batch.set_prefix_chunk_idx(i)
+@@ -588,6 +598,82 @@
+ 
+         return accum_output
+ 
++    def _merged_prefix_attn_mha(
++        self: DeepseekV2AttentionMLA,
++        q: torch.Tensor,
++        accum_output: torch.Tensor,
++        accum_lse: torch.Tensor,
++        forward_batch: ForwardBatch,
++        pack_fn,
++        get_mla_kv_buffer,
++    ) -> torch.Tensor:
++        # One request: materialize the chunks back to back into one fp8 K/V
++        # buffer, then attend to the whole prefix in a single launch and merge
++        # once, instead of one attention launch + merge per chunk.
++        from sglang.srt.layers.attention.merge_state import merge_state
++
++        total = sum(forward_batch.prefix_chunk_num_tokens)
++        k_all = q.new_empty(
++            (
++                total,
++                self.num_local_heads,
++                self.qk_nope_head_dim + self.qk_rope_head_dim,
++            ),
++            dtype=torch.float8_e4m3fn,
++        )
++        v_all = q.new_empty(
++            (total, self.num_local_heads, self.v_head_dim),
++            dtype=torch.float8_e4m3fn,
++        )
++        offset = 0
++        for i in range(forward_batch.num_prefix_chunks):
++            kv_a_normed, k_pe = get_mla_kv_buffer(
++                forward_batch.prefix_chunk_kv_indices[i],
++                torch.bfloat16,
++                forward_batch,
++            )
++            n = kv_a_normed.shape[0]
++            kv = self.kv_b_proj(kv_a_normed)[0]
++            kv = kv.view(
++                -1, self.num_local_heads, self.qk_nope_head_dim + self.v_head_dim
++            )
++            pack_fn(
++                kv[..., : self.qk_nope_head_dim],
++                k_pe,
++                kv[..., self.qk_nope_head_dim :],
++                k_out=k_all[offset : offset + n],
++                v_out=v_all[offset : offset + n],
++            )
++            offset += n
++            del kv_a_normed, k_pe, kv
++        assert offset == total
++
++        # Built once per batch; each layer reuses the device tensors.
++        if forward_batch.prefix_merged_kv_meta_cache is None:
++            forward_batch.prefix_merged_kv_meta_cache = (
++                forward_batch.prefix_chunk_seq_lens.sum(0),
++                forward_batch.prefix_chunk_cu_seq_lens.sum(0),
++                sum(forward_batch.prefix_chunk_max_seq_lens),
++            )
++        forward_batch.set_prefix_chunk_idx(0)
++        forward_batch.prefix_merged_kv_meta = forward_batch.prefix_merged_kv_meta_cache
++        try:
++            output, lse = self.attn_mha(
++                q,
++                k_all,
++                v_all,
++                forward_batch,
++                save_kv_cache=False,
++                key_value_num_tokens=total,
++            )
++        finally:
++            forward_batch.prefix_merged_kv_meta = None
++        del k_all, v_all
++        tmp_output = torch.empty_like(accum_output)
++        tmp_lse = torch.empty_like(accum_lse)
++        merge_state(output, lse, accum_output, accum_lse, tmp_output, tmp_lse)
++        return tmp_output
++
+     def _set_mla_kv_buffer(
+         self: DeepseekV2AttentionMLA,
+         latent_cache: torch.Tensor,

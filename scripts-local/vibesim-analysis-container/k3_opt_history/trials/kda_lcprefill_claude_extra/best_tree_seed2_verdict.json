@@ -1,0 +1,190 @@
+{
+  "agent_container": "recheck_kda_lcprefill_claude_seed2",
+  "case_key": "3519831aab67",
+  "points": {
+    "1,16384pf245760": {
+      "before_us": 8900.863647460938,
+      "before_sigma_us": 50.148040347668456,
+      "after_us": 8179.03995513916,
+      "after_lat": [
+        8168.479919433594,
+        8363.55209350586,
+        8123.552322387695,
+        8179.03995513916,
+        8363.103866577148
+      ],
+      "improvement": 0.0811,
+      "noise_frac_3sigma": 0.0169,
+      "correctness": {
+        "max_abs_err": 0.125,
+        "max_rel_err": 0.007042253124380105,
+        "mean_rel_err": 0.0016363542526960373,
+        "nan": false,
+        "rows": 16384,
+        "rows_over_tol": 0,
+        "frac_rows_over_tol": 0.0,
+        "p99_row_rel_err": 0.00704225292429328,
+        "rule": "prefill_rowwise(frac_rows_over_tol<=0.005,p99<=tol,mean<=0.01)",
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "latency_mode": "eager",
+      "primary": true,
+      "mixed": "pf245760"
+    },
+    "1,32768pf229376": {
+      "before_us": 17647.743225097656,
+      "before_sigma_us": 63.9980376497567,
+      "after_us": 16303.359985351562,
+      "after_lat": [
+        16235.776901245117,
+        16594.240188598633,
+        16303.359985351562,
+        16418.048858642578,
+        16167.200088500977
+      ],
+      "improvement": 0.0762,
+      "noise_frac_3sigma": 0.0109,
+      "correctness": {
+        "max_abs_err": 0.125,
+        "max_rel_err": 0.00680272071821928,
+        "mean_rel_err": 0.001636987435631454,
+        "nan": false,
+        "rows": 32768,
+        "rows_over_tol": 0,
+        "frac_rows_over_tol": 0.0,
+        "p99_row_rel_err": 0.006802720949053764,
+        "rule": "prefill_rowwise(frac_rows_over_tol<=0.005,p99<=tol,mean<=0.01)",
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "latency_mode": "eager",
+      "primary": false,
+      "mixed": "pf229376"
+    },
+    "1,16384pf131072": {
+      "before_us": 9027.647972106934,
+      "before_sigma_us": 64.8146458532385,
+      "after_us": 8273.311614990234,
+      "after_lat": [
+        8365.407943725586,
+        8279.264450073242,
+        8232.128143310547,
+        8269.05632019043,
+        8273.311614990234
+      ],
+      "improvement": 0.0836,
+      "noise_frac_3sigma": 0.0215,
+      "correctness": {
+        "max_abs_err": 0.125,
+        "max_rel_err": 0.007042253124380105,
+        "mean_rel_err": 0.0016363542526960373,
+        "nan": false,
+        "rows": 16384,
+        "rows_over_tol": 0,
+        "frac_rows_over_tol": 0.0,
+        "p99_row_rel_err": 0.00704225292429328,
+        "rule": "prefill_rowwise(frac_rows_over_tol<=0.005,p99<=tol,mean<=0.01)",
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "latency_mode": "eager",
+      "primary": false,
+      "mixed": "pf131072"
+    },
+    "1,32768pf131072": {
+      "before_us": 17716.224670410156,
+      "before_sigma_us": 136.13956204453274,
+      "after_us": 16323.968887329102,
+      "after_lat": [
+        16323.968887329102,
+        16317.728042602539,
+        16198.848724365234,
+        16440.479278564453,
+        16340.192794799805
+      ],
+      "improvement": 0.0786,
+      "noise_frac_3sigma": 0.0231,
+      "correctness": {
+        "max_abs_err": 0.125,
+        "max_rel_err": 0.00680272071821928,
+        "mean_rel_err": 0.001636987435631454,
+        "nan": false,
+        "rows": 32768,
+        "rows_over_tol": 0,
+        "frac_rows_over_tol": 0.0,
+        "p99_row_rel_err": 0.006802720949053764,
+        "rule": "prefill_rowwise(frac_rows_over_tol<=0.005,p99<=tol,mean<=0.01)",
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "latency_mode": "eager",
+      "primary": false,
+      "mixed": "pf131072"
+    }
+  },
+  "driver_sha": "ff88e72e3180",
+  "pristine_points": {
+    "1,16384pf245760": {
+      "median": 8900.863647460938,
+      "sigma": 50.148040347668456
+    },
+    "1,32768pf229376": {
+      "median": 17647.743225097656,
+      "sigma": 63.9980376497567
+    },
+    "1,16384pf131072": {
+      "median": 9027.647972106934,
+      "sigma": 64.8146458532385
+    },
+    "1,32768pf131072": {
+      "median": 17716.224670410156,
+      "sigma": 136.13956204453274
+    }
+  },
+  "changed_files": [
+    "kernels/jit/csrc/attention/kda_fused_decode.cuh",
+    "kernels/jit/csrc/attention/kda_conv_l2norm.cuh",
+    "kernels/jit/csrc/attention/kda_chunk_h.cuh",
+    "kernels/jit/csrc/kimi_k3/situ_and_mul.cuh",
+    "kernels/jit/csrc/kimi_k3/attn_res/fused_tma.cuh",
+    "kernels/ops/attention/kda_chunk_h.py",
+    "kernels/ops/attention/kda_fused_decode.py",
+    "kernels/ops/attention/kda_conv_l2norm.py",
+    "kernels/ops/kimi_k3/attn_res.py",
+    "kernels/ops/mamba/causal_conv1d_triton.py",
+    "kernels/ops/attention/fla/fused_norm_gate.py",
+    "kernels/ops/attention/fla/kda.py",
+    "kernels/ops/attention/fla/fused_recurrent.py",
+    "kernels/ops/attention/fla/l2norm.py",
+    "kernels/ops/attention/fla/chunk_intra.py",
+    "kernels/ops/attention/fla/chunk_delta_h.py",
+    "kernels/ops/attention/linear/kda_ptx_prefill/__init__.py",
+    "srt/models/kimi_k3.py",
+    "srt/layers/attn_residual.py",
+    "srt/layers/attention/linear/kda_backend.py",
+    "srt/layers/attention/linear/kernels/kda_triton.py",
+    "srt/layers/attention/linear/kernels/kda_ptx.py"
+  ],
+  "diff_patch": "/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_lcprefill_claude/best_tree_judged.patch",
+  "diff_lines": 2862,
+  "gates": {
+    "correctness": true,
+    "latency_improved": true,
+    "no_secondary_regression": true
+  },
+  "required_improvement": 0.0169,
+  "before_us": 8900.863647460938,
+  "latency_us": 8179.03995513916,
+  "recovered_frac": 0.0811,
+  "correctness": {
+    "pass": true
+  },
+  "golden_dir": "/raid/yilegu/eval_goldens/golden_k3_3519831aab67",
+  "verdict": "PASS",
+  "reason": "all gates passed"
+}

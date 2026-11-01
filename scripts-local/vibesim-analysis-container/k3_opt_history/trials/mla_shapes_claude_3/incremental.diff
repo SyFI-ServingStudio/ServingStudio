@@ -1,0 +1,613 @@
+diff -ruN -x __pycache__ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_shapes_claude/trial_2_tree_judged/kernels/jit/csrc/moe/mxfp4_small_m_moe.cuh /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_shapes_claude/trial_3_tree_judged/kernels/jit/csrc/moe/mxfp4_small_m_moe.cuh
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_shapes_claude/trial_2_tree_judged/kernels/jit/csrc/moe/mxfp4_small_m_moe.cuh	1969-12-31 16:00:00.000000000 -0800
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_shapes_claude/trial_3_tree_judged/kernels/jit/csrc/moe/mxfp4_small_m_moe.cuh	2026-09-27 03:16:20.774004467 -0700
+@@ -0,0 +1,486 @@
++// K3 MXFP4 routed MoE for tiny decode batches (M * top_k <= a few rows):
++// GEMV replacement for the trtllm-gen routed op (routing permutation kernel +
++// GEMM1 + GEMM2) that reads the trtllm-gen shuffled weights in place.
++//
++// Weight layout (Mxfp4MoEMethod, flashinfer trtllm_sm100 branch):
++//   * rows shuffled in 32-row blocks (epilogue_tile_m=128):
++//       shuffled row 32b + j  <-  pre-shuffle row 32b + (j % 8) * 4 + j / 8
++//   * GEMM1 pre-shuffle rows are (up_i, gate_i) pairs, so shuffled block b
++//     holds, for pair q = 16b + p:  p = 2j   -> up row j,      gate row 8 + j
++//                                   p = 2j+1 -> up row 16 + j, gate row 24 + j
++//   * UE8M0 scales use the same row order in the 128x4 swizzled layout
++//       off(r, c) = (r/128)*(KB/4)*512 + (c/4)*512 + (r%32)*16 + ((r%128)/32)*4 + c%4
++//   * e2m1 pairs packed low nibble first; one 16B chunk = one 32-wide group.
++//
++// Math matches trtllm-gen SiTU: fp32 GEMM1 dot products, SiTU with the
++// per-expert (beta, linear_beta), MxE4m3 (UE8M0 ceil scale per 32) requant of
++// the intermediate, bf16 GEMM2 output. The outputs are the do_finalize=False
++// triple consumed by moe_finalize_rmsnorm: gemm2_out[M*K, H], identity
++// expanded_idx (-1 for non-local experts), and bf16 topk weights.
++//
++// kernel 1: grid (I/32, M*K) CTAs of 512 threads, 64 shuffled GEMM1 rows each
++//           (= one 32-wide quant group of the intermediate).
++// kernel 2: grid (H/32, M*K) CTAs of 256 threads, 32 GEMM2 rows each. Loads
++//           its weights before griddepcontrol.wait (expert ids are published
++//           by the routing kernel that kernel 1 already waited on).
++
++#pragma once
++
++#include <sgl_kernel/tensor.h>
++#include <sgl_kernel/utils.h>
++
++#include <sgl_kernel/mbarrier.cuh>
++#include <sgl_kernel/runtime.cuh>
++#include <sgl_kernel/type.cuh>
++#include <sgl_kernel/utils.cuh>
++
++#include <tvm/ffi/container/tensor.h>
++
++#include <cuda_fp16.h>
++#include <cuda_fp8.h>
++
++#include <cstdint>
++
++namespace sglang {
++
++namespace mxfp4_small_m {
++
++constexpr int kHidden = 3584;
++constexpr int kInter = 3072;
++constexpr int kHChunks = kHidden / 32;  // 112
++constexpr int kIChunks = kInter / 32;   // 96
++constexpr int kChunkPadHalves = 40;     // 32 halves + 8 pad: 80B stride, conflict-free lds.128
++
++struct Params {
++  const int32_t* __restrict__ packed;  // [MK] (id << 16) | bf16 weight
++  const uint8_t* __restrict__ xq;      // [M, H] e4m3
++  const uint8_t* __restrict__ xs;      // [M, H/32] ue8m0
++  const uint8_t* __restrict__ w13;     // [E, 2I, H/2]
++  const uint8_t* __restrict__ w13s;    // [E, 2I * H/32] swizzled
++  const float* __restrict__ alpha;     // [E]
++  const float* __restrict__ limit;     // [E]
++  const uint8_t* __restrict__ w2;      // [E, H, I/2]
++  const uint8_t* __restrict__ w2s;     // [E, H * I/32] swizzled
++  float* __restrict__ h;               // [MK, I] SiTU output, pair order
++  bf16_t* __restrict__ out;            // [MK, H]
++  int32_t* __restrict__ idx_out;       // [MK]
++  uint16_t* __restrict__ w_out;        // [MK] bf16 bits
++  int32_t local_offset;
++  int32_t num_local_experts;
++};
++
++SGL_DEVICE uint4 ld_stream(const void* p) {
++  uint4 v;
++  asm volatile("ld.global.nc.L1::no_allocate.v4.u32 {%0,%1,%2,%3}, [%4];"
++               : "=r"(v.x), "=r"(v.y), "=r"(v.z), "=r"(v.w)
++               : "l"(p));
++  return v;
++}
++
++SGL_DEVICE uint32_t swz(uint32_t r, uint32_t c, uint32_t kb) {
++  return (r >> 7) * (kb / 4) * 512 + (c >> 2) * 512 + (r & 31) * 16 + ((r & 127) >> 5) * 4 + (c & 3);
++}
++
++// 2^(s - 127) for a UE8M0 byte (s = 0 is the subnormal 2^-127)
++SGL_DEVICE float ue8m0_to_float(uint32_t s) {
++  return s == 0 ? __uint_as_float(0x00400000u) : __uint_as_float(s << 23);
++}
++
++// e2m1x2 bytes of one 32-bit word -> four f16x2 (exact).
++SGL_DEVICE void e2m1x8_to_half2(uint32_t w, __half2 (&h)[4]) {
++  uint32_t o0, o1, o2, o3;
++  asm("{\n"
++      ".reg .b8 b0, b1, b2, b3;\n"
++      "mov.b32 {b0, b1, b2, b3}, %4;\n"
++      "cvt.rn.f16x2.e2m1x2 %0, b0;\n"
++      "cvt.rn.f16x2.e2m1x2 %1, b1;\n"
++      "cvt.rn.f16x2.e2m1x2 %2, b2;\n"
++      "cvt.rn.f16x2.e2m1x2 %3, b3;\n"
++      "}"
++      : "=r"(o0), "=r"(o1), "=r"(o2), "=r"(o3)
++      : "r"(w));
++  h[0] = *reinterpret_cast<__half2*>(&o0);
++  h[1] = *reinterpret_cast<__half2*>(&o1);
++  h[2] = *reinterpret_cast<__half2*>(&o2);
++  h[3] = *reinterpret_cast<__half2*>(&o3);
++}
++
++// One 32-wide group: sum_i w_i * x_i with x (unscaled e4m3 values, exact in
++// fp16) in smem. Products are exact in fp16; each f16x2 accumulator sums 8.
++SGL_DEVICE float chunk_dot(const uint4 w, const __half2* __restrict__ xh) {
++  __half2 acc0 = __float2half2_rn(0.f), acc1 = __float2half2_rn(0.f);
++  __half2 acc2 = acc0, acc3 = acc0;
++  const uint32_t ws[4] = {w.x, w.y, w.z, w.w};
++#pragma unroll
++  for (int q = 0; q < 4; ++q) {
++    __half2 h[4];
++    e2m1x8_to_half2(ws[q], h);
++    acc0 = __hfma2(h[0], xh[4 * q + 0], acc0);
++    acc1 = __hfma2(h[1], xh[4 * q + 1], acc1);
++    acc2 = __hfma2(h[2], xh[4 * q + 2], acc2);
++    acc3 = __hfma2(h[3], xh[4 * q + 3], acc3);
++  }
++  const float2 f0 = __half22float2(acc0), f1 = __half22float2(acc1);
++  const float2 f2 = __half22float2(acc2), f3 = __half22float2(acc3);
++  return ((f0.x + f0.y) + (f1.x + f1.y)) + ((f2.x + f2.y) + (f3.x + f3.y));
++}
++
++// Stage one token's e4m3 row (kChunks groups) into smem as fp16 (exact), and
++// the per-group activation scales as fp32.
++template <int kChunks, int kThreads>
++SGL_DEVICE void stage_x(const uint8_t* __restrict__ xq, const uint8_t* __restrict__ xs, __half* xh, float* xsc) {
++  for (int v = threadIdx.x; v < kChunks * 2; v += kThreads) {
++    const uint4 raw = *reinterpret_cast<const uint4*>(xq + v * 16);
++    const uint32_t ws[4] = {raw.x, raw.y, raw.z, raw.w};
++    __half2 hv[8];
++#pragma unroll
++    for (int q = 0; q < 4; ++q) {
++      const __half2_raw lo = __nv_cvt_fp8x2_to_halfraw2(static_cast<__nv_fp8x2_storage_t>(ws[q] & 0xffff), __NV_E4M3);
++      const __half2_raw hi = __nv_cvt_fp8x2_to_halfraw2(static_cast<__nv_fp8x2_storage_t>(ws[q] >> 16), __NV_E4M3);
++      hv[2 * q] = lo;
++      hv[2 * q + 1] = hi;
++    }
++    const int c = v >> 1, half = v & 1;
++    uint4* dst = reinterpret_cast<uint4*>(xh + c * kChunkPadHalves + half * 16);
++    dst[0] = *reinterpret_cast<uint4*>(&hv[0]);
++    dst[1] = *reinterpret_cast<uint4*>(&hv[4]);
++  }
++  for (int c = threadIdx.x; c < kChunks; c += kThreads) xsc[c] = ue8m0_to_float(xs[c]);
++}
++
++SGL_DEVICE float warp_sum(float v) {
++#pragma unroll
++  for (int o = 16; o > 0; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
++  return v;
++}
++
++SGL_DEVICE float warp_max(float v) {
++#pragma unroll
++  for (int o = 16; o > 0; o >>= 1) v = fmaxf(v, __shfl_xor_sync(0xffffffffu, v, o));
++  return v;
++}
++
++SGL_DEVICE void cp_async_16(void* dst, const void* src) {
++  asm volatile("cp.async.cg.shared.global [%0], [%1], 16;" ::"r"(device::ptx::to_shared(dst)), "l"(src) : "memory");
++}
++
++SGL_DEVICE void cp_async_4(void* dst, const void* src) {
++  asm volatile("cp.async.ca.shared.global [%0], [%1], 4;" ::"r"(device::ptx::to_shared(dst)), "l"(src) : "memory");
++}
++
++SGL_DEVICE void cp_async_commit() {
++  asm volatile("cp.async.commit_group;" ::: "memory");
++}
++
++template <int kPending>
++SGL_DEVICE void cp_async_wait() {
++  asm volatile("cp.async.wait_group %0;" ::"n"(kPending) : "memory");
++}
++
++// GEMM1 work unit: shuffled rows 32b + j + 8k (k = 0..3) of one routed row,
++// i.e. (up, gate) of intermediate pairs 16b + 2j and 16b + 2j + 1.
++constexpr int kQuadsPerRow = 2 * kInter / 4;  // 1536
++constexpr int kMaxQuadsPerCta = 21;           // 2 routed rows over 148 SMs; ~150KB smem
++constexpr int kG1Warps = 16;
++constexpr int kRowBytes1 = kHidden / 2;       // 1792
++constexpr int kQuadWBytes = 4 * kRowBytes1;   // 7168
++constexpr int kQuadSBytes = 4 * kHChunks;     // 448
++constexpr int kXStageBytes = kHChunks * kChunkPadHalves * 2 + kHChunks * 4;
++constexpr int kG1SmemBytes = 2 * kXStageBytes + kMaxQuadsPerCta * (kQuadWBytes + kQuadSBytes);
++
++// Persistent over contiguous quad ranges: every quad of the CTA is put in
++// flight with cp.async up front and consumed as it lands. Also pulls this
++// CTA's share of the routed w2 into L2 for gemm2_kernel.
++template <int kTopK, bool kUsePDL>
++__global__ void __launch_bounds__(kG1Warps * 32, 1) gemm1_situ_kernel(const __grid_constant__ Params p, int mk) {
++  extern __shared__ __align__(16) uint8_t smem[];
++  const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
++  const int total = mk * kQuadsPerRow;
++  const int q0 = static_cast<int>((int64_t)blockIdx.x * total / gridDim.x);
++  const int q1 = static_cast<int>((int64_t)(blockIdx.x + 1) * total / gridDim.x);
++  uint8_t* wsm = smem + 2 * kXStageBytes;
++  uint8_t* ssm = wsm + kMaxQuadsPerCta * kQuadWBytes;
++
++  device::PDLWaitPrimary<kUsePDL>();
++  if (blockIdx.x == 0 && threadIdx.x < mk) {
++    const int32_t packed = p.packed[threadIdx.x];
++    const int e = (packed >> 16) - p.local_offset;
++    p.idx_out[threadIdx.x] = (e >= 0 && e < p.num_local_experts) ? threadIdx.x : -1;
++    p.w_out[threadIdx.x] = static_cast<uint16_t>(packed & 0xffff);
++  }
++
++  int n_mine = 0;
++#pragma unroll
++  for (int i = 0; i < 2; ++i) {
++    const int lq = warp + kG1Warps * i;
++    if (q0 + lq < q1) {
++      ++n_mine;
++      const int q = q0 + lq;
++      const int pk = q / kQuadsPerRow, local = q % kQuadsPerRow;
++      const int e = (p.packed[pk] >> 16) - p.local_offset;
++      if (e >= 0 && e < p.num_local_experts) {
++        const uint32_t s0 = 32 * (local >> 3) + (local & 7);
++        const uint8_t* wbase = p.w13 + (size_t)e * (2 * kInter) * kRowBytes1;
++        const uint8_t* sbase = p.w13s + (size_t)e * (2 * kInter) * kHChunks;
++#pragma unroll
++        for (int k = 0; k < 4; ++k) {
++#pragma unroll
++          for (int v = lane; v < kHChunks; v += 32) {
++            cp_async_16(wsm + lq * kQuadWBytes + k * kRowBytes1 + v * 16, wbase + (s0 + 8 * k) * kRowBytes1 + v * 16);
++          }
++        }
++#pragma unroll
++        for (int v = lane; v < 4 * (kHChunks / 4); v += 32) {
++          const int k = v / (kHChunks / 4), m = v % (kHChunks / 4);
++          cp_async_4(ssm + lq * kQuadSBytes + k * kHChunks + 4 * m, sbase + swz(s0 + 8 * k, 4 * m, kHChunks));
++        }
++      }
++    }
++    cp_async_commit();
++  }
++
++  // L2 prefetch of the routed w2 (weights + scales), split evenly over the grid.
++  for (int pk = 0; pk < mk; ++pk) {
++    const int e = (p.packed[pk] >> 16) - p.local_offset;
++    if (e < 0 || e >= p.num_local_experts) continue;
++    constexpr uint32_t kW2Lines = kHidden * (kInter / 2) / 128;
++    constexpr uint32_t kS2Lines = kHidden * kIChunks / 128;
++    const uint8_t* w2 = p.w2 + (size_t)e * kW2Lines * 128;
++    const uint8_t* s2 = p.w2s + (size_t)e * kS2Lines * 128;
++    constexpr uint32_t kLines = kW2Lines + kS2Lines;
++    const uint32_t l0 = (uint64_t)blockIdx.x * kLines / gridDim.x;
++    const uint32_t l1 = (uint64_t)(blockIdx.x + 1) * kLines / gridDim.x;
++    for (uint32_t l = l0 + threadIdx.x; l < l1; l += blockDim.x) {
++      const uint8_t* a = l < kW2Lines ? w2 + (size_t)l * 128 : s2 + (size_t)(l - kW2Lines) * 128;
++      asm volatile("prefetch.global.L2 [%0];" ::"l"(a));
++    }
++  }
++  device::PDLTriggerSecondary<kUsePDL>();
++
++  // A quad range spans at most two routed rows, hence at most two tokens.
++  const int t_first = (q0 / kQuadsPerRow) / kTopK;
++  const int t_last = ((q1 - 1) / kQuadsPerRow) / kTopK;
++  auto xh_of = [&](int slot) { return reinterpret_cast<__half*>(smem + slot * kXStageBytes); };
++  auto xsc_of = [&](int slot) {
++    return reinterpret_cast<float*>(smem + slot * kXStageBytes + kHChunks * kChunkPadHalves * 2);
++  };
++  stage_x<kHChunks, kG1Warps * 32>(p.xq + (size_t)t_first * kHidden, p.xs + (size_t)t_first * kHChunks, xh_of(0), xsc_of(0));
++  if (t_last != t_first) {
++    stage_x<kHChunks, kG1Warps * 32>(p.xq + (size_t)t_last * kHidden, p.xs + (size_t)t_last * kHChunks, xh_of(1), xsc_of(1));
++  }
++  __syncthreads();
++
++#pragma unroll
++  for (int i = 0; i < 2; ++i) {
++    if (i >= n_mine) break;
++    if (i == 0 && n_mine == 2) {
++      cp_async_wait<1>();
++    } else {
++      cp_async_wait<0>();
++    }
++    __syncwarp();
++    const int lq = warp + kG1Warps * i;
++    const int q = q0 + lq;
++    const int pk = q / kQuadsPerRow, local = q % kQuadsPerRow;
++    const int e = (p.packed[pk] >> 16) - p.local_offset;
++    if (e < 0 || e >= p.num_local_experts) continue;
++    const int slot = (pk / kTopK) == t_first ? 0 : 1;
++    const __half* xh = xh_of(slot);
++    const float* xsc = xsc_of(slot);
++    const uint8_t* wq = wsm + lq * kQuadWBytes;
++    const uint8_t* sq = ssm + lq * kQuadSBytes;
++
++    float acc[4] = {0.f, 0.f, 0.f, 0.f};
++#pragma unroll
++    for (int it = 0; it < (kHChunks + 31) / 32; ++it) {
++      const int c = lane + 32 * it;
++      if (c < kHChunks) {
++        __half2 xv[16];
++        const uint4* src = reinterpret_cast<const uint4*>(xh + c * kChunkPadHalves);
++#pragma unroll
++        for (int v = 0; v < 4; ++v) *reinterpret_cast<uint4*>(&xv[4 * v]) = src[v];
++        const float xscale = xsc[c];
++#pragma unroll
++        for (int k = 0; k < 4; ++k) {
++          const uint4 w = *reinterpret_cast<const uint4*>(wq + k * kRowBytes1 + c * 16);
++          acc[k] += chunk_dot(w, xv) * (xscale * ue8m0_to_float(sq[k * kHChunks + c]));
++        }
++      }
++    }
++#pragma unroll
++    for (int k = 0; k < 4; ++k) acc[k] = warp_sum(acc[k]);
++    if (lane == 0) {
++      const float a = p.alpha[e], lb = p.limit[e];
++      float2 h;
++      {
++        const float gate = acc[1], up = acc[0];
++        h.x = a * tanhf(gate / a) * (1.f / (1.f + expf(-gate))) * (lb * tanhf(up / lb));
++      }
++      {
++        const float gate = acc[3], up = acc[2];
++        h.y = a * tanhf(gate / a) * (1.f / (1.f + expf(-gate))) * (lb * tanhf(up / lb));
++      }
++      const int pair = 16 * (local >> 3) + 2 * (local & 7);
++      *reinterpret_cast<float2*>(p.h + (size_t)pk * kInter + pair) = h;
++    }
++  }
++}
++
++// MxE4m3 requant of one routed row's SiTU output (UE8M0 ceil scale per 32),
++// staged as exact fp16 e4m3 values plus fp32 group scales.
++template <int kWarps>
++SGL_DEVICE void stage_requant(const float* __restrict__ h, __half* xh, float* xsc) {
++  const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
++  constexpr int kPerWarp = kIChunks / kWarps;
++  float v[kPerWarp];
++#pragma unroll
++  for (int i = 0; i < kPerWarp; ++i) v[i] = h[(warp + kWarps * i) * 32 + lane];
++#pragma unroll
++  for (int i = 0; i < kPerWarp; ++i) {
++    const int g = warp + kWarps * i;
++    const float amax = warp_max(fabsf(v[i]));
++    const uint32_t bits = __float_as_uint(amax / 448.f);
++    uint32_t ex = (bits >> 23) & 0xff;
++    if ((bits & 0x7fffff) != 0 && ex != 0) ex += 1;
++    ex = ex > 254 ? 254 : ex;
++    __half_raw hv;
++    hv.x = 0;
++    if (ex != 0) {
++      const float inv = __uint_as_float((254u - ex) << 23);
++      const auto q = __nv_cvt_float_to_fp8(v[i] * inv, __NV_SATFINITE, __NV_E4M3);
++      hv = __nv_cvt_fp8_to_halfraw(q, __NV_E4M3);
++    }
++    xh[g * kChunkPadHalves + lane] = hv;
++    if (lane == 0) xsc[g] = ue8m0_to_float(ex);
++  }
++}
++
++template <int kTopK, bool kUsePDL>
++__global__ void __launch_bounds__(256) gemm2_kernel(const __grid_constant__ Params p) {
++  constexpr int kRowsPerWarp = 4;
++  constexpr int kIters = kIChunks / 32;  // 3
++  __shared__ __align__(16) __half xh[kIChunks * kChunkPadHalves];
++  __shared__ float xsc[kIChunks];
++  __shared__ float rows[32];
++
++  const int blk = blockIdx.x;  // 32-row block of the hidden dim
++  const int pk = blockIdx.y;
++  const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
++
++  // Expert ids come from the routing kernel kernel 1 already waited on.
++  const int32_t packed = p.packed[pk];
++  const int e = (packed >> 16) - p.local_offset;
++  if (e < 0 || e >= p.num_local_experts) return;
++
++  const size_t row_bytes = kInter / 2;
++  const uint8_t* wbase = p.w2 + (size_t)e * kHidden * row_bytes;
++  const uint8_t* sbase = p.w2s + (size_t)e * kHidden * kIChunks;
++  uint4 wv[kRowsPerWarp][kIters];
++  uint32_t sv[kRowsPerWarp][kIters];
++#pragma unroll
++  for (int r = 0; r < kRowsPerWarp; ++r) {
++    const uint32_t s = 32 * blk + kRowsPerWarp * warp + r;
++#pragma unroll
++    for (int i = 0; i < kIters; ++i) {
++      const int c = lane + 32 * i;
++      wv[r][i] = ld_stream(wbase + s * row_bytes + c * 16);
++      sv[r][i] = sbase[swz(s, c, kIChunks)];
++    }
++  }
++
++  device::PDLWaitPrimary<kUsePDL>();
++  device::PDLTriggerSecondary<kUsePDL>();
++  stage_requant<8>(p.h + (size_t)pk * kInter, xh, xsc);
++  __syncthreads();
++
++  float acc[kRowsPerWarp] = {0.f, 0.f, 0.f, 0.f};
++#pragma unroll
++  for (int i = 0; i < kIters; ++i) {
++    const int c = lane + 32 * i;
++    __half2 xv[16];
++    const uint4* src = reinterpret_cast<const uint4*>(xh + c * kChunkPadHalves);
++#pragma unroll
++    for (int q = 0; q < 4; ++q) *reinterpret_cast<uint4*>(&xv[4 * q]) = src[q];
++    const float xscale = xsc[c];
++#pragma unroll
++    for (int r = 0; r < kRowsPerWarp; ++r)
++      acc[r] += chunk_dot(wv[r][i], xv) * (xscale * ue8m0_to_float(sv[r][i]));
++  }
++#pragma unroll
++  for (int r = 0; r < kRowsPerWarp; ++r) {
++    const float v = warp_sum(acc[r]);
++    if (lane == 0) {
++      const int j = kRowsPerWarp * warp + r;  // shuffled row within the block
++      rows[(j & 7) * 4 + (j >> 3)] = v;
++    }
++  }
++  __syncthreads();
++  if (threadIdx.x < 32) {
++    p.out[(size_t)pk * kHidden + 32 * blk + threadIdx.x] = device::cast<bf16_t>(rows[threadIdx.x]);
++  }
++}
++
++}  // namespace mxfp4_small_m
++
++template <int kTopK, bool kUsePDL>
++struct Mxfp4SmallMMoeKernel {
++  static void
++  run(const tvm::ffi::TensorView packed,
++      const tvm::ffi::TensorView xq,
++      const tvm::ffi::TensorView xs,
++      const tvm::ffi::TensorView w13,
++      const tvm::ffi::TensorView w13s,
++      const tvm::ffi::TensorView alpha,
++      const tvm::ffi::TensorView limit,
++      const tvm::ffi::TensorView w2,
++      const tvm::ffi::TensorView w2s,
++      const tvm::ffi::TensorView h,
++      const tvm::ffi::TensorView out,
++      const tvm::ffi::TensorView idx_out,
++      const tvm::ffi::TensorView w_out,
++      const int64_t local_offset) {
++    using namespace host;
++    using namespace mxfp4_small_m;
++    const int64_t m = xq.size(0);
++    const int64_t mk = m * kTopK;
++    const int64_t num_experts = w13.size(0);
++    RuntimeCheck(packed.size(0) == m && packed.size(1) == kTopK, "packed must be [M, top_k]");
++    RuntimeCheck(xq.size(1) == kHidden && w13.size(1) == 2 * kInter && w13.size(2) == kHidden / 2);
++    RuntimeCheck(w2.size(0) == num_experts && w2.size(1) == kHidden && w2.size(2) == kInter / 2);
++    RuntimeCheck(out.size(0) == mk && out.size(1) == kHidden);
++    const auto device = xq.device();
++    const auto params = Params{
++        .packed = static_cast<const int32_t*>(packed.data_ptr()),
++        .xq = static_cast<const uint8_t*>(xq.data_ptr()),
++        .xs = static_cast<const uint8_t*>(xs.data_ptr()),
++        .w13 = static_cast<const uint8_t*>(w13.data_ptr()),
++        .w13s = static_cast<const uint8_t*>(w13s.data_ptr()),
++        .alpha = static_cast<const float*>(alpha.data_ptr()),
++        .limit = static_cast<const float*>(limit.data_ptr()),
++        .w2 = static_cast<const uint8_t*>(w2.data_ptr()),
++        .w2s = static_cast<const uint8_t*>(w2s.data_ptr()),
++        .h = static_cast<float*>(h.data_ptr()),
++        .out = static_cast<bf16_t*>(out.data_ptr()),
++        .idx_out = static_cast<int32_t*>(idx_out.data_ptr()),
++        .w_out = static_cast<uint16_t*>(w_out.data_ptr()),
++        .local_offset = static_cast<int32_t>(local_offset),
++        .num_local_experts = static_cast<int32_t>(num_experts),
++    };
++    RuntimeCheck(h.size(0) == mk && h.size(1) == kInter);
++    const auto kernel1 = gemm1_situ_kernel<kTopK, kUsePDL>;
++    static const bool smem_set = [&] {
++      RuntimeDeviceCheck(cudaFuncSetAttribute(kernel1, cudaFuncAttributeMaxDynamicSharedMemorySize, kG1SmemBytes));
++      return true;
++    }();
++    (void)smem_set;
++    static const int64_t num_sm = runtime::get_sm_count(device.device_id);
++    const int64_t quads = mk * kQuadsPerRow;
++    const int64_t waves = (quads + num_sm * kMaxQuadsPerCta - 1) / (num_sm * kMaxQuadsPerCta);
++    LaunchKernel(dim3(num_sm * waves), dim3(kG1Warps * 32), device, kG1SmemBytes)
++        .enable_pdl(kUsePDL)(kernel1, params, static_cast<int>(mk));
++    LaunchKernel(dim3(kHidden / 32, mk), dim3(256), device)
++        .enable_pdl(kUsePDL)(gemm2_kernel<kTopK, kUsePDL>, params);
++  }
++};
++
++}  // namespace sglang
+diff -ruN -x __pycache__ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_shapes_claude/trial_2_tree_judged/kernels/ops/moe/moe_mxfp4_small_m.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_shapes_claude/trial_3_tree_judged/kernels/ops/moe/moe_mxfp4_small_m.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_shapes_claude/trial_2_tree_judged/kernels/ops/moe/moe_mxfp4_small_m.py	1969-12-31 16:00:00.000000000 -0800
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_shapes_claude/trial_3_tree_judged/kernels/ops/moe/moe_mxfp4_small_m.py	2026-09-27 03:16:20.794002798 -0700
+@@ -0,0 +1,119 @@
++"""K3 MXFP4 SiTU routed MoE GEMV path for tiny decode batches.
++
++Replaces trtllm-gen's routed op (routing permutation + GEMM1 + GEMM2, ~24us at
++one token) with two GEMV kernels that read the trtllm-gen shuffled weights in
++place, and returns the same ``do_finalize=False`` triple (gemm2_out, bf16
++topk weights, expanded_idx) so moe_finalize_rmsnorm consumes it unchanged.
++Layout and math contract: jit/csrc/moe/mxfp4_small_m_moe.cuh.
++"""
++
++from __future__ import annotations
++
++from typing import TYPE_CHECKING, Tuple
++
++import torch
++
++from sglang.kernels.jit.utils import (
++    cache_once,
++    is_arch_support_pdl,
++    load_jit,
++    make_cpp_args,
++)
++
++if TYPE_CHECKING:
++    from tvm_ffi.module import Module
++
++_HIDDEN = 3584
++_INTER = 3072
++# Each routed row is 96 + 112 CTAs; past a handful of rows trtllm-gen's
++# grouped GEMMs win. Only M=1 (top-2) was measured.
++MAX_ROWS = 4
++
++
++@cache_once
++def _jit_module(top_k: int) -> Module:
++    args = make_cpp_args(top_k, is_arch_support_pdl())
++    return load_jit(
++        "moe_mxfp4_small_m",
++        *args,
++        cuda_files=["moe/mxfp4_small_m_moe.cuh"],
++        cuda_wrappers=[("run", f"Mxfp4SmallMMoeKernel<{args}>::run")],
++        extra_cuda_cflags=["-O3"],
++    )
++
++
++@cache_once
++def available(top_k: int) -> bool:
++    import logging
++
++    try:
++        _jit_module(top_k)
++        return True
++    except Exception as e:  # pragma: no cover - toolchain dependent
++        logging.getLogger(__name__).warning(
++            f"Failed to load the JIT small-m MXFP4 MoE kernel: {e}"
++        )
++        return False
++
++
++def covered(
++    packed: torch.Tensor,
++    x_q: torch.Tensor,
++    w13: torch.Tensor,
++    w2: torch.Tensor,
++    intermediate_size: int,
++) -> bool:
++    return (
++        packed.dim() == 2
++        and packed.dtype == torch.int32
++        and packed.is_contiguous()
++        and packed.shape[0] * packed.shape[1] <= MAX_ROWS
++        and x_q.dim() == 2
++        and x_q.shape == (packed.shape[0], _HIDDEN)
++        and x_q.is_contiguous()
++        and intermediate_size == _INTER
++        and w13.dim() == 3
++        and w13.shape[1:] == (2 * _INTER, _HIDDEN // 2)
++        and w2.dim() == 3
++        and w2.shape[1:] == (_HIDDEN, _INTER // 2)
++    )
++
++
++def mxfp4_small_m_moe(
++    packed: torch.Tensor,
++    x_q: torch.Tensor,
++    x_s: torch.Tensor,
++    w13: torch.Tensor,
++    w13_scale: torch.Tensor,
++    gemm1_alpha: torch.Tensor,
++    gemm1_limit: torch.Tensor,
++    w2: torch.Tensor,
++    w2_scale: torch.Tensor,
++    local_expert_offset: int,
++) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
++    """Returns ``(gemm2_out [M*K, 3584] bf16, topk_weights [M, K] bf16,
++    expanded_idx [M*K] int32)``; caller must have checked covered()."""
++    m, top_k = packed.shape
++    mk = m * top_k
++    device = x_q.device
++    inter = torch.empty((mk, _INTER), dtype=torch.float32, device=device)
++    out = torch.empty((mk, _HIDDEN), dtype=torch.bfloat16, device=device)
++    idx = torch.empty((mk,), dtype=torch.int32, device=device)
++    weights = torch.empty((m, top_k), dtype=torch.bfloat16, device=device)
++    _jit_module(top_k).run(
++        packed,
++        x_q.view(torch.uint8),
++        x_s.view(torch.uint8),
++        w13.view(torch.uint8),
++        w13_scale.view(torch.uint8),
++        gemm1_alpha,
++        gemm1_limit,
++        w2.view(torch.uint8),
++        w2_scale.view(torch.uint8),
++        inter,
++        out,
++        idx,
++        weights.view(torch.int16),
++        int(local_expert_offset),
++    )
++    return out, weights, idx

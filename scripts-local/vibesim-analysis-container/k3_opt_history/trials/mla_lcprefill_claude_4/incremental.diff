@@ -1,0 +1,116 @@
+diff -ruN -x __pycache__ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_lcprefill_claude/trial_2_tree_judged/kernels/ops/attention/cute_dsl_fmha_fp8.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_lcprefill_claude/trial_4_tree_judged/kernels/ops/attention/cute_dsl_fmha_fp8.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_lcprefill_claude/trial_2_tree_judged/kernels/ops/attention/cute_dsl_fmha_fp8.py	2026-09-27 05:30:25.778007709 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_lcprefill_claude/trial_4_tree_judged/kernels/ops/attention/cute_dsl_fmha_fp8.py	2026-09-27 14:36:47.882195857 -0700
+@@ -347,12 +347,54 @@
+     return Fp8PrefillFmha
+ 
+ 
++class _StridedKVLayouts:
++    """Stand-in for flashinfer fmha's ``cute`` module while tracing: its
++    ``__call__`` rebuilds K/V layouts as compact (token stride ``d * h_k``);
++    the 2nd and 3rd ``make_tensor`` there (K, then V) get the real strides."""
++
++    def __init__(self, cute, token_stride: int, head_stride: int):
++        self._cute = cute
++        self._strides = (token_stride, head_stride)
++        self.replaced = 0
++        self._calls = 0
++
++    def __getattr__(self, name):
++        return getattr(self._cute, name)
++
++    def make_tensor(self, iterator, layout, *args, **kwargs):
++        import sys
++
++        cute = self._cute
++        if sys._getframe(1).f_code.co_name == "__call__" and self._calls < 3:
++            self._calls += 1
++            if self._calls >= 2:
++                ts, hs = self._strides
++                if self._calls == 2:
++                    # (s_k, d, ((h_r, h_k), b))
++                    stride = (ts, 1, ((0, hs), 0))
++                else:
++                    # (dv, s_v, ((h_r, h_k), b))
++                    stride = (1, ts, ((0, hs), 0))
++                layout = cute.make_layout(layout.shape, stride=stride)
++                self.replaced += 1
++        return cute.make_tensor(iterator, layout, *args, **kwargs)
++
++
+ @functools.lru_cache(maxsize=None)
+-def _compile(num_heads: int, head_dim: int, head_dim_v: int, is_causal: bool):
++def _compile(
++    num_heads: int,
++    head_dim: int,
++    head_dim_v: int,
++    is_causal: bool,
++    kv_strides: tuple[int, int] | None = None,
++):
++    """``kv_strides``: (token, head) element strides shared by K and V when
++    they are not compact, e.g. both carved from one [T, H, d + dv] buffer."""
+     import cutlass
+     import cutlass.cute as cute
+     from cutlass.cute.runtime import make_fake_compact_tensor, make_fake_stream
+     from cutlass.cute.typing import Int32
++    from flashinfer.cute_dsl.attention.fmha import fmha as fmha_mod
+     from flashinfer.cute_dsl.attention.fmha.helpers import fmha_helpers
+ 
+     fmha = _fmha_class()(
+@@ -380,12 +422,20 @@
+             dtype, shape, stride_order=order, assumed_align=align
+         )
+ 
++    def fake_kv(shape):
++        if kv_strides is None:
++            return fake(fp8, shape, 16)
++        ts, hs = kv_strides
++        # The size-1 batch / h_r dims get whatever stride torch's view picks.
++        stride = (cute.sym_int64(), ts, hs, cute.sym_int64(), 1)
++        return cute.runtime.make_fake_tensor(fp8, shape, stride=stride, assumed_align=16)
++
+     scale_softmax = 1.0 / math.sqrt(head_dim)
+-    return cute.compile(
++    args = (
+         fmha,
+         fake(fp8, (b, s_q, h_k, h_r, head_dim), 16),
+-        fake(fp8, (b, s_k, h_k, 1, head_dim), 16),
+-        fake(fp8, (b, s_k, h_k, 1, head_dim_v), 16),
++        fake_kv((b, s_k, h_k, 1, head_dim)),
++        fake_kv((b, s_k, h_k, 1, head_dim_v)),
+         fake(cutlass.BFloat16, (b, s_q, h_k, h_r, head_dim_v), 32),
+         (1, 1, 1, 1, num_heads, num_heads, head_dim, head_dim_v),
+         make_fake_compact_tensor(Int32, (n_seq,), assumed_align=16),
+@@ -402,8 +452,18 @@
+         None,
+         make_fake_stream(use_tvm_ffi_env_stream=True),
+         False,
+-        options="--enable-tvm-ffi --opt-level 2",
+     )
++    options = "--enable-tvm-ffi --opt-level 2"
++    if kv_strides is None:
++        return cute.compile(*args, options=options)
++    shim = _StridedKVLayouts(cute, *kv_strides)
++    fmha_mod.cute = shim
++    try:
++        kernel_fn = cute.compile(*args, options=options)
++    finally:
++        fmha_mod.cute = cute
++    assert shim.replaced == 2, shim.replaced
++    return kernel_fn
+ 
+ 
+ def _align16(t: torch.Tensor) -> torch.Tensor:
+@@ -433,7 +493,11 @@
+     enables the KV-split launch for a single non-causal request."""
+     from flashinfer.attention.cute_dsl.fmha import cute_dsl_fmha_ragged_prefill
+ 
+-    kernel_fn = _compile(q.shape[1], q.shape[2], v.shape[2], is_causal)
++    kv_strides = None
++    if not (k.is_contiguous() and v.is_contiguous()):
++        assert k.stride() == v.stride() and k.stride(-1) == 1, (k.stride(), v.stride())
++        kv_strides = (k.stride(0), k.stride(1))
++    kernel_fn = _compile(q.shape[1], q.shape[2], v.shape[2], is_causal, kv_strides)
+     num_q, num_heads = q.shape[0], q.shape[1]
+     splits = 1
+     if (

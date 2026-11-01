@@ -1,0 +1,190 @@
+{
+  "agent_container": "iteropt_k3_kda_lcprefill_claude_run_2",
+  "case_key": "98e52d004950",
+  "points": {
+    "1,16384pf245760": {
+      "before_us": 8307.87181854248,
+      "before_sigma_us": 30.138607323531264,
+      "after_us": 8193.183898925781,
+      "after_lat": [
+        8197.183609008789,
+        8193.183898925781,
+        8203.359603881836,
+        8191.136360168457,
+        8188.92765045166
+      ],
+      "improvement": 0.0138,
+      "noise_frac_3sigma": 0.0109,
+      "correctness": {
+        "max_abs_err": 0.125,
+        "max_rel_err": 0.007352940743944662,
+        "mean_rel_err": 0.0016375724226236343,
+        "nan": false,
+        "rows": 16384,
+        "rows_over_tol": 0,
+        "frac_rows_over_tol": 0.0,
+        "p99_row_rel_err": 0.007352940738201141,
+        "rule": "prefill_rowwise(frac_rows_over_tol<=0.005,p99<=tol,mean<=0.01)",
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "latency_mode": "eager",
+      "primary": true,
+      "mixed": "pf245760"
+    },
+    "1,32768pf229376": {
+      "before_us": 16630.91278076172,
+      "before_sigma_us": 55.45874397254192,
+      "after_us": 16312.448501586914,
+      "after_lat": [
+        16243.904113769531,
+        16389.15252685547,
+        16284.639358520508,
+        16312.448501586914,
+        16312.511444091797
+      ],
+      "improvement": 0.0191,
+      "noise_frac_3sigma": 0.01,
+      "correctness": {
+        "max_abs_err": 0.125,
+        "max_rel_err": 0.006944444058641997,
+        "mean_rel_err": 0.0016370156081393361,
+        "nan": false,
+        "rows": 32768,
+        "rows_over_tol": 0,
+        "frac_rows_over_tol": 0.0,
+        "p99_row_rel_err": 0.0069444440305233,
+        "rule": "prefill_rowwise(frac_rows_over_tol<=0.005,p99<=tol,mean<=0.01)",
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "latency_mode": "eager",
+      "primary": false,
+      "mixed": "pf229376"
+    },
+    "1,16384pf131072": {
+      "before_us": 8541.279792785645,
+      "before_sigma_us": 55.635118369390284,
+      "after_us": 8197.183609008789,
+      "after_lat": [
+        8140.031814575195,
+        8197.183609008789,
+        8307.680130004883,
+        8162.464141845703,
+        8299.519538879395
+      ],
+      "improvement": 0.0403,
+      "noise_frac_3sigma": 0.0195,
+      "correctness": {
+        "max_abs_err": 0.125,
+        "max_rel_err": 0.007352940743944662,
+        "mean_rel_err": 0.0016375724226236343,
+        "nan": false,
+        "rows": 16384,
+        "rows_over_tol": 0,
+        "frac_rows_over_tol": 0.0,
+        "p99_row_rel_err": 0.007352940738201141,
+        "rule": "prefill_rowwise(frac_rows_over_tol<=0.005,p99<=tol,mean<=0.01)",
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "latency_mode": "eager",
+      "primary": false,
+      "mixed": "pf131072"
+    },
+    "1,32768pf131072": {
+      "before_us": 16618.59130859375,
+      "before_sigma_us": 56.98030943855056,
+      "after_us": 16318.431854248047,
+      "after_lat": [
+        16318.431854248047,
+        16230.400085449219,
+        16333.856582641602,
+        16301.12075805664,
+        16434.240341186523
+      ],
+      "improvement": 0.0181,
+      "noise_frac_3sigma": 0.0103,
+      "correctness": {
+        "max_abs_err": 0.125,
+        "max_rel_err": 0.006944444058641997,
+        "mean_rel_err": 0.0016370156081393361,
+        "nan": false,
+        "rows": 32768,
+        "rows_over_tol": 0,
+        "frac_rows_over_tol": 0.0,
+        "p99_row_rel_err": 0.0069444440305233,
+        "rule": "prefill_rowwise(frac_rows_over_tol<=0.005,p99<=tol,mean<=0.01)",
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "latency_mode": "eager",
+      "primary": false,
+      "mixed": "pf131072"
+    }
+  },
+  "driver_sha": "ff88e72e3180",
+  "pristine_points": {
+    "1,16384pf245760": {
+      "median": 9030.943870544434,
+      "sigma": 53.302371459008
+    },
+    "1,32768pf229376": {
+      "median": 17937.376022338867,
+      "sigma": 98.54270761069489
+    },
+    "1,16384pf131072": {
+      "median": 9201.600074768066,
+      "sigma": 63.31442667493737
+    },
+    "1,32768pf131072": {
+      "median": 18074.752807617188,
+      "sigma": 119.08147935404492
+    }
+  },
+  "baseline_tree": "/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_lcprefill_claude/best_tree",
+  "changed_files": [
+    "kernels/jit/csrc/attention/kda_fused_decode.cuh",
+    "kernels/jit/csrc/attention/kda_chunk_h.cuh",
+    "kernels/jit/csrc/kimi_k3/situ_and_mul.cuh",
+    "kernels/jit/csrc/kimi_k3/attn_res/fused_tma.cuh",
+    "kernels/ops/attention/kda_chunk_h.py",
+    "kernels/ops/attention/kda_fused_decode.py",
+    "kernels/ops/kimi_k3/attn_res.py",
+    "kernels/ops/mamba/causal_conv1d_triton.py",
+    "kernels/ops/attention/fla/fused_norm_gate.py",
+    "kernels/ops/attention/fla/kda.py",
+    "kernels/ops/attention/fla/fused_recurrent.py",
+    "kernels/ops/attention/fla/l2norm.py",
+    "kernels/ops/attention/fla/chunk_delta_h.py",
+    "kernels/ops/attention/linear/kda_ptx_prefill/__init__.py",
+    "srt/models/kimi_k3.py",
+    "srt/layers/attn_residual.py",
+    "srt/layers/attention/linear/kda_backend.py",
+    "srt/layers/attention/linear/kernels/kda_triton.py",
+    "srt/layers/attention/linear/kernels/kda_ptx.py"
+  ],
+  "diff_patch": "/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_lcprefill_claude/trial_2_tree_judged.patch",
+  "diff_lines": 2272,
+  "gates": {
+    "correctness": true,
+    "latency_improved": true,
+    "no_secondary_regression": true
+  },
+  "required_improvement": 0.0109,
+  "before_us": 8307.87181854248,
+  "latency_us": 8193.183898925781,
+  "recovered_frac": 0.0138,
+  "correctness": {
+    "pass": true
+  },
+  "golden_dir": "/raid/yilegu/eval_goldens/golden_k3_98e52d004950",
+  "verdict": "PASS",
+  "reason": "all gates passed",
+  "trial": 2,
+  "agent_exit": 124
+}

@@ -1,0 +1,141 @@
+{
+  "agent_container": "iteropt_k3_mla_verify_claude_run_3",
+  "case_key": "56018028b331",
+  "points": {
+    "64,8192vk3": {
+      "before_us": 483.71198773384094,
+      "before_sigma_us": 0.326708765162123,
+      "after_us": 473.60000014305115,
+      "after_lat": [
+        473.63200783729553,
+        472.57599234580994,
+        473.60000014305115,
+        473.5040068626404,
+        473.7919867038727
+      ],
+      "improvement": 0.0209,
+      "noise_frac_3sigma": 0.002,
+      "correctness": {
+        "max_abs_err": 0.0,
+        "max_rel_err": 0.0,
+        "mean_rel_err": 0.0,
+        "nan": false,
+        "rows": 256,
+        "rows_over_tol": 0,
+        "frac_rows_over_tol": 0.0,
+        "p99_row_rel_err": 0.0,
+        "rule": "max_rel_err<=tol",
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "latency_mode": "graph",
+      "primary": true,
+      "mixed": "vk3"
+    },
+    "128,8192vk3": {
+      "before_us": 628.063976764679,
+      "before_sigma_us": 0.051186980877494195,
+      "after_us": 626.1439919471741,
+      "after_lat": [
+        626.0480284690857,
+        626.1119842529297,
+        626.4640092849731,
+        626.1759996414185,
+        626.1439919471741
+      ],
+      "improvement": 0.0031,
+      "noise_frac_3sigma": 0.0002,
+      "correctness": {
+        "max_abs_err": 0.0,
+        "max_rel_err": 0.0,
+        "mean_rel_err": 0.0,
+        "nan": false,
+        "rows": 512,
+        "rows_over_tol": 0,
+        "frac_rows_over_tol": 0.0,
+        "p99_row_rel_err": 0.0,
+        "rule": "max_rel_err<=tol",
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "latency_mode": "graph",
+      "primary": false,
+      "mixed": "vk3"
+    },
+    "16,65536vk3": {
+      "before_us": 399.616003036499,
+      "before_sigma_us": 0.8701593538685954,
+      "after_us": 396.5759873390198,
+      "after_lat": [
+        394.81601119041443,
+        396.5759873390198,
+        396.60799503326416,
+        395.6800103187561,
+        396.7039883136749
+      ],
+      "improvement": 0.0076,
+      "noise_frac_3sigma": 0.0065,
+      "correctness": {
+        "max_abs_err": 0.0,
+        "max_rel_err": 0.0,
+        "mean_rel_err": 0.0,
+        "nan": false,
+        "rows": 64,
+        "rows_over_tol": 0,
+        "frac_rows_over_tol": 0.0,
+        "p99_row_rel_err": 0.0,
+        "rule": "max_rel_err<=tol",
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "latency_mode": "graph",
+      "primary": false,
+      "mixed": "vk3"
+    }
+  },
+  "driver_sha": "d5a0ef3652d4",
+  "pristine_points": {
+    "64,8192vk3": {
+      "median": 492.92799830436707,
+      "sigma": 0.028628552053389242
+    },
+    "128,8192vk3": {
+      "median": 658.7200164794922,
+      "sigma": 0.4495721203359346
+    },
+    "16,65536vk3": {
+      "median": 425.28000473976135,
+      "sigma": 0.7800647127491033
+    }
+  },
+  "baseline_tree": "/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_verify_claude/best_tree",
+  "changed_files": [
+    "kernels/jit/csrc/elementwise/set_mla_kv_concat_q.cuh",
+    "kernels/jit/csrc/kimi_k3/attn_res/fused_tma.cuh",
+    "kernels/ops/kimi_k3/attn_res.py",
+    "srt/models/kimi_k3.py",
+    "srt/layers/attn_residual.py"
+  ],
+  "diff_patch": "/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_verify_claude/trial_3_tree_judged.patch",
+  "diff_lines": 531,
+  "gates": {
+    "correctness": true,
+    "latency_improved": true,
+    "no_secondary_regression": true
+  },
+  "required_improvement": 0.005,
+  "before_us": 483.71198773384094,
+  "latency_us": 473.60000014305115,
+  "recovered_frac": 0.0209,
+  "correctness": {
+    "pass": true
+  },
+  "golden_dir": "/raid/yilegu/eval_goldens/golden_k3_56018028b331",
+  "verdict": "PASS",
+  "reason": "all gates passed",
+  "trial": 3,
+  "agent_exit": 124
+}

@@ -1,0 +1,195 @@
+{
+  "agent_container": "iteropt_k3_kda_lcprefill_claude_run_6",
+  "case_key": "98e52d004950",
+  "points": {
+    "1,16384pf245760": {
+      "before_us": 8244.447708129883,
+      "before_sigma_us": 84.72404452714106,
+      "after_us": 8146.047592163086,
+      "after_lat": [
+        8146.495819091797,
+        8142.016410827637,
+        8146.047592163086,
+        8145.024299621582,
+        8211.711883544922
+      ],
+      "improvement": 0.0119,
+      "noise_frac_3sigma": 0.0308,
+      "correctness": {
+        "max_abs_err": 5.125,
+        "max_rel_err": 0.30147057050173115,
+        "mean_rel_err": 0.0050603668205440044,
+        "nan": false,
+        "rows": 16384,
+        "rows_over_tol": 9,
+        "frac_rows_over_tol": 0.00054931640625,
+        "p99_row_rel_err": 0.014495624229311943,
+        "rule": "prefill_rowwise(frac_rows_over_tol<=0.005,p99<=tol,mean<=0.01)",
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "latency_mode": "eager",
+      "primary": true,
+      "mixed": "pf245760"
+    },
+    "1,32768pf229376": {
+      "before_us": 16477.50473022461,
+      "before_sigma_us": 105.36176076842285,
+      "after_us": 16219.232559204102,
+      "after_lat": [
+        16277.727127075195,
+        16123.231887817383,
+        16262.239456176758,
+        16219.232559204102,
+        16146.720886230469
+      ],
+      "improvement": 0.0157,
+      "noise_frac_3sigma": 0.0192,
+      "correctness": {
+        "max_abs_err": 4.7578125,
+        "max_rel_err": 0.264322901982061,
+        "mean_rel_err": 0.0050606136210262775,
+        "nan": false,
+        "rows": 32768,
+        "rows_over_tol": 18,
+        "frac_rows_over_tol": 0.00054931640625,
+        "p99_row_rel_err": 0.0138888880610466,
+        "rule": "prefill_rowwise(frac_rows_over_tol<=0.005,p99<=tol,mean<=0.01)",
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "latency_mode": "eager",
+      "primary": false,
+      "mixed": "pf229376"
+    },
+    "1,16384pf131072": {
+      "before_us": 8399.840354919434,
+      "before_sigma_us": 55.96731855171768,
+      "after_us": 8150.272369384766,
+      "after_lat": [
+        8146.335601806641,
+        8158.495903015137,
+        8145.9197998046875,
+        8185.183525085449,
+        8150.272369384766
+      ],
+      "improvement": 0.0297,
+      "noise_frac_3sigma": 0.02,
+      "correctness": {
+        "max_abs_err": 5.125,
+        "max_rel_err": 0.30147057050173115,
+        "mean_rel_err": 0.0050603668205440044,
+        "nan": false,
+        "rows": 16384,
+        "rows_over_tol": 9,
+        "frac_rows_over_tol": 0.00054931640625,
+        "p99_row_rel_err": 0.014495624229311943,
+        "rule": "prefill_rowwise(frac_rows_over_tol<=0.005,p99<=tol,mean<=0.01)",
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "latency_mode": "eager",
+      "primary": false,
+      "mixed": "pf131072"
+    },
+    "1,32768pf131072": {
+      "before_us": 16451.99966430664,
+      "before_sigma_us": 34.43958967042174,
+      "after_us": 16043.264389038086,
+      "after_lat": [
+        16018.52798461914,
+        16035.039901733398,
+        16064.800262451172,
+        16043.264389038086,
+        16079.935073852539
+      ],
+      "improvement": 0.0248,
+      "noise_frac_3sigma": 0.0063,
+      "correctness": {
+        "max_abs_err": 4.7578125,
+        "max_rel_err": 0.264322901982061,
+        "mean_rel_err": 0.0050606136210262775,
+        "nan": false,
+        "rows": 32768,
+        "rows_over_tol": 18,
+        "frac_rows_over_tol": 0.00054931640625,
+        "p99_row_rel_err": 0.0138888880610466,
+        "rule": "prefill_rowwise(frac_rows_over_tol<=0.005,p99<=tol,mean<=0.01)",
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "latency_mode": "eager",
+      "primary": false,
+      "mixed": "pf131072"
+    }
+  },
+  "driver_sha": "ff88e72e3180",
+  "pristine_points": {
+    "1,16384pf245760": {
+      "median": 9030.943870544434,
+      "sigma": 53.302371459008
+    },
+    "1,32768pf229376": {
+      "median": 17937.376022338867,
+      "sigma": 98.54270761069489
+    },
+    "1,16384pf131072": {
+      "median": 9201.600074768066,
+      "sigma": 63.31442667493737
+    },
+    "1,32768pf131072": {
+      "median": 18074.752807617188,
+      "sigma": 119.08147935404492
+    }
+  },
+  "baseline_tree": "/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_lcprefill_claude/best_tree",
+  "changed_files": [
+    "kernels/jit/csrc/attention/kda_fused_decode.cuh",
+    "kernels/jit/csrc/attention/kda_conv_l2norm.cuh",
+    "kernels/jit/csrc/attention/kda_chunk_h.cuh",
+    "kernels/jit/csrc/attention/kda_chunk_intra.cuh",
+    "kernels/jit/csrc/kimi_k3/situ_and_mul.cuh",
+    "kernels/jit/csrc/kimi_k3/attn_res/fused_tma.cuh",
+    "kernels/ops/attention/kda_chunk_h.py",
+    "kernels/ops/attention/kda_fused_decode.py",
+    "kernels/ops/attention/kda_conv_l2norm.py",
+    "kernels/ops/attention/kda_chunk_intra.py",
+    "kernels/ops/kimi_k3/attn_res.py",
+    "kernels/ops/mamba/causal_conv1d_triton.py",
+    "kernels/ops/attention/fla/fused_norm_gate.py",
+    "kernels/ops/attention/fla/kda.py",
+    "kernels/ops/attention/fla/fused_recurrent.py",
+    "kernels/ops/attention/fla/l2norm.py",
+    "kernels/ops/attention/fla/chunk_intra.py",
+    "kernels/ops/attention/fla/chunk_delta_h.py",
+    "kernels/ops/attention/linear/kda_ptx_prefill/__init__.py",
+    "srt/models/kimi_k3.py",
+    "srt/layers/attn_residual.py",
+    "srt/layers/attention/linear/kda_backend.py",
+    "srt/layers/attention/linear/kernels/kda_triton.py",
+    "srt/layers/attention/linear/kernels/kda_ptx.py"
+  ],
+  "diff_patch": "/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_lcprefill_claude/trial_6_tree_judged.patch",
+  "diff_lines": 3764,
+  "gates": {
+    "correctness": true,
+    "latency_improved": false,
+    "no_secondary_regression": true
+  },
+  "required_improvement": 0.0308,
+  "before_us": 8244.447708129883,
+  "latency_us": 8146.047592163086,
+  "recovered_frac": 0.0119,
+  "correctness": {
+    "pass": true
+  },
+  "golden_dir": "/raid/yilegu/eval_goldens/golden_k3_98e52d004950",
+  "verdict": "FAIL",
+  "reason": "failed: latency_improved",
+  "trial": 6,
+  "agent_exit": 124
+}

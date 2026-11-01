@@ -1,0 +1,190 @@
+{
+  "agent_container": "iteropt_k3_kda_lcprefill_claude_run_3",
+  "case_key": "98e52d004950",
+  "points": {
+    "1,16384pf245760": {
+      "before_us": 8331.904411315918,
+      "before_sigma_us": 45.45226179685244,
+      "after_us": 8270.912170410156,
+      "after_lat": [
+        8266.655921936035,
+        8274.911880493164,
+        8281.21566772461,
+        8268.896102905273,
+        8270.912170410156
+      ],
+      "improvement": 0.0073,
+      "noise_frac_3sigma": 0.0164,
+      "correctness": {
+        "max_abs_err": 0.125,
+        "max_rel_err": 0.007352940743944662,
+        "mean_rel_err": 0.0016375724226236343,
+        "nan": false,
+        "rows": 16384,
+        "rows_over_tol": 0,
+        "frac_rows_over_tol": 0.0,
+        "p99_row_rel_err": 0.007352940738201141,
+        "rule": "prefill_rowwise(frac_rows_over_tol<=0.005,p99<=tol,mean<=0.01)",
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "latency_mode": "eager",
+      "primary": true,
+      "mixed": "pf245760"
+    },
+    "1,32768pf229376": {
+      "before_us": 16823.360443115234,
+      "before_sigma_us": 153.35995901748734,
+      "after_us": 16415.935516357422,
+      "after_lat": [
+        16415.935516357422,
+        16604.223251342773,
+        16385.055541992188,
+        16318.592071533203,
+        16421.920776367188
+      ],
+      "improvement": 0.0242,
+      "noise_frac_3sigma": 0.0273,
+      "correctness": {
+        "max_abs_err": 0.125,
+        "max_rel_err": 0.006944444058641997,
+        "mean_rel_err": 0.0016370156081393361,
+        "nan": false,
+        "rows": 32768,
+        "rows_over_tol": 0,
+        "frac_rows_over_tol": 0.0,
+        "p99_row_rel_err": 0.0069444440305233,
+        "rule": "prefill_rowwise(frac_rows_over_tol<=0.005,p99<=tol,mean<=0.01)",
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "latency_mode": "eager",
+      "primary": false,
+      "mixed": "pf229376"
+    },
+    "1,16384pf131072": {
+      "before_us": 8584.223747253418,
+      "before_sigma_us": 7.395400405157606,
+      "after_us": 8270.912170410156,
+      "after_lat": [
+        8322.112083435059,
+        8270.912170410156,
+        8449.088096618652,
+        8245.439529418945,
+        8262.784004211426
+      ],
+      "improvement": 0.0365,
+      "noise_frac_3sigma": 0.0026,
+      "correctness": {
+        "max_abs_err": 0.125,
+        "max_rel_err": 0.007352940743944662,
+        "mean_rel_err": 0.0016375724226236343,
+        "nan": false,
+        "rows": 16384,
+        "rows_over_tol": 0,
+        "frac_rows_over_tol": 0.0,
+        "p99_row_rel_err": 0.007352940738201141,
+        "rule": "prefill_rowwise(frac_rows_over_tol<=0.005,p99<=tol,mean<=0.01)",
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "latency_mode": "eager",
+      "primary": false,
+      "mixed": "pf131072"
+    },
+    "1,32768pf131072": {
+      "before_us": 16753.759384155273,
+      "before_sigma_us": 85.62236081324006,
+      "after_us": 16493.728637695312,
+      "after_lat": [
+        16522.335052490234,
+        16266.20864868164,
+        16659.423828125,
+        16493.728637695312,
+        16463.008880615234
+      ],
+      "improvement": 0.0155,
+      "noise_frac_3sigma": 0.0153,
+      "correctness": {
+        "max_abs_err": 0.125,
+        "max_rel_err": 0.006944444058641997,
+        "mean_rel_err": 0.0016370156081393361,
+        "nan": false,
+        "rows": 32768,
+        "rows_over_tol": 0,
+        "frac_rows_over_tol": 0.0,
+        "p99_row_rel_err": 0.0069444440305233,
+        "rule": "prefill_rowwise(frac_rows_over_tol<=0.005,p99<=tol,mean<=0.01)",
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "latency_mode": "eager",
+      "primary": false,
+      "mixed": "pf131072"
+    }
+  },
+  "driver_sha": "ff88e72e3180",
+  "pristine_points": {
+    "1,16384pf245760": {
+      "median": 9030.943870544434,
+      "sigma": 53.302371459008
+    },
+    "1,32768pf229376": {
+      "median": 17937.376022338867,
+      "sigma": 98.54270761069489
+    },
+    "1,16384pf131072": {
+      "median": 9201.600074768066,
+      "sigma": 63.31442667493737
+    },
+    "1,32768pf131072": {
+      "median": 18074.752807617188,
+      "sigma": 119.08147935404492
+    }
+  },
+  "baseline_tree": "/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_lcprefill_claude/best_tree",
+  "changed_files": [
+    "kernels/jit/csrc/attention/kda_fused_decode.cuh",
+    "kernels/jit/csrc/attention/kda_chunk_h.cuh",
+    "kernels/jit/csrc/kimi_k3/situ_and_mul.cuh",
+    "kernels/jit/csrc/kimi_k3/attn_res/fused_tma.cuh",
+    "kernels/ops/attention/kda_chunk_h.py",
+    "kernels/ops/attention/kda_fused_decode.py",
+    "kernels/ops/kimi_k3/attn_res.py",
+    "kernels/ops/mamba/causal_conv1d_triton.py",
+    "kernels/ops/attention/fla/fused_norm_gate.py",
+    "kernels/ops/attention/fla/kda.py",
+    "kernels/ops/attention/fla/fused_recurrent.py",
+    "kernels/ops/attention/fla/l2norm.py",
+    "kernels/ops/attention/fla/chunk_delta_h.py",
+    "kernels/ops/attention/linear/kda_ptx_prefill/__init__.py",
+    "srt/models/kimi_k3.py",
+    "srt/layers/attn_residual.py",
+    "srt/layers/attention/linear/kda_backend.py",
+    "srt/layers/attention/linear/kernels/kda_triton.py",
+    "srt/layers/attention/linear/kernels/kda_ptx.py"
+  ],
+  "diff_patch": "/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_lcprefill_claude/trial_3_tree_judged.patch",
+  "diff_lines": 2318,
+  "gates": {
+    "correctness": true,
+    "latency_improved": false,
+    "no_secondary_regression": true
+  },
+  "required_improvement": 0.0164,
+  "before_us": 8331.904411315918,
+  "latency_us": 8270.912170410156,
+  "recovered_frac": 0.0073,
+  "correctness": {
+    "pass": true
+  },
+  "golden_dir": "/raid/yilegu/eval_goldens/golden_k3_98e52d004950",
+  "verdict": "FAIL",
+  "reason": "failed: latency_improved",
+  "trial": 3,
+  "agent_exit": 124
+}

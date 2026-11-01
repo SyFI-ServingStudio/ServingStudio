@@ -1,0 +1,153 @@
+{
+  "agent_container": "recheck_mla_mixed_claude_seed1",
+  "case_key": "1c0c58663db6",
+  "points": {
+    "64,8192mx16384": {
+      "before_us": 21239.295959472656,
+      "before_sigma_us": 168.02040601594493,
+      "after_us": 8353.08837890625,
+      "after_lat": [
+        8260.767936706543,
+        8533.184051513672,
+        8353.08837890625,
+        8359.071731567383,
+        8348.928451538086
+      ],
+      "improvement": 0.6067,
+      "noise_frac_3sigma": 0.0237,
+      "correctness": {
+        "max_abs_err": 0.1875,
+        "max_rel_err": 0.011278194810334145,
+        "mean_rel_err": 1.812969276215881e-05,
+        "nan": false,
+        "rows": 16448,
+        "rows_over_tol": 0,
+        "frac_rows_over_tol": 0.0,
+        "p99_row_rel_err": 0.0,
+        "rule": "prefill_rowwise(frac_rows_over_tol<=0.005,p99<=tol,mean<=0.01)",
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "latency_mode": "eager",
+      "primary": true,
+      "mixed": "mx16384"
+    },
+    "128,8192mx4096": {
+      "before_us": 24737.279891967773,
+      "before_sigma_us": 173.39391773706254,
+      "after_us": 2541.856050491333,
+      "after_lat": [
+        2592.8640365600586,
+        2445.568084716797,
+        2575.615882873535,
+        2435.5199337005615,
+        2541.856050491333
+      ],
+      "improvement": 0.8972,
+      "noise_frac_3sigma": 0.021,
+      "correctness": {
+        "max_abs_err": 0.15625,
+        "max_rel_err": 0.009689921879694767,
+        "mean_rel_err": 0.00011195636034244671,
+        "nan": false,
+        "rows": 4224,
+        "rows_over_tol": 0,
+        "frac_rows_over_tol": 0.0,
+        "p99_row_rel_err": 0.0038759687449783087,
+        "rule": "prefill_rowwise(frac_rows_over_tol<=0.005,p99<=tol,mean<=0.01)",
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "latency_mode": "eager",
+      "primary": false,
+      "mixed": "mx4096"
+    },
+    "64,8192mx16384p49152": {
+      "before_us": 44626.304626464844,
+      "before_sigma_us": 652.4351444946323,
+      "after_us": 13057.503700256348,
+      "after_lat": [
+        14530.143737792969,
+        13043.264389038086,
+        13057.503700256348,
+        13555.19962310791,
+        13052.92797088623
+      ],
+      "improvement": 0.7074,
+      "noise_frac_3sigma": 0.0439,
+      "correctness": {
+        "max_abs_err": 0.1875,
+        "max_rel_err": 0.011111110452674936,
+        "mean_rel_err": 2.0926254364894703e-05,
+        "nan": false,
+        "rows": 16448,
+        "rows_over_tol": 0,
+        "frac_rows_over_tol": 0.0,
+        "p99_row_rel_err": 0.0,
+        "rule": "prefill_rowwise(frac_rows_over_tol<=0.005,p99<=tol,mean<=0.01)",
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "latency_mode": "eager",
+      "primary": false,
+      "mixed": "mx16384p49152"
+    }
+  },
+  "driver_sha": "d5a0ef3652d4",
+  "pristine_points": {
+    "64,8192mx16384": {
+      "median": 21239.295959472656,
+      "sigma": 168.02040601594493
+    },
+    "128,8192mx4096": {
+      "median": 24737.279891967773,
+      "sigma": 173.39391773706254
+    },
+    "64,8192mx16384p49152": {
+      "median": 44626.304626464844,
+      "sigma": 652.4351444946323
+    }
+  },
+  "changed_files": [
+    "kernels/jit/csrc/elementwise/set_mla_kv_concat_q.cuh",
+    "kernels/jit/csrc/moe/route_quant_fused.cuh",
+    "kernels/jit/csrc/moe/route_radix.cuh",
+    "kernels/jit/csrc/kimi_k3/attn_res/fused_tma.cuh",
+    "kernels/ops/gemm/dense_gemm_sm100_fp8_via_bf16_epilogue.py",
+    "kernels/ops/attention/set_mla_kv_concat_q.py",
+    "kernels/ops/attention/mla_kv_b_proj_pack_fp8.py",
+    "kernels/ops/attention/cute_dsl_fmha_fp8.py",
+    "kernels/ops/kimi_k3/attn_res.py",
+    "kernels/ops/kvcache/mla_buffer.py",
+    "kernels/ops/kvcache/kv_indices.py",
+    "kernels/ops/moe/moe_route_quant_fused.py",
+    "srt/model_executor/forward_batch_deepseek_mha_mixin.py",
+    "srt/models/kimi_k3.py",
+    "srt/layers/attn_residual.py",
+    "srt/models/deepseek_common/attention_forward_methods/forward_mha.py",
+    "srt/layers/attention/trtllm_mla_backend.py",
+    "srt/layers/attention/tokenspeed_mla_backend.py",
+    "srt/layers/attention/cutedsl_mla_backend.py",
+    "srt/layers/moe/topk.py"
+  ],
+  "diff_patch": "/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_mixed_claude/best_tree_judged.patch",
+  "diff_lines": 3922,
+  "gates": {
+    "correctness": true,
+    "latency_improved": true,
+    "no_secondary_regression": true
+  },
+  "required_improvement": 0.0237,
+  "before_us": 21239.295959472656,
+  "latency_us": 8353.08837890625,
+  "recovered_frac": 0.6067,
+  "correctness": {
+    "pass": true
+  },
+  "golden_dir": "/raid/yilegu/eval_goldens/golden_k3_1c0c58663db6",
+  "verdict": "PASS",
+  "reason": "all gates passed"
+}

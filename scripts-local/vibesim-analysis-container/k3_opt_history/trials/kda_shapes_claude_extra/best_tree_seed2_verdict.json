@@ -1,0 +1,206 @@
+{
+  "agent_container": "recheck_kda_shapes_claude_seed2",
+  "case_key": "636689ad5393",
+  "points": {
+    "1,1048576": {
+      "before_us": 132.4480026960373,
+      "before_sigma_us": 0.02394758638212225,
+      "after_us": 103.71199995279312,
+      "after_lat": [
+        103.71199995279312,
+        103.74400019645691,
+        103.71199995279312,
+        103.64799946546555,
+        103.71199995279312
+      ],
+      "improvement": 0.217,
+      "noise_frac_3sigma": 0.0005,
+      "correctness": {
+        "max_abs_err": 0.0,
+        "max_rel_err": 0.0,
+        "mean_rel_err": 0.0,
+        "nan": false,
+        "rule": "max_rel_err<=tol",
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "latency_mode": "graph",
+      "primary": true,
+      "mixed": ""
+    },
+    "16,65536": {
+      "before_us": 202.07999646663666,
+      "before_sigma_us": 0.020238731460726335,
+      "after_us": 169.11999881267548,
+      "after_lat": [
+        169.15200650691986,
+        167.32800006866455,
+        167.26399958133698,
+        169.24799978733063,
+        169.11999881267548
+      ],
+      "improvement": 0.1631,
+      "noise_frac_3sigma": 0.0003,
+      "correctness": {
+        "max_abs_err": 0.0625,
+        "max_rel_err": 0.004784688628923359,
+        "mean_rel_err": 0.0001632254134165123,
+        "nan": false,
+        "rows": 16,
+        "rows_over_tol": 0,
+        "frac_rows_over_tol": 0.0,
+        "p99_row_rel_err": 0.0047846888191998005,
+        "rule": "max_rel_err<=tol",
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "latency_mode": "graph",
+      "primary": false,
+      "mixed": ""
+    },
+    "128,8192": {
+      "before_us": 400.7999897003174,
+      "before_sigma_us": 0.4813291111546743,
+      "after_us": 372.0639944076538,
+      "after_lat": [
+        372.0960021018982,
+        372.0639944076538,
+        372.0639944076538,
+        372.1280097961426,
+        372.0639944076538
+      ],
+      "improvement": 0.0717,
+      "noise_frac_3sigma": 0.0036,
+      "correctness": {
+        "max_abs_err": 0.171875,
+        "max_rel_err": 0.011178861061537492,
+        "mean_rel_err": 0.0004178948875050992,
+        "nan": false,
+        "rows": 128,
+        "rows_over_tol": 0,
+        "frac_rows_over_tol": 0.0,
+        "p99_row_rel_err": 0.008130080997943878,
+        "rule": "max_rel_err<=tol",
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "latency_mode": "graph",
+      "primary": false,
+      "mixed": ""
+    },
+    "32,8192": {
+      "before_us": 259.39199328422546,
+      "before_sigma_us": 0.01568050374835213,
+      "after_us": 222.56000339984894,
+      "after_lat": [
+        222.56000339984894,
+        222.56000339984894,
+        222.56000339984894,
+        222.56000339984894,
+        222.52799570560455
+      ],
+      "improvement": 0.142,
+      "noise_frac_3sigma": 0.0002,
+      "correctness": {
+        "max_abs_err": 0.28125,
+        "max_rel_err": 0.019823787148984168,
+        "mean_rel_err": 0.004186703357845545,
+        "nan": false,
+        "rows": 32,
+        "rows_over_tol": 0,
+        "frac_rows_over_tol": 0.0,
+        "p99_row_rel_err": 0.019823787733912468,
+        "rule": "max_rel_err<=tol",
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "latency_mode": "graph",
+      "primary": false,
+      "mixed": ""
+    },
+    "1,8192": {
+      "before_us": 136.51199638843536,
+      "before_sigma_us": 1.6385270417559792,
+      "after_us": 103.80800068378448,
+      "after_lat": [
+        105.76000064611435,
+        103.80800068378448,
+        103.80800068378448,
+        103.84000092744827,
+        103.7760004401207
+      ],
+      "improvement": 0.2396,
+      "noise_frac_3sigma": 0.036,
+      "correctness": {
+        "max_abs_err": 0.0,
+        "max_rel_err": 0.0,
+        "mean_rel_err": 0.0,
+        "nan": false,
+        "rule": "max_rel_err<=tol",
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "latency_mode": "graph",
+      "primary": false,
+      "mixed": ""
+    }
+  },
+  "driver_sha": "ff88e72e3180",
+  "pristine_points": {
+    "1,1048576": {
+      "median": 132.4480026960373,
+      "sigma": 0.02394758638212225
+    },
+    "16,65536": {
+      "median": 202.07999646663666,
+      "sigma": 0.020238731460726335
+    },
+    "128,8192": {
+      "median": 400.7999897003174,
+      "sigma": 0.4813291111546743
+    },
+    "32,8192": {
+      "median": 259.39199328422546,
+      "sigma": 0.01568050374835213
+    },
+    "1,8192": {
+      "median": 136.51199638843536,
+      "sigma": 1.6385270417559792
+    }
+  },
+  "changed_files": [
+    "kernels/jit/csrc/attention/kda_fused_decode.cuh",
+    "kernels/jit/csrc/elementwise/l2_prefetch.cuh",
+    "kernels/jit/csrc/kimi_k3/attn_res/fused_tma.cuh",
+    "kernels/ops/attention/kda_fused_decode.py",
+    "kernels/ops/kimi_k3/attn_res.py",
+    "kernels/ops/elementwise/l2_prefetch.py",
+    "kernels/ops/attention/fla/fused_recurrent.py",
+    "srt/models/kimi_k3.py",
+    "srt/layers/attn_residual.py",
+    "srt/layers/attention/linear/kda_backend.py",
+    "srt/layers/moe/moe_runner/flashinfer_trtllm.py"
+  ],
+  "diff_patch": "/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_shapes_claude/best_tree_judged.patch",
+  "diff_lines": 1702,
+  "gates": {
+    "correctness": true,
+    "latency_improved": true,
+    "no_secondary_regression": true
+  },
+  "required_improvement": 0.005,
+  "before_us": 132.4480026960373,
+  "latency_us": 103.71199995279312,
+  "recovered_frac": 0.217,
+  "correctness": {
+    "pass": true
+  },
+  "golden_dir": "/raid/yilegu/eval_goldens/golden_k3_636689ad5393",
+  "verdict": "PASS",
+  "reason": "all gates passed"
+}

@@ -1,0 +1,600 @@
+diff -ruN -x __pycache__ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_shapes_claude/best_tree/kernels/ops/attention/fla/fused_norm_gate.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/trial_2_tree_judged/kernels/ops/attention/fla/fused_norm_gate.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_shapes_claude/best_tree/kernels/ops/attention/fla/fused_norm_gate.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/trial_2_tree_judged/kernels/ops/attention/fla/fused_norm_gate.py	2026-09-28 02:26:41.988742828 -0700
+@@ -8,6 +8,7 @@
+ import triton.language as tl
+ 
+ from sglang.kernels.jit.utils import is_arch_support_pdl
++from sglang.kernels.ops.triton_launch import fast_launch
+ from sglang.srt.utils import (
+     cdiv,
+     cpu_has_amx_support,
+@@ -46,6 +47,8 @@
+     HAS_WEIGHT: tl.constexpr,
+     HAS_BIAS: tl.constexpr,
+     USE_GDC: tl.constexpr = False,
++    stride_g=0,
++    G_HEADS: tl.constexpr = 0,
+ ):
+     # PDL: x is the producer's output (e.g. the fused KDA verify kernel, which
+     # triggers its dependents right after the o store), so every load sits
+@@ -98,8 +101,19 @@
+         b_y = b_y + b_b[None, :]
+ 
+     # swish/sigmoid output gate
+-    p_g = tl.make_block_ptr(g, (T, D), (D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
+-    b_g = tl.load(p_g, boundary_check=(0, 1)).to(tl.float32)
++    if G_HEADS > 0:
++        # Strided gate [T // G_HEADS, G_HEADS, D] with row stride stride_g:
++        # read in place instead of materializing a contiguous copy.
++        o_t = i_t * BT + tl.arange(0, BT)
++        p_g = g + ((o_t // G_HEADS) * stride_g + (o_t % G_HEADS) * D)[:, None]
++        b_g = tl.load(
++            p_g + o_d[None, :], mask=(o_t < T)[:, None] & m_d[None, :]
++        ).to(tl.float32)
++    else:
++        p_g = tl.make_block_ptr(
++            g, (T, D), (D, 1), (i_t * BT, 0), (BT, BD), (1, 0)
++        )
++        b_g = tl.load(p_g, boundary_check=(0, 1)).to(tl.float32)
+     if ACTIVATION == "swish" or ACTIVATION == "silu":
+         b_y = b_y * b_g * tl.sigmoid(b_g)
+     elif ACTIVATION == "sigmoid":
+@@ -195,6 +209,14 @@
+     if residual is not None:
+         residual_dtype = residual.dtype
+     T, D = x.shape
++    g_heads = 0
++    if g.dim() == 3:
++        # [T // H, H, D] gate with unit inner strides (see
++        # _flatten_norm_gate); only the D <= 512 kernel reads it strided.
++        if D <= 512:
++            g_heads = g.shape[1]
++        else:
++            g = g.reshape(T, D)
+     if residual is not None:
+         assert residual.shape == (T, D)
+     if weight is not None:
+@@ -227,7 +249,11 @@
+         pdl_kwargs = (
+             {"USE_GDC": True, "launch_pdl": True} if is_arch_support_pdl() else {}
+         )
+-        layer_norm_gated_fwd_kernel[(cdiv(T, BT),)](
++        if g_heads:
++            pdl_kwargs.update(stride_g=g.stride(0), G_HEADS=g_heads)
++        fast_launch(
++            layer_norm_gated_fwd_kernel,
++            (cdiv(T, BT),),
+             x=x,
+             g=g,
+             y=y,
+@@ -277,6 +303,52 @@
+     return y, mean, rstd, residual_out if residual_out is not None else x
+ 
+ 
++def _flatten_norm_gate(g: torch.Tensor, rows: int) -> torch.Tensor:
++    # A head-split view of a wider projection ([..., H, D] with unit strides
++    # over H and D but a padded row stride) stays 3D so the kernel can read
++    # it strided; everything else is flattened to 2D as before.
++    if (
++        g.dim() >= 3
++        and g.stride(-1) == 1
++        and g.stride(-2) == g.shape[-1]
++        and not g.is_contiguous()
++        and rows == g.shape[:-1].numel()
++    ):
++        g = g.reshape(-1, g.shape[-2], g.shape[-1])
++        if g.stride(1) == g.shape[-1] and g.stride(2) == 1:
++            return g
++    return g.reshape(-1, g.shape[-1])
++
++
++def _layer_norm_gated_fwd_nd(
++    x, g, weight, bias, activation, residual, eps, residual_in_fp32, is_rms_norm
++):
++    x_shape_og = x.shape
++    # reshape input data into 2D tensor
++    x = x.reshape(-1, x.shape[-1])
++    g = _flatten_norm_gate(g, x.shape[0])
++    if residual is not None:
++        assert residual.shape == x_shape_og
++        residual = residual.reshape(-1, residual.shape[-1])
++    residual_dtype = (
++        residual.dtype
++        if residual is not None
++        else (torch.float if residual_in_fp32 else None)
++    )
++    y, mean, rstd, residual_out = layer_norm_gated_fwd(
++        x=x,
++        g=g,
++        weight=weight,
++        bias=bias,
++        activation=activation,
++        eps=eps,
++        residual=residual,
++        residual_dtype=residual_dtype,
++        is_rms_norm=is_rms_norm,
++    )
++    return x, g, y, mean, rstd, residual_out
++
++
+ class LayerNormGatedFunction(torch.autograd.Function):
+     @staticmethod
+     def forward(
+@@ -294,27 +366,9 @@
+     ):
+         x_shape_og = x.shape
+         g_shape_og = g.shape
+-        # reshape input data into 2D tensor
+-        x = x.reshape(-1, x.shape[-1])
+-        g = g.reshape(-1, g.shape[-1])
+-        if residual is not None:
+-            assert residual.shape == x_shape_og
+-            residual = residual.reshape(-1, residual.shape[-1])
+-        residual_dtype = (
+-            residual.dtype
+-            if residual is not None
+-            else (torch.float if residual_in_fp32 else None)
+-        )
+-        y, mean, rstd, residual_out = layer_norm_gated_fwd(
+-            x=x,
+-            g=g,
+-            weight=weight,
+-            bias=bias,
+-            activation=activation,
+-            eps=eps,
+-            residual=residual,
+-            residual_dtype=residual_dtype,
+-            is_rms_norm=is_rms_norm,
++        x, g, y, mean, rstd, residual_out = _layer_norm_gated_fwd_nd(
++            x, g, weight, bias, activation, residual, eps, residual_in_fp32,
++            is_rms_norm,
+         )
+         ctx.save_for_backward(residual_out, g, weight, bias, mean, rstd)
+         ctx.x_shape_og = x_shape_og
+@@ -340,6 +394,14 @@
+     residual_in_fp32: bool = False,
+     eps: float = 1e-6,
+ ):
++    if not torch.is_grad_enabled():
++        # Inference: skip the autograd.Function dispatch (same kernel/args).
++        x_shape_og = x.shape
++        _, _, y, _, _, residual_out = _layer_norm_gated_fwd_nd(
++            x, g, weight, bias, activation, residual, eps, residual_in_fp32, True
++        )
++        y = y.reshape(x_shape_og)
++        return y if not prenorm else (y, residual_out.reshape(x_shape_og))
+     return LayerNormGatedFunction.apply(
+         x,
+         g,
+diff -ruN -x __pycache__ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_shapes_claude/best_tree/kernels/ops/attention/fla/fused_sigmoid_gating_recurrent.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/trial_2_tree_judged/kernels/ops/attention/fla/fused_sigmoid_gating_recurrent.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_shapes_claude/best_tree/kernels/ops/attention/fla/fused_sigmoid_gating_recurrent.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/trial_2_tree_judged/kernels/ops/attention/fla/fused_sigmoid_gating_recurrent.py	2026-09-28 02:26:28.702841681 -0700
+@@ -5,6 +5,7 @@
+ import triton.language as tl
+ 
+ from sglang.kernels.jit.utils import is_arch_support_pdl
++from sglang.kernels.ops.triton_launch import fast_launch
+ 
+ 
+ @triton.jit(do_not_specialize=["T"])
+@@ -464,7 +465,9 @@
+     # KDA and GDN recurrent paths.
+     pdl_kwargs = {"USE_GDC": True, "launch_pdl": True} if is_arch_support_pdl() else {}
+ 
+-    fused_sigmoid_gating_delta_rule_update_kernel[grid](
++    fast_launch(
++        fused_sigmoid_gating_delta_rule_update_kernel,
++        grid,
+         A_log=A_log,
+         a=a,
+         dt_bias=dt_bias,
+diff -ruN -x __pycache__ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_shapes_claude/best_tree/kernels/ops/mamba/causal_conv1d_triton.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/trial_2_tree_judged/kernels/ops/mamba/causal_conv1d_triton.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_shapes_claude/best_tree/kernels/ops/mamba/causal_conv1d_triton.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/trial_2_tree_judged/kernels/ops/mamba/causal_conv1d_triton.py	2026-09-28 02:26:28.703841598 -0700
+@@ -11,6 +11,7 @@
+ import triton.language as tl
+ 
+ from sglang.kernels.jit.utils import is_arch_support_pdl
++from sglang.kernels.ops.triton_launch import fast_launch
+ 
+ PAD_SLOT_ID = -1
+ 
+@@ -1144,7 +1145,9 @@
+ 
+     pdl_kwargs = {"USE_GDC": True, "launch_pdl": True} if is_arch_support_pdl() else {}
+ 
+-    _causal_conv1d_update_kernel[grid](
++    fast_launch(
++        _causal_conv1d_update_kernel,
++        grid,
+         # Pointers to matrices
+         x,
+         weight,
+diff -ruN -x __pycache__ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_shapes_claude/best_tree/kernels/ops/moe/moe_fused_gate.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/trial_2_tree_judged/kernels/ops/moe/moe_fused_gate.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_shapes_claude/best_tree/kernels/ops/moe/moe_fused_gate.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/trial_2_tree_judged/kernels/ops/moe/moe_fused_gate.py	2026-09-28 02:26:28.703841598 -0700
+@@ -10,6 +10,7 @@
+ from sglang.kernels.jit.utils import cache_once, is_arch_support_pdl, load_jit
+ from sglang.kernels.kernel_api_logging import debug_kernel_api
+ from sglang.kernels.ops.moe import moe_route_radix
++from sglang.kernels.ops.triton_launch import fast_launch
+ 
+ if TYPE_CHECKING:
+     from tvm_ffi.module import Module
+@@ -363,7 +364,9 @@
+     grid = (triton.cdiv(M, BLOCK_M),)
+     use_pdl = is_arch_support_pdl()
+     extra = {"launch_pdl": True} if use_pdl else {}
+-    _router_triton_kernel[grid](
++    fast_launch(
++        _router_triton_kernel,
++        grid,
+         scores,
+         bias if bias is not None else scores,
+         weights,
+diff -ruN -x __pycache__ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_shapes_claude/best_tree/kernels/ops/triton_launch.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/trial_2_tree_judged/kernels/ops/triton_launch.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_shapes_claude/best_tree/kernels/ops/triton_launch.py	1969-12-31 16:00:00.000000000 -0800
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/trial_2_tree_judged/kernels/ops/triton_launch.py	2026-09-28 02:26:41.989742745 -0700
+@@ -0,0 +1,72 @@
++"""Low-overhead launch of already-compiled ``@triton.jit`` kernels.
++
++``fast_launch(kernel, grid, *args, **kwargs)`` is equivalent to
++``kernel[grid](*args, **kwargs)``. It keeps Triton's own binder and cache
++key, so specialization (dtypes, 16-byte alignment, ``== 1`` / ``% 16`` ints,
++constexprs and launch options) resolves to exactly the kernel
++``JITFunction.run`` would pick. On a cache hit it launches that kernel
++directly, skipping the rest of ``run``'s per-call Python bookkeeping, which
++dominates small eager decode/verify steps. Anything unusual (first
++compile, run/launch hooks, stage-inspection pipelines) falls back to the
++regular path.
++"""
++
++from triton import knobs
++from triton.knobs import HookChain
++from triton.runtime.driver import driver
++from triton.runtime.jit import compute_cache_key
++
++_MISSING = object()
++
++
++def _no_hook(hook) -> bool:
++    # knobs.runtime.launch_{enter,exit}_hook: HookChain, empty unless a tool
++    # (e.g. proton) registered one.
++    return hook is None or (isinstance(hook, HookChain) and not hook.calls)
++
++
++def fast_launch(kernel, grid, *args, **kwargs):
++    runtime = knobs.runtime
++    if (
++        kernel.pre_run_hooks
++        or runtime.add_stages_inspection_hook is not None
++        or not _no_hook(runtime.launch_enter_hook)
++        or not _no_hook(runtime.launch_exit_hook)
++    ):
++        return kernel[grid](*args, **kwargs)
++
++    # Same option injection as JITFunction.run.
++    opts = dict(kwargs)
++    opts["debug"] = opts.get("debug", kernel.debug) or runtime.debug
++    opts["instrumentation_mode"] = knobs.compilation.instrumentation_mode
++
++    device = driver.active.get_current_device()
++    kernel_cache, kernel_key_cache, _, _, binder = kernel.device_caches[device]
++    bound_args, specialization, options = binder(*args, **opts)
++    compiled = kernel_cache.get(
++        compute_cache_key(kernel_key_cache, specialization, options), None
++    )
++    if compiled is None:
++        return kernel[grid](*args, **kwargs)
++
++    for (name, _), (val, globals_dict) in kernel.used_global_vals.items():
++        if globals_dict.get(name, _MISSING) != val:
++            # Let JITFunction.run raise its usual error.
++            return kernel[grid](*args, **kwargs)
++
++    if callable(grid):
++        grid = grid(bound_args)
++    grid_size = len(grid)
++    compiled.run(
++        grid[0],
++        grid[1] if grid_size > 1 else 1,
++        grid[2] if grid_size > 2 else 1,
++        driver.active.get_current_stream(device),
++        compiled.function,
++        compiled.packed_metadata,
++        None,  # launch_metadata: only read by launch hooks, none registered
++        None,
++        None,
++        *bound_args.values(),
++    )
++    return compiled
+diff -ruN -x __pycache__ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_shapes_claude/best_tree/srt/layers/moe/moe_runner/flashinfer_trtllm.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/trial_2_tree_judged/srt/layers/moe/moe_runner/flashinfer_trtllm.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_shapes_claude/best_tree/srt/layers/moe/moe_runner/flashinfer_trtllm.py	2026-09-27 00:19:33.228205256 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/trial_2_tree_judged/srt/layers/moe/moe_runner/flashinfer_trtllm.py	2026-09-28 02:16:12.647808761 -0700
+@@ -61,6 +61,9 @@
+ # FlashInfer's untuned fallback tile_N; see _mxfp4_moe_tune_context.
+ _MXFP4_MIN_TILE_N = 8
+ _mxfp4_self_tuned_buckets: set[int] = set()
++# flashinfer.tllm_enums RoutingMethodType.TopK / ActivationType.Situ.
++_MXFP4_ROUTING_TOPK = 5
++_MXFP4_ACT_SITU = 10
+ 
+ 
+ def _mxfp4_moe_tune_context(num_tokens: int, top_k: int, num_local_experts: int):
+@@ -95,6 +98,160 @@
+     return autotune(True, tuning_buckets=(bucket,))
+ 
+ 
++# Fast relaunch of the routed MXFP4 op. FlashInfer's Python wrapper rebuilds
++# its MoERunner / tuning config and re-queries the autotuner on every call
++# (~100 us of host time per layer); once the tactic of a shape is known, the
++# same C++ launch is issued directly with identical arguments.
++_mxfp4_fast_moe_op = None
++_mxfp4_fast_tactics: dict = {}
++
++
++def _mxfp4_fast_get_moe_op():
++    global _mxfp4_fast_moe_op
++    if _mxfp4_fast_moe_op is None:
++        _mxfp4_fast_moe_op = False
++        try:
++            from flashinfer.fused_moe.core import get_trtllm_moe_sm100_module
++
++            fn = get_trtllm_moe_sm100_module().trtllm_fp4_block_scale_moe
++            cells = dict(zip(fn.__code__.co_freevars, fn.__closure__ or ()))
++            op = cells["moe_op"].cell_contents
++            if callable(getattr(op, "trtllm_fp4_block_scale_moe", None)):
++                _mxfp4_fast_moe_op = op
++        except Exception:
++            logger.debug("MXFP4 fast MoE relaunch unavailable", exc_info=True)
++    return _mxfp4_fast_moe_op or None
++
++
++def _mxfp4_fast_key(tuner, routing, x_quant, x_scale, quant_info, top_k, pdl):
++    ids = routing[0] if isinstance(routing, tuple) else routing
++    w = routing[1] if isinstance(routing, tuple) else None
++    return (
++        x_quant.shape,
++        x_quant.dtype,
++        None if x_scale is None else (x_scale.shape, x_scale.dtype),
++        ids.shape,
++        None if w is None else w.dtype,
++        top_k,
++        pdl,
++        id(quant_info.w13_weight),
++        id(quant_info.w2_weight),
++        len(tuner.profiling_cache),
++        len(tuner._file_configs),
++    )
++
++
++def _mxfp4_fast_routed_moe(routing, x_quant, x_scale, quant_info, top_k, pdl, out):
++    """Relaunch trtllm_fp4_block_scale_routed_moe (TopK/SiTU, finalized) with a
++    cached tactic; returns False when the shape has no cached tactic yet."""
++    from flashinfer.autotuner import AutoTuner
++    from flashinfer.fused_moe.da_config import is_trtllm_da_enabled
++
++    tuner = AutoTuner.get()
++    if tuner.is_tuning_mode or is_trtllm_da_enabled():
++        _mxfp4_fast_tactics.clear()
++        return False
++    key = _mxfp4_fast_key(tuner, routing, x_quant, x_scale, quant_info, top_k, pdl)
++    entry = _mxfp4_fast_tactics.get(key)
++    if entry is None:
++        return False
++    moe_op, tactic, routing_mode, enable_pdl = entry
++    if isinstance(routing, tuple):
++        topk_ids, topk_weights = routing
++    else:
++        topk_ids = routing
++        # Same bf16 scratch FlashInfer allocates for packed routing.
++        topk_weights = torch.empty(
++            topk_ids.shape, dtype=torch.bfloat16, device=x_quant.device
++        )
++    moe_op.trtllm_fp4_block_scale_moe(
++        routing_mode,
++        None,  # routing_logits
++        topk_ids,
++        topk_weights,
++        None,  # routing_bias
++        x_quant,
++        x_scale,
++        quant_info.w13_weight,
++        quant_info.w13_weight_scale,
++        None,  # gemm1_bias
++        None,  # gemm1_lora_delta
++        quant_info.gemm1_alpha,
++        quant_info.gemm1_clamp_limit,  # gemm1_beta
++        None,  # gemm1_clamp_limit
++        quant_info.w2_weight,
++        quant_info.w2_weight_scale,
++        None,  # gemm2_bias
++        None,  # output1_scale_scalar
++        None,  # output1_scale_gate_scalar
++        None,  # output2_scale_scalar
++        None,  # per_token_scale
++        quant_info.global_num_experts,
++        top_k,
++        0,  # num_fused_shared_experts
++        None,  # n_group
++        None,  # topk_group
++        quant_info.intermediate_size_per_partition,
++        quant_info.local_expert_offset,
++        quant_info.local_num_experts,
++        None,  # routed_scaling_factor
++        _MXFP4_ROUTING_TOPK,
++        True,  # do_finalize
++        enable_pdl,
++        _MXFP4_ACT_SITU,
++        out,
++        [-1, -1] if tactic == -1 else tactic,
++        True,  # norm_topk_prob
++        None,  # routing_replay_out
++        [],
++        [],
++        False,
++    )
++    return True
++
++
++@contextmanager
++def _mxfp4_fast_record(routing, x_quant, x_scale, quant_info, top_k, pdl):
++    """Run the regular FlashInfer call once, recording the tactic its
++    autotuner picks so later calls of the same shape take the fast path."""
++    from flashinfer.autotuner import AutoTuner
++    from flashinfer.fused_moe.core import (
++        _device_support_moe_pdl,
++        _enabled_trtllm_da_config,
++        _split_precomputed_routing,
++    )
++
++    tuner = AutoTuner.get()
++    moe_op = _mxfp4_fast_get_moe_op()
++    # Distribution-aware tactics are picked per call; never cache those.
++    if (
++        moe_op is None
++        or tuner.is_tuning_mode
++        or "choose_one" in tuner.__dict__
++        or _enabled_trtllm_da_config() is not None
++    ):
++        yield
++        return
++    key = _mxfp4_fast_key(tuner, routing, x_quant, x_scale, quant_info, top_k, pdl)
++    orig = tuner.choose_one
++    picked = []
++
++    def spy(custom_op, *args, **kwargs):
++        res = orig(custom_op, *args, **kwargs)
++        picked.append((custom_op, res[1]))
++        return res
++
++    tuner.choose_one = spy
++    try:
++        yield
++    finally:
++        del tuner.choose_one
++    if len(picked) == 1 and picked[0][0] == _MXFP4_TUNE_OP and not tuner.is_tuning_mode:
++        _, _, routing_mode = _split_precomputed_routing(routing)
++        enable_pdl = pdl and _device_support_moe_pdl(x_quant.device)
++        _mxfp4_fast_tactics[key] = (moe_op, picked[0][1], routing_mode, enable_pdl)
++
++
+ def _flashinfer_autotune_disabled() -> bool:
+     from sglang.srt.runtime_context import get_exec
+ 
+@@ -1158,11 +1315,32 @@
+             routed_top_k = _routing_top_k(routing)
+ 
+             defer_finalize = _deferred_finalize_enabled.get()
+-            with _mxfp4_moe_tune_context(
++            enable_pdl = trtllm_moe_enable_pdl(x_quant.shape[0])
++            tune_ctx = _mxfp4_moe_tune_context(
+                 num_tokens=x_quant.shape[0],
+                 top_k=routed_top_k,
+                 num_local_experts=quant_info.local_num_experts,
++            )
++            fast_ok = (
++                not defer_finalize
++                and type(tune_ctx) is contextlib.nullcontext
++                and not torch.cuda.is_current_stream_capturing()
++            )
++            if not fast_ok:
++                _mxfp4_fast_tactics.clear()
++            elif _mxfp4_fast_routed_moe(
++                routing, x_quant, x_scale, quant_info, routed_top_k, enable_pdl,
++                symm_output,
+             ):
++                return StandardCombineInput(hidden_states=symm_output)
++            record_ctx = (
++                _mxfp4_fast_record(
++                    routing, x_quant, x_scale, quant_info, routed_top_k, enable_pdl
++                )
++                if fast_ok
++                else contextlib.nullcontext()
++            )
++            with tune_ctx, record_ctx:
+                 result = trtllm_fp4_block_scale_routed_moe(
+                     topk_ids=routing,
+                     routing_bias=None,
+@@ -1193,7 +1371,7 @@
+                     tune_max_num_tokens=next_power_of_2(x_quant.shape[0]),
+                     output=symm_output,
+                     do_finalize=not defer_finalize,
+-                    enable_pdl=trtllm_moe_enable_pdl(x_quant.shape[0]),
++                    enable_pdl=enable_pdl,
+                 )
+             if defer_finalize:
+                 gemm2_out, topk_weights, expanded_idx = result
+diff -ruN -x __pycache__ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_shapes_claude/best_tree/srt/layers/moe/topk.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/trial_2_tree_judged/srt/layers/moe/topk.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_shapes_claude/best_tree/srt/layers/moe/topk.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/trial_2_tree_judged/srt/layers/moe/topk.py	2026-09-28 02:30:50.821118312 -0700
+@@ -2174,7 +2174,11 @@
+             # Per-rank shared-slot remap later adds shared slots to the topk ID
+             # space, so keep the routed physical ids separately for statistics.
+             recorder_topk_ids = routed_cols
+-        else:
++        elif (
++            expert_location_dispatch_info is not None
++            or num_token_non_padded is not None
++        ):
++            # Identity otherwise; skip the torch.compile entry (~30 us host).
+             topk_ids = _biased_grouped_topk_postprocess(
+                 topk_ids, expert_location_dispatch_info, num_token_non_padded
+             )
+diff -ruN -x __pycache__ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_shapes_claude/best_tree/srt/models/kimi_k3.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/trial_2_tree_judged/srt/models/kimi_k3.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_shapes_claude/best_tree/srt/models/kimi_k3.py	2026-09-27 00:51:22.363142884 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/trial_2_tree_judged/srt/models/kimi_k3.py	2026-09-28 02:34:17.652927683 -0700
+@@ -181,6 +181,40 @@
+     )
+ 
+ 
++def _k3_current_stream(device_index: int) -> torch.cuda.Stream:
++    # torch.cuda.current_stream() minus its per-call device-index resolution.
++    stream_id, device_index, device_type = torch._C._cuda_getCurrentStream(
++        device_index
++    )
++    return torch.cuda.Stream(
++        stream_id=stream_id, device_index=device_index, device_type=device_type
++    )
++
++
++class _K3OnStream:
++    """torch.cuda.stream(stream) for a side stream on the current device."""
++
++    __slots__ = ("stream", "prev")
++
++    def __init__(self, stream: torch.cuda.Stream):
++        self.stream = stream
++
++    def __enter__(self):
++        stream = self.stream
++        self.prev = torch._C._cuda_getCurrentStream(stream.device_index)
++        torch._C._cuda_setStream(
++            stream_id=stream.stream_id,
++            device_index=stream.device_index,
++            device_type=stream.device_type,
++        )
++
++    def __exit__(self, *exc):
++        stream_id, device_index, device_type = self.prev
++        torch._C._cuda_setStream(
++            stream_id=stream_id, device_index=device_index, device_type=device_type
++        )
++
++
+ def _k3_bf16_gemm(
+     x: torch.Tensor,
+     weight: torch.Tensor,
+@@ -1443,9 +1477,9 @@
+                 current_stream.wait_event(shared_event)
+                 return _add3(out, shared_output, prefix_sum, prefetch_bc=True)
+             if overlap_shared:
+-                current_stream = torch.cuda.current_stream()
++                current_stream = _k3_current_stream(self.alt_stream.device_index)
+                 self.alt_stream.wait_stream(current_stream)
+-                with torch.cuda.stream(self.alt_stream):
++                with _K3OnStream(self.alt_stream):
+                     self._forward_shared(gate_up, shared_output)
+                     shared_event = self.alt_stream.record_event()
+             else:

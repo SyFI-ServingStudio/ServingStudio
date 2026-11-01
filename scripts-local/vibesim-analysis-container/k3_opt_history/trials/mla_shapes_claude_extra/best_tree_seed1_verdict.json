@@ -1,0 +1,211 @@
+{
+  "agent_container": "recheck_mla_shapes_claude_seed1",
+  "case_key": "65b939cec1ef",
+  "points": {
+    "1,1048576": {
+      "before_us": 302.3360073566437,
+      "before_sigma_us": 0.37504376877333256,
+      "after_us": 216.2880003452301,
+      "after_lat": [
+        216.38399362564087,
+        216.2880003452301,
+        216.41600131988525,
+        215.45599400997162,
+        215.45599400997162
+      ],
+      "improvement": 0.2846,
+      "noise_frac_3sigma": 0.0037,
+      "correctness": {
+        "max_abs_err": 0.0625,
+        "max_rel_err": 0.005813952947539261,
+        "mean_rel_err": 0.0015711901942268014,
+        "nan": false,
+        "rule": "max_rel_err<=tol",
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "latency_mode": "graph",
+      "primary": true,
+      "mixed": ""
+    },
+    "16,65536mix": {
+      "before_us": 294.048011302948,
+      "before_sigma_us": 0.7923076544778775,
+      "after_us": 261.4400088787079,
+      "after_lat": [
+        261.4719867706299,
+        261.4400088787079,
+        261.4400088787079,
+        261.4400088787079,
+        261.4400088787079
+      ],
+      "improvement": 0.1109,
+      "noise_frac_3sigma": 0.0081,
+      "correctness": {
+        "max_abs_err": 0.0625,
+        "max_rel_err": 0.003937007626015268,
+        "mean_rel_err": 0.001047104480676353,
+        "nan": false,
+        "rows": 16,
+        "rows_over_tol": 0,
+        "frac_rows_over_tol": 0.0,
+        "p99_row_rel_err": 0.0039370073936879635,
+        "rule": "max_rel_err<=tol",
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "latency_mode": "graph",
+      "primary": false,
+      "mixed": "mix"
+    },
+    "128,8192": {
+      "before_us": 466.2719964981079,
+      "before_sigma_us": 0.01568050374835213,
+      "after_us": 436.6079866886139,
+      "after_lat": [
+        437.6319944858551,
+        435.7120096683502,
+        438.62399458885193,
+        436.6079866886139,
+        435.7120096683502
+      ],
+      "improvement": 0.0636,
+      "noise_frac_3sigma": 0.0001,
+      "correctness": {
+        "max_abs_err": 0.125,
+        "max_rel_err": 0.008403360779605998,
+        "mean_rel_err": 0.0008808072307147086,
+        "nan": false,
+        "rows": 128,
+        "rows_over_tol": 0,
+        "frac_rows_over_tol": 0.0,
+        "p99_row_rel_err": 0.008403360843658447,
+        "rule": "max_rel_err<=tol",
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "latency_mode": "graph",
+      "primary": false,
+      "mixed": ""
+    },
+    "32,8192": {
+      "before_us": 283.80799293518066,
+      "before_sigma_us": 0.754004999886925,
+      "after_us": 267.61600375175476,
+      "after_lat": [
+        267.520010471344,
+        267.61600375175476,
+        267.64801144599915,
+        267.61600375175476,
+        267.61600375175476
+      ],
+      "improvement": 0.0571,
+      "noise_frac_3sigma": 0.008,
+      "correctness": {
+        "max_abs_err": 0.125,
+        "max_rel_err": 0.008888888256790168,
+        "mean_rel_err": 0.0018387646414339542,
+        "nan": false,
+        "rows": 32,
+        "rows_over_tol": 0,
+        "frac_rows_over_tol": 0.0,
+        "p99_row_rel_err": 0.00888888817280531,
+        "rule": "max_rel_err<=tol",
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "latency_mode": "graph",
+      "primary": false,
+      "mixed": ""
+    },
+    "1,8192": {
+      "before_us": 146.7839926481247,
+      "before_sigma_us": 1.0787351750079597,
+      "after_us": 128.35200130939484,
+      "after_lat": [
+        128.35200130939484,
+        128.35200130939484,
+        128.35200130939484,
+        128.31999361515045,
+        128.31999361515045
+      ],
+      "improvement": 0.1256,
+      "noise_frac_3sigma": 0.022,
+      "correctness": {
+        "max_abs_err": 0.0625,
+        "max_rel_err": 0.005813952947539261,
+        "mean_rel_err": 0.0015684895915910602,
+        "nan": false,
+        "rule": "max_rel_err<=tol",
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "latency_mode": "graph",
+      "primary": false,
+      "mixed": ""
+    }
+  },
+  "driver_sha": "ff88e72e3180",
+  "pristine_points": {
+    "1,1048576": {
+      "median": 302.3360073566437,
+      "sigma": 0.37504376877333256
+    },
+    "16,65536mix": {
+      "median": 294.048011302948,
+      "sigma": 0.7923076544778775
+    },
+    "128,8192": {
+      "median": 466.2719964981079,
+      "sigma": 0.01568050374835213
+    },
+    "32,8192": {
+      "median": 283.80799293518066,
+      "sigma": 0.754004999886925
+    },
+    "1,8192": {
+      "median": 146.7839926481247,
+      "sigma": 1.0787351750079597
+    }
+  },
+  "changed_files": [
+    "kernels/jit/csrc/elementwise/set_mla_kv_concat_q.cuh",
+    "kernels/jit/csrc/moe/route_quant_fused.cuh",
+    "kernels/jit/csrc/moe/route_radix.cuh",
+    "kernels/jit/csrc/kimi_k3/attn_res/cluster_small.cuh",
+    "kernels/jit/csrc/kimi_k3/attn_res/fused_tma.cuh",
+    "kernels/ops/attention/set_mla_kv_concat_q.py",
+    "kernels/ops/attention/mla_decode_tail_split.py",
+    "kernels/ops/kimi_k3/attn_res.py",
+    "kernels/ops/moe/moe_route_quant_fused.py",
+    "kernels/ops/moe/moe_finalize_rmsnorm.py",
+    "srt/models/kimi_k3.py",
+    "srt/layers/attn_residual.py",
+    "srt/layers/attention/trtllm_mla_backend.py",
+    "srt/layers/attention/cutedsl_mla_backend.py",
+    "srt/layers/moe/topk.py",
+    "srt/layers/moe/moe_runner/flashinfer_trtllm.py"
+  ],
+  "diff_patch": "/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_mla_shapes_claude/best_tree_judged.patch",
+  "diff_lines": 2537,
+  "gates": {
+    "correctness": true,
+    "latency_improved": true,
+    "no_secondary_regression": true
+  },
+  "required_improvement": 0.005,
+  "before_us": 302.3360073566437,
+  "latency_us": 216.2880003452301,
+  "recovered_frac": 0.2846,
+  "correctness": {
+    "pass": true
+  },
+  "golden_dir": "/raid/yilegu/eval_goldens/golden_k3_65b939cec1ef",
+  "verdict": "PASS",
+  "reason": "all gates passed"
+}

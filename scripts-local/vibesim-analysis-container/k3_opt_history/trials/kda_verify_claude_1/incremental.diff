@@ -1,0 +1,312 @@
+diff -ruN -x __pycache__ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_shapes_claude/best_tree/kernels/ops/attention/fla/fused_norm_gate.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/trial_1_tree_judged/kernels/ops/attention/fla/fused_norm_gate.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_shapes_claude/best_tree/kernels/ops/attention/fla/fused_norm_gate.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/trial_1_tree_judged/kernels/ops/attention/fla/fused_norm_gate.py	2026-09-27 21:20:13.771608390 -0700
+@@ -340,6 +340,20 @@
+     residual_in_fp32: bool = False,
+     eps: float = 1e-6,
+ ):
++    if not torch.is_grad_enabled():
++        # Autograd.Function.apply costs ~30us of host time per call; without
++        # grad the forward needs no ctx, so run it directly.
++        return _layer_norm_gated_forward_no_grad(
++            x=x,
++            g=g,
++            weight=weight,
++            bias=bias,
++            activation=activation,
++            residual=residual,
++            eps=eps,
++            prenorm=prenorm,
++            residual_in_fp32=residual_in_fp32,
++        )
+     return LayerNormGatedFunction.apply(
+         x,
+         g,
+@@ -354,6 +368,44 @@
+     )
+ 
+ 
++def _layer_norm_gated_forward_no_grad(
++    x: torch.Tensor,
++    g: torch.Tensor,
++    weight: torch.Tensor,
++    bias: torch.Tensor,
++    activation: str,
++    residual: torch.Tensor | None,
++    eps: float,
++    prenorm: bool,
++    residual_in_fp32: bool,
++):
++    """`LayerNormGatedFunction.forward` for RMS norm, minus the saved ctx."""
++    x_shape_og = x.shape
++    x = x.reshape(-1, x.shape[-1])
++    g = g.reshape(-1, g.shape[-1])
++    if residual is not None:
++        assert residual.shape == x_shape_og
++        residual = residual.reshape(-1, residual.shape[-1])
++    residual_dtype = (
++        residual.dtype
++        if residual is not None
++        else (torch.float if residual_in_fp32 else None)
++    )
++    y, _, _, residual_out = layer_norm_gated_fwd(
++        x=x,
++        g=g,
++        weight=weight,
++        bias=bias,
++        activation=activation,
++        eps=eps,
++        residual=residual,
++        residual_dtype=residual_dtype,
++        is_rms_norm=True,
++    )
++    y = y.reshape(x_shape_og)
++    return y if not prenorm else (y, residual_out.reshape(x_shape_og))
++
++
+ class FusedRMSNormGated(nn.Module):
+     def __init__(
+         self,
+diff -ruN -x __pycache__ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_shapes_claude/best_tree/srt/layers/moe/moe_runner/flashinfer_trtllm.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/trial_1_tree_judged/srt/layers/moe/moe_runner/flashinfer_trtllm.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_shapes_claude/best_tree/srt/layers/moe/moe_runner/flashinfer_trtllm.py	2026-09-27 00:19:33.228205256 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/trial_1_tree_judged/srt/layers/moe/moe_runner/flashinfer_trtllm.py	2026-09-27 21:20:13.771608390 -0700
+@@ -95,6 +95,173 @@
+     return autotune(True, tuning_buckets=(bucket,))
+ 
+ 
++# Shape key -> (raw FFI op, tactic, autotuner version) for the finalized routed
++# MXFP4 MoE; the tactic is a pure function of shapes/dtypes and tuner state.
++_mxfp4_routed_tactic_cache: dict[tuple, tuple] = {}
++_mxfp4_da_disabled: Optional[bool] = None
++
++
++def _mxfp4_tuner_version(tuner) -> tuple:
++    return (id(tuner), len(tuner.profiling_cache), len(tuner._file_configs))
++
++
++def _mxfp4_routed_fast_eligible(tuner) -> bool:
++    global _mxfp4_da_disabled
++    if _mxfp4_da_disabled is None:
++        from flashinfer.fused_moe.core import _enabled_trtllm_da_config
++
++        _mxfp4_da_disabled = _enabled_trtllm_da_config() is None
++    return (
++        _mxfp4_da_disabled
++        and not tuner.is_tuning_mode
++        and tuner._override_tuning_buckets is None
++        and not tuner._override_round_up
++        and _MXFP4_TUNE_OP not in tuner._effective_skip_ops
++    )
++
++
++def _raw_trtllm_fp4_moe_ffi(op):
++    """The compiled module the flashinfer op wrapper closes over as `moe_op`."""
++    cells = dict(zip(op.__code__.co_freevars, op.__closure__ or ()))
++    cell = cells.get("moe_op")
++    return None if cell is None else cell.cell_contents
++
++
++def _mxfp4_routed_moe_finalized(routing: FlashInferRouting, **kw) -> None:
++    """`trtllm_fp4_block_scale_routed_moe` with do_finalize=True, minus host cost.
++
++    The per-call MoERunner / tuning-config / choose_one lookup costs ~150us of
++    host time per layer; the tactic it returns is cached per shape key, and
++    later calls launch the same FFI op directly with that tactic.
++    """
++    from flashinfer.autotuner import AutoTuner
++    from flashinfer.fused_moe.core import _device_support_moe_pdl
++    from flashinfer.tllm_enums import RoutingInputMode
++
++    hs = kw["hidden_states"]
++    hs_scale = kw["hidden_states_scale"]
++    top_k = kw["top_k"]
++    if isinstance(routing, tuple):
++        topk_ids, topk_weights = routing
++        mode = RoutingInputMode.UnpackedPrecomputed
++        weights_key = (topk_weights.dtype, tuple(topk_weights.shape))
++    else:
++        topk_ids, topk_weights = routing, None
++        mode = RoutingInputMode.PackedPrecomputed
++        weights_key = None
++    tuner = AutoTuner.get()
++    fast = _mxfp4_routed_fast_eligible(tuner)
++    key = (
++        hs.device,
++        tuple(hs.shape),
++        hs.dtype,
++        None if hs_scale is None else (tuple(hs_scale.shape), hs_scale.dtype),
++        int(mode),
++        tuple(topk_ids.shape),
++        weights_key,
++        top_k,
++        tuple(kw["gemm1_weights"].shape),
++        tuple(kw["gemm2_weights"].shape),
++        kw["num_experts"],
++        kw["intermediate_size"],
++        kw["local_expert_offset"],
++        kw["local_num_experts"],
++        kw["enable_pdl"],
++        kw["tune_max_num_tokens"],
++        tuple(kw["output"].shape),
++    )
++    cached = _mxfp4_routed_tactic_cache.get(key) if fast else None
++    if cached is None or cached[2] != _mxfp4_tuner_version(tuner):
++        _mxfp4_routed_moe_record(routing=routing, key=key, fast=fast, kw=kw)
++        return
++    moe_op, tactic, _ = cached
++    if topk_weights is None:
++        topk_weights = torch.empty(
++            hs.shape[0], top_k, dtype=torch.bfloat16, device=hs.device
++        )
++    # Positional ABI of flashinfer's run_selected_tactic (fused_moe/core.py);
++    # the three None args are routing_logits, gemm1_lora_delta, per_token_scale.
++    moe_op.trtllm_fp4_block_scale_moe(
++        mode,
++        None,
++        topk_ids,
++        topk_weights,
++        kw["routing_bias"],
++        hs,
++        hs_scale,
++        kw["gemm1_weights"],
++        kw["gemm1_weights_scale"],
++        kw["gemm1_bias"],
++        None,
++        kw["gemm1_alpha"],
++        kw["gemm1_beta"],
++        kw["gemm1_clamp_limit"],
++        kw["gemm2_weights"],
++        kw["gemm2_weights_scale"],
++        kw["gemm2_bias"],
++        kw["output1_scale_scalar"],
++        kw["output1_scale_gate_scalar"],
++        kw["output2_scale_scalar"],
++        None,
++        kw["num_experts"],
++        top_k,
++        0,
++        kw["n_group"],
++        kw["topk_group"],
++        kw["intermediate_size"],
++        kw["local_expert_offset"],
++        kw["local_num_experts"],
++        kw["routed_scaling_factor"],
++        kw["routing_method_type"],
++        True,
++        kw["enable_pdl"] and _device_support_moe_pdl(hs.device),
++        kw["activation_type"],
++        kw["output"],
++        [-1, -1] if tactic == -1 else tactic,
++        True,
++        None,
++        [],
++        [],
++        False,
++    )
++
++
++def _mxfp4_routed_moe_record(
++    routing: FlashInferRouting, key: tuple, fast: bool, kw: dict
++) -> None:
++    """Run the public flashinfer op, capturing the tactic its tuner selects."""
++    from flashinfer.autotuner import AutoTuner
++    from flashinfer.fused_moe import trtllm_fp4_block_scale_routed_moe
++    from flashinfer.fused_moe.core import get_trtllm_moe_sm100_module
++
++    tuner = AutoTuner.get()
++    if not fast:
++        trtllm_fp4_block_scale_routed_moe(topk_ids=routing, do_finalize=True, **kw)
++        return
++    choose_one = tuner.choose_one
++    tactics = []
++
++    def _recording_choose_one(*args, **kwargs):
++        runner, tactic = choose_one(*args, **kwargs)
++        tactics.append(tactic)
++        return runner, tactic
++
++    tuner.choose_one = _recording_choose_one
++    try:
++        trtllm_fp4_block_scale_routed_moe(topk_ids=routing, do_finalize=True, **kw)
++    finally:
++        del tuner.choose_one
++    moe_op = _raw_trtllm_fp4_moe_ffi(
++        get_trtllm_moe_sm100_module().trtllm_fp4_block_scale_moe
++    )
++    if len(tactics) == 1 and moe_op is not None:
++        _mxfp4_routed_tactic_cache[key] = (
++            moe_op,
++            tactics[0],
++            _mxfp4_tuner_version(tuner),
++        )
++
++
+ def _flashinfer_autotune_disabled() -> bool:
+     from sglang.srt.runtime_context import get_exec
+ 
+@@ -1158,11 +1325,47 @@
+             routed_top_k = _routing_top_k(routing)
+ 
+             defer_finalize = _deferred_finalize_enabled.get()
+-            with _mxfp4_moe_tune_context(
++            tune_context = _mxfp4_moe_tune_context(
+                 num_tokens=x_quant.shape[0],
+                 top_k=routed_top_k,
+                 num_local_experts=quant_info.local_num_experts,
++            )
++            if not defer_finalize and isinstance(
++                tune_context, contextlib.nullcontext
+             ):
++                _mxfp4_routed_moe_finalized(
++                    routing,
++                    routing_bias=None,
++                    hidden_states=x_quant,
++                    hidden_states_scale=x_scale,
++                    gemm1_weights=quant_info.w13_weight,
++                    gemm1_weights_scale=quant_info.w13_weight_scale,
++                    gemm1_bias=None,
++                    gemm1_alpha=quant_info.gemm1_alpha,
++                    gemm1_beta=quant_info.gemm1_clamp_limit,
++                    gemm1_clamp_limit=None,
++                    gemm2_weights=quant_info.w2_weight,
++                    gemm2_weights_scale=quant_info.w2_weight_scale,
++                    gemm2_bias=None,
++                    output1_scale_scalar=None,
++                    output1_scale_gate_scalar=None,
++                    output2_scale_scalar=None,
++                    num_experts=quant_info.global_num_experts,
++                    top_k=routed_top_k,
++                    n_group=None,
++                    topk_group=None,
++                    intermediate_size=quant_info.intermediate_size_per_partition,
++                    local_expert_offset=quant_info.local_expert_offset,
++                    local_num_experts=quant_info.local_num_experts,
++                    routed_scaling_factor=None,
++                    routing_method_type=RoutingMethodType.TopK.value,
++                    activation_type=ActivationType.Situ.value,
++                    tune_max_num_tokens=next_power_of_2(x_quant.shape[0]),
++                    output=symm_output,
++                    enable_pdl=trtllm_moe_enable_pdl(x_quant.shape[0]),
++                )
++                return StandardCombineInput(hidden_states=symm_output)
++            with tune_context:
+                 result = trtllm_fp4_block_scale_routed_moe(
+                     topk_ids=routing,
+                     routing_bias=None,
+diff -ruN -x __pycache__ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_shapes_claude/best_tree/srt/layers/moe/topk.py /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/trial_1_tree_judged/srt/layers/moe/topk.py
+--- /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_shapes_claude/best_tree/srt/layers/moe/topk.py	2026-09-18 02:16:55.000000000 -0700
++++ /raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_verify_claude/trial_1_tree_judged/srt/layers/moe/topk.py	2026-09-27 21:20:13.771608390 -0700
+@@ -2174,7 +2174,12 @@
+             # Per-rank shared-slot remap later adds shared slots to the topk ID
+             # space, so keep the routed physical ids separately for statistics.
+             recorder_topk_ids = routed_cols
+-        else:
++        elif (
++            expert_location_dispatch_info is not None
++            or num_token_non_padded is not None
++        ):
++            # Both None makes the postprocess an identity; skip its ~40us
++            # torch.compile guard evaluation.
+             topk_ids = _biased_grouped_topk_postprocess(
+                 topk_ids, expert_location_dispatch_info, num_token_non_padded
+             )

@@ -1,0 +1,209 @@
+{
+  "agent_container": "iteropt_k3_kda_shapes_claude_run_2",
+  "case_key": "803971dcb8fc",
+  "points": {
+    "1,1048576": {
+      "before_us": 109.92000252008438,
+      "before_sigma_us": 0.028621888051514617,
+      "after_us": 103.80800068378448,
+      "after_lat": [
+        103.74400019645691,
+        103.80800068378448,
+        103.80800068378448,
+        103.80800068378448,
+        103.7760004401207
+      ],
+      "improvement": 0.0556,
+      "noise_frac_3sigma": 0.0008,
+      "correctness": {
+        "max_abs_err": 0.0,
+        "max_rel_err": 0.0,
+        "mean_rel_err": 0.0,
+        "nan": false,
+        "rule": "max_rel_err<=tol",
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "latency_mode": "graph",
+      "primary": true,
+      "mixed": ""
+    },
+    "16,65536": {
+      "before_us": 171.29600048065186,
+      "before_sigma_us": 0.07408334587690553,
+      "after_us": 165.24800658226013,
+      "after_lat": [
+        167.07199811935425,
+        165.21599888801575,
+        165.3759926557541,
+        165.24800658226013,
+        165.21599888801575
+      ],
+      "improvement": 0.0353,
+      "noise_frac_3sigma": 0.0013,
+      "correctness": {
+        "max_abs_err": 0.0,
+        "max_rel_err": 0.0,
+        "mean_rel_err": 0.0,
+        "nan": false,
+        "rows": 16,
+        "rows_over_tol": 0,
+        "frac_rows_over_tol": 0.0,
+        "p99_row_rel_err": 0.0,
+        "rule": "max_rel_err<=tol",
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "latency_mode": "graph",
+      "primary": false,
+      "mixed": ""
+    },
+    "128,8192": {
+      "before_us": 374.1439878940582,
+      "before_sigma_us": 0.45318335837988427,
+      "after_us": 374.1759955883026,
+      "after_lat": [
+        374.11201000213623,
+        374.33600425720215,
+        374.1759955883026,
+        374.1759955883026,
+        374.11201000213623
+      ],
+      "improvement": -0.0001,
+      "noise_frac_3sigma": 0.0036,
+      "correctness": {
+        "max_abs_err": 0.1875,
+        "max_rel_err": 0.012605041169408998,
+        "mean_rel_err": 0.0005840336671099067,
+        "nan": false,
+        "rows": 128,
+        "rows_over_tol": 0,
+        "frac_rows_over_tol": 0.0,
+        "p99_row_rel_err": 0.00917017087340355,
+        "rule": "max_rel_err<=tol",
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "latency_mode": "graph",
+      "primary": false,
+      "mixed": ""
+    },
+    "32,8192": {
+      "before_us": 232.31999576091766,
+      "before_sigma_us": 0.7188544991565888,
+      "after_us": 227.64800488948822,
+      "after_lat": [
+        227.64800488948822,
+        226.9120067358017,
+        228.06400060653687,
+        228.57600450515747,
+        227.52000391483307
+      ],
+      "improvement": 0.0201,
+      "noise_frac_3sigma": 0.0093,
+      "correctness": {
+        "max_abs_err": 0.09375,
+        "max_rel_err": 0.007177032943385038,
+        "mean_rel_err": 0.00048651406541466713,
+        "nan": false,
+        "rows": 32,
+        "rows_over_tol": 0,
+        "frac_rows_over_tol": 0.0,
+        "p99_row_rel_err": 0.007177033461630344,
+        "rule": "max_rel_err<=tol",
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "latency_mode": "graph",
+      "primary": false,
+      "mixed": ""
+    },
+    "1,8192": {
+      "before_us": 110.75200140476227,
+      "before_sigma_us": 0.7227740026730824,
+      "after_us": 111.7440015077591,
+      "after_lat": [
+        113.95200341939926,
+        107.90400207042694,
+        107.96800255775452,
+        113.95200341939926,
+        111.7440015077591
+      ],
+      "improvement": -0.009,
+      "noise_frac_3sigma": 0.0196,
+      "correctness": {
+        "max_abs_err": 0.0,
+        "max_rel_err": 0.0,
+        "mean_rel_err": 0.0,
+        "nan": false,
+        "rule": "max_rel_err<=tol",
+        "state_ok": true,
+        "rel_err_max": 0.02,
+        "pass": true
+      },
+      "latency_mode": "graph",
+      "primary": false,
+      "mixed": ""
+    }
+  },
+  "driver_sha": "ff88e72e3180",
+  "pristine_points": {
+    "1,1048576": {
+      "median": 136.63999736309052,
+      "sigma": 0.02394599338100123
+    },
+    "16,65536": {
+      "median": 200.03199577331543,
+      "sigma": 0.740850320880378
+    },
+    "128,8192": {
+      "median": 402.97600626945496,
+      "sigma": 0.39576632493404473
+    },
+    "32,8192": {
+      "median": 261.59998774528503,
+      "sigma": 0.023939622171533698
+    },
+    "1,8192": {
+      "median": 136.57599687576294,
+      "sigma": 0.7239085987640546
+    }
+  },
+  "baseline_tree": "/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_shapes_claude/best_tree",
+  "changed_files": [
+    "kernels/jit/csrc/attention/kda_fused_decode.cuh",
+    "kernels/jit/csrc/elementwise/l2_prefetch.cuh",
+    "kernels/jit/csrc/kimi_k3/attn_res/fused_tma.cuh",
+    "kernels/ops/attention/kda_fused_decode.py",
+    "kernels/ops/kimi_k3/attn_res.py",
+    "kernels/ops/elementwise/l2_prefetch.py",
+    "kernels/ops/attention/fla/fused_recurrent.py",
+    "srt/models/kimi_k3.py",
+    "srt/layers/attn_residual.py",
+    "srt/layers/attention/linear/kda_backend.py",
+    "srt/layers/moe/moe_runner/flashinfer_trtllm.py"
+  ],
+  "diff_patch": "/raid/yilegu/roofline_guided_agent/VibeSimWorkspace/scripts-local/vibesim-analysis-container/iter_opt_eval_k3_kda_shapes_claude/trial_2_tree_judged.patch",
+  "diff_lines": 1447,
+  "gates": {
+    "correctness": true,
+    "latency_improved": true,
+    "no_secondary_regression": true
+  },
+  "required_improvement": 0.005,
+  "before_us": 109.92000252008438,
+  "latency_us": 103.80800068378448,
+  "recovered_frac": 0.0556,
+  "correctness": {
+    "pass": true
+  },
+  "golden_dir": "/raid/yilegu/eval_goldens/golden_k3_803971dcb8fc",
+  "verdict": "PASS",
+  "reason": "all gates passed",
+  "trial": 2,
+  "agent_exit": 124
+}
