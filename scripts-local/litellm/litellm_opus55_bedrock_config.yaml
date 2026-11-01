@@ -1,0 +1,24 @@
+# LiteLLM proxy config: Claude Opus 5.5 via AWS Bedrock (us-east-1), OpenAI-compatible.
+# Modeled on /raid/yilegu/openclaw-local-model/scripts/litellm_opus_1m_bedrock_config.yaml
+# (the Opus 4.8 gateway on :9102). Auth is the standard AWS credential chain.
+#
+# Served by litellm 1.85.0 (openclaw-local-model/venvs/main): older 1.83.0 maps
+# reasoning_effort to the legacy thinking.type.enabled, which Opus rejects; 1.85.0
+# maps it to thinking.type.adaptive + output_config.effort.
+#
+# No master_key: binds 127.0.0.1 only, and with no db attached any non-master key
+# returns a misleading 400 "No connected db." -- any api_key value works here.
+
+model_list:
+  - model_name: claude-opus-5-5
+    litellm_params:
+      model: bedrock/us.anthropic.claude-opus-5-5
+      aws_region_name: us-east-1
+      additional_drop_params: ["temperature"]
+
+  # Bedrock-style id, same routing.
+  - model_name: us.anthropic.claude-opus-5-5
+    litellm_params:
+      model: bedrock/us.anthropic.claude-opus-5-5
+      aws_region_name: us-east-1
+      additional_drop_params: ["temperature"]
