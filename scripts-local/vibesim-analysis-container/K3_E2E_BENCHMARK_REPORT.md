@@ -5,7 +5,7 @@ of the end-to-end runs: what model was served, the exact server and client comma
 
 > **Data location.** `k3_e2e/` (bench scripts, `results/`, job logs, `fmha_launcher_ab/`) is not in git. It lives,
 > organized per PR (write-up + patch + runs + job logs), at
-> `kisnis.cs.washington.edu:/mnt/storage/yilegu/data/VibeOptimizer-kimi/` (see its `README.md`).
+> `kisnis.cs.washington.edu:/mnt/storage/yilegu/data/VibeOptimizer-kimi/e2e_pr_study/` (see its `README.md`).
 
 ## 1. Summary (revised 2026-10-15 — clean protocol)
 
