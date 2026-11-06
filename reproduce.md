@@ -1,4 +1,4 @@
-# Reproduce ServingStudio Sim
+# Set up ServingStudio
 
 This guide covers the pinned workspace, CPU application builds, and host deployment
 with Docker Agent runners. Run commands as the non-root workspace owner on Ubuntu
@@ -189,11 +189,15 @@ Optional configuration, exported before startup:
 | `VIBESIM_AGENT_PROVIDERS_FILE` | Optional absolute path override for the required provider YAML; otherwise Agent loads `providers.yaml` from its source checkout. |
 | `VIBESIM_AGENT_WORKSPACES_ROOT` | Absolute durable state directory; defaults to this workspace's `agent-workspaces/`. |
 | `VIBESIM_AGENT_MAIN_DIR` | Absolute main simulator checkout; defaults to `VIBESIM_SIM_DIR`. |
+| `VIBESIM_AGENT_WORKTREE_ROOT` | Where worktree workspaces are created; defaults to this workspace root. Unset disables them. Must not be inside `TMPDIR`, `UV_CACHE_DIR`, `~/.cargo` or `~/profile_envs`: the Codex host profile grants those, so a worktree nested in one would be writable from another worktree's turn. |
+| `VIBESIM_AGENT_HOST_ANALYZER_BASE_URL` | Analyzer URL for host turns; defaults to `http://$VIBESIM_API_BIND:$ANALYZER_PORT`. The container URL names `host.docker.internal`, which does not resolve on the host. |
+| `VIBESIM_AGENT_HOST_MANAGED_BACKEND_URL` | Agent callback URL for host turns; same reasoning. |
 | `VIBESIM_AGENT_DIR` | Agent source checkout; defaults to `ServingStudioAgent/` under this workspace. |
 | `VIBESIM_SIM_DIR` | Simulator/Analyzer source checkout; defaults to `ServingStudioSim/`. |
 | `VIBESIM_UI_DIR` | UI application directory; defaults to `ServingStudioUI/app/`. |
 | `VIBESIM_ANALYZER_BIN` | Absolute built Analyzer executable; defaults to `VIBESIM_SIM_DIR/target/release/analyze`. |
 | `VIBESIM_UI_ALLOWED_HOSTS` | Explicit hostname allowlist when accessing Vite remotely. |
+| `VIBESIM_UI_BUILD_PORT` | Port for `just preview`'s bundled UI. No default: pick a free port outside every user's three-port range. |
 
 All directory overrides must be absolute. Individual `build-analyzer`, `sync-agent`
 and `build-ui` recipes honor the selected component directories. `just build`
@@ -270,6 +274,42 @@ server and reverse-proxy `/api/agent/v1` to Agent and `/api/analyzer/v1` to
 Analyzer. Preserve streaming responses on Agent routes. Apply access control at
 that deployment boundary. `just start` is a local development stack; neither
 Vite's development server nor `vite preview` is the production static server.
+
+Over a slow link, `just preview` serves a bundled UI beside the development one:
+it runs `npm run build`, then `vite preview` on `VIBESIM_UI_BUILD_PORT` in a
+`preview` tmux session (log `tmp/ui-preview.log`), behind the same API proxies.
+The development UI loads hundreds of unbundled modules per page; the bundle is a
+few files. Rerun `just preview` to pick up UI changes; `just preview-stop` stops it.
+
+## Deploy the public site
+
+https://servingstudio.cs.washington.edu/ is ServingStudioIntro's static build on
+the CSE web server, which proxies `/api/public/v1` to ServingStudio Sim's public
+API in Docker on an internal host. The host is not recorded in this public
+repository; set it in your shell profile:
+
+```bash
+export PUBLIC_API_HOST=<ssh host>       # runs the public API container
+export PUBLIC_API_BIND=<address>        # the address the site proxies to
+export CSE_PUBLIC_API_TARGET=http://<address>:5220   # written into the site's .htaccess
+```
+
+```bash
+just deploy-public-api --no-promote  # build root ServingStudioSim's HEAD, smoke-test it on the host
+just deploy-public-api               # ... then replace the live container and check the site
+just public-api-check                # catalogs, a prediction with Read more, a short simulation
+just deploy-intro --dry-run          # build Intro and list what the sync would change
+just deploy-intro
+```
+
+`deploy-public-api` deploys a clean, pushed commit. It builds the release
+binaries here and copies them; the host needs only ssh, git, Docker and python3.
+It stages the commit in a second clone on the host and smoke-tests a loopback
+container there (`PUBLIC_API_SMOKE_PORT`, default 5228) before touching the
+live one. A failed smoke test leaves the live service as it was. The container
+reads Hugging Face offline, so the script downloads every dataset revision the
+commit pins first. The service answers about 100 s after its container starts.
+The checks run from the API host because not every host here can reach the site.
 
 ## Verify
 

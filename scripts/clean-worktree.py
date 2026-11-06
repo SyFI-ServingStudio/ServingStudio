@@ -1,6 +1,6 @@
 """Remove the regenerable bulk from a worktree before retiring it to old-wt/.
 
-    python3 scripts/clean-worktree.py WORKTREE... [--apply]
+    python3 scripts/clean-worktree.py WORKTREE... [--apply] [--remove-parquet]
 
 Without --apply it only reports what would go. It removes:
 
@@ -14,6 +14,10 @@ Without --apply it only reports what would go. It removes:
     `host_timeline.json`), which is kept.
   - nsys SQLite exports, `X.sqlite` only when `X.nsys-rep` sits beside it.
     Re-export with `nsys export --type sqlite`.
+  - With --remove-parquet only: simulator output, `*.parquet`. Rerun the
+    simulation from the run's manifest.json (binary + profile.db sha256, grid
+    yaml, traces/). reports/, summary.json and the traces are kept, so the
+    numbers survive; only the raw per-stage logs go.
 
 It keeps everything that needs a GPU or a past state to recreate: `.nsys-rep`
 captures, parsed captures and other JSON, parquet, presets, source, `profile.db`
@@ -39,7 +43,9 @@ CATEGORIES = {
     "plot": "logs: .png plots (rerun Analyzer render)",
     "analyzer-payload": "logs: Analyzer payloads/*.jsonl(.zst) (rerun Analyzer)",
     "nsys-sqlite": "logs: .sqlite beside its .nsys-rep (nsys export)",
+    "sim-parquet": "logs: simulator .parquet (rerun simulation; --remove-parquet)",
 }
+REMOVE_PARQUET = False
 MANIFEST = ".worktree-clean.tsv"
 
 
@@ -79,6 +85,8 @@ def classify(root, name, names, in_logs):
         return "analyzer-payload"
     if name.endswith(".sqlite") and name[: -len(".sqlite")] + ".nsys-rep" in names:
         return "nsys-sqlite"
+    if REMOVE_PARQUET and name.endswith(".parquet"):
+        return "sim-parquet"
     return None
 
 
@@ -154,7 +162,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("worktrees", nargs="+", help="worktree directories to clean")
     parser.add_argument("--apply", action="store_true", help="delete; without it, only report")
+    parser.add_argument(
+        "--remove-parquet",
+        action="store_true",
+        help="also remove simulator .parquet under logs/ (rerun the simulation to regenerate)",
+    )
     args = parser.parse_args()
+    global REMOVE_PARQUET
+    REMOVE_PARQUET = args.remove_parquet
 
     grand = failures = 0
     for worktree in args.worktrees:

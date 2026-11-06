@@ -8,6 +8,10 @@ fi
 set -a
 source "$workspace_root/.env"
 set +a
+# The naming key's old name may still come from a login shell; the Agent rejects
+# it as retired, so carry its value over to the current name and drop it.
+export OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-${OPENROUTE_KEY:-}}
+unset OPENROUTE_KEY
 export VIBESIM_PORT_BASE=${VIBESIM_PORT_BASE:-$((60030 + 3 * $(id -u)))}
 export UI_PORT=$VIBESIM_PORT_BASE
 export AGENT_PORT=$((UI_PORT + 1)) ANALYZER_PORT=$((UI_PORT + 2))
@@ -17,6 +21,10 @@ export VIBESIM_UI_DIR=${VIBESIM_UI_DIR:-$workspace_root/ServingStudioUI/app}
 export VIBESIM_ANALYZER_BIN=${VIBESIM_ANALYZER_BIN:-$VIBESIM_SIM_DIR/target/release/analyze}
 export VIBESIM_AGENT_MAIN_DIR=${VIBESIM_AGENT_MAIN_DIR:-$VIBESIM_SIM_DIR}
 export VIBESIM_AGENT_WORKSPACES_ROOT=${VIBESIM_AGENT_WORKSPACES_ROOT:-$workspace_root/agent-workspaces}
+# Worktree workspaces live beside the simulator checkout, not under TMPDIR or
+# the uv cache: the Codex host profile grants those directories, so a worktree
+# nested inside one would be writable from a sibling worktree's turn.
+export VIBESIM_AGENT_WORKTREE_ROOT=${VIBESIM_AGENT_WORKTREE_ROOT:-$workspace_root}
 export VIBESIM_RUNNER_IMAGE=${VIBESIM_RUNNER_IMAGE:-vibesim-agent-runner:$(id -un)}
 service_socket="$TMPDIR/vibesim-services.sock"
 

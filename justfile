@@ -117,6 +117,34 @@ services-status:
 smoke-local: check-env
     @bash "{{workspace_root}}/scripts/services.sh" smoke
 
+# Build the UI and serve the bundle on VIBESIM_UI_BUILD_PORT; rerun to pick up UI changes.
+preview: check-env
+    @bash "{{workspace_root}}/scripts/services.sh" preview
+
+preview-stop:
+    @bash "{{workspace_root}}/scripts/services.sh" preview-stop
+
 # Stop only this workspace's three service sessions.
 stop:
     @bash "{{workspace_root}}/scripts/services.sh" stop
+
+# Deploy root ServingStudioSim's HEAD as the CSE site's public API (--no-promote: smoke test only).
+deploy-public-api *args: check-env
+    @bash "{{workspace_root}}/scripts/deploy-public-api.sh" deploy {{args}}
+
+# Check the public API through the CSE site; --quick skips predict and simulate.
+public-api-check *args:
+    @bash "{{workspace_root}}/scripts/deploy-public-api.sh" check {{args}}
+
+# The public API host's containers and the live /health.
+public-api-status:
+    @bash "{{workspace_root}}/scripts/deploy-public-api.sh" status
+
+# Page views and public API use of the CSE site per UTC day (--days N, default 7).
+site-usage *args:
+    @python3 "{{workspace_root}}/scripts/site-usage.py" {{args}}
+
+# Build ServingStudioIntro and publish it to the CSE site; --dry-run lists the changes.
+deploy-intro *args: check-env
+    cd "{{workspace_root}}/ServingStudioIntro" && \
+      SERVINGSTUDIO_UI_DIR="{{workspace_root}}/ServingStudioUI" npm run deploy:cse -- {{args}}
